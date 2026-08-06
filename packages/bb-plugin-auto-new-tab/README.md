@@ -20,12 +20,15 @@ back to a fixed `thread-info` tab — the Info page. There is no setting for
 this and the plugin SDK has no workspace-tab API, so the plugin ships a
 frontend content script that drives the app's own tab strip:
 
-1. Watches the DOM for the Info tab pill becoming the active tab
+1. Confirms the workbench is already open. The collapsed panel remains mounted
+   in the DOM, so this check prevents the plugin from opening it as a side
+   effect.
+2. Watches the DOM for the Info tab pill becoming the active tab
    (`[data-testid="thread-info-tab"] button[aria-pressed="true"]`) — i.e.
    the Info page is on screen and no file tab is active.
-2. Confirms no real tab is open (file/browser/terminal/plugin tabs always
+3. Confirms no real tab is open (file/browser/terminal/plugin tabs always
    render a close button; fixed tabs don't).
-3. Clicks the panel's "Open new tab" button — the same action as pressing
+4. Clicks the panel's "Open new tab" button — the same action as pressing
    `+` in the tab strip — with a short debounce and re-validation so a fast
    user action always wins.
 
