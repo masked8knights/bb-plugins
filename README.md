@@ -15,6 +15,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
   ACP-based bb provider (`acp-omp`).
 - [`bb-plugin-prime-agent`](packages/bb-plugin-prime-agent/) — register
   Prime Agent as an ACP-based bb provider (`acp-prime-agent`).
+- [`bb-plugin-sessions`](packages/bb-plugin-sessions/) — index Codex, Claude
+  Code, and Pi (prime-agent) sessions on this machine, search them from a
+  sidebar panel, and rehydrate any session into a BB thread.
 
 ## Development
 

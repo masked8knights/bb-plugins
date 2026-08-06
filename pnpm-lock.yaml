@@ -12,6 +12,30 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
 
+  packages/bb-plugin-auto-new-tab:
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.18
+      better-sqlite3:
+        specifier: ^12.0.0
+        version: 12.11.1
+      hono:
+        specifier: ^4.11.9
+        version: 4.13.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
+
   packages/bb-plugin-ds4:
     dependencies:
       '@hugeicons/core-free-icons':
