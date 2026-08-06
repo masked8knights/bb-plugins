@@ -7,7 +7,8 @@
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "dev": "pnpm -r --if-present dev",
-    "clean": "pnpm -r --if-present clean"
+    "clean": "pnpm -r --if-present clean",
+    "plugins:install": "bash scripts/install-all.sh"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

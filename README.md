@@ -22,3 +22,18 @@ pnpm build
 ```
 
 Each package README documents its installation and runtime requirements.
+
+## Installing every plugin
+
+Install all packages as bb plugins (idempotent — safe to re-run):
+
+```sh
+pnpm plugins:install      # or: bash scripts/install-all.sh
+```
+
+This runs `bb plugin install <path> --yes` for every `packages/bb-plugin-*`
+and prints the resulting installed list. To install just one, use its path:
+
+```sh
+bb plugin install ./packages/bb-plugin-prime-agent
+```
