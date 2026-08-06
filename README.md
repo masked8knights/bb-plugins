@@ -4,6 +4,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
 
 ## Packages
 
+- [`bb-plugin-auto-new-tab`](packages/bb-plugin-auto-new-tab/) — open the
+  New Tab page automatically when the workspace panel has no tabs, instead
+  of the default Info page.
 - [`bb-plugin-ds4`](packages/bb-plugin-ds4/) — run and administer a local
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
