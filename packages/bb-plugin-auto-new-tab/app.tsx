@@ -28,23 +28,39 @@ export default definePluginApp((app) => {
       // Real tabs (file previews, browser, terminal, plugin panels) render a
       // close button on their pill; fixed tabs (Info, new-tab) do not.
       const REAL_TAB_PILL = "[data-tab-pill-close]";
+      // The panel stays mounted when collapsed, but marks its root aside as
+      // aria-hidden and inert. Scope every lookup to an open workbench so
+      // clicking the New Tab button can never be what opens the workbench.
+      const OPEN_WORKBENCH = 'aside[aria-hidden="false"]';
+
+      const getOpenWorkbench = () =>
+        Array.from(document.querySelectorAll<HTMLElement>(OPEN_WORKBENCH)).find(
+          (panel) =>
+            panel.querySelector('[data-testid="thread-secondary-panel-top-chrome"]') !==
+            null,
+        ) ?? null;
 
       let timer: number | undefined;
 
       const clickNewTabIfInfoPageShown = () => {
-        // Info page not shown → nothing to do.
-        if (!document.querySelector(INFO_TAB_PILL)) return;
+        const workbench = getOpenWorkbench();
+        // The workbench is closed, or the Info page is not shown → nothing to
+        // do. The closed panel remains mounted in the DOM, so this guard is
+        // what prevents the plugin from opening it as a side effect.
+        if (!workbench) return;
+        if (!workbench.querySelector(INFO_TAB_PILL)) return;
         // Some tab is actually open → leave the panel alone.
-        if (document.querySelector(REAL_TAB_PILL)) return;
-        const button = document.querySelector<HTMLButtonElement>(NEW_TAB_BUTTON);
+        if (workbench.querySelector(REAL_TAB_PILL)) return;
+        const button = workbench.querySelector<HTMLButtonElement>(NEW_TAB_BUTTON);
         if (!button) return;
         if (timer !== undefined) return; // already queued
         timer = window.setTimeout(() => {
           timer = undefined;
           // Re-validate right before clicking so a fast user action wins.
-          if (!document.querySelector(INFO_TAB_PILL)) return;
-          if (document.querySelector(REAL_TAB_PILL)) return;
-          document.querySelector<HTMLButtonElement>(NEW_TAB_BUTTON)?.click();
+          const currentWorkbench = getOpenWorkbench();
+          if (!currentWorkbench?.querySelector(INFO_TAB_PILL)) return;
+          if (currentWorkbench.querySelector(REAL_TAB_PILL)) return;
+          currentWorkbench.querySelector<HTMLButtonElement>(NEW_TAB_BUTTON)?.click();
         }, 300);
       };
 
@@ -53,7 +69,7 @@ export default definePluginApp((app) => {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["aria-pressed"],
+        attributeFilter: ["aria-hidden", "aria-pressed"],
       });
 
       // Panel may already be open with the Info page before we mounted.
