@@ -54,6 +54,14 @@ Deletions you make in the editor propagate to the agent's view (and vice
 versa) via tombstones; edits to the *same* element resolve by Excalidraw's
 `version` field (higher version wins).
 
+- **Theme**: the editor follows bb's active theme. Editor chrome
+  (toolbars, menus, dialogs) is re-mapped to bb's live theme tokens via
+  `assets/excalidraw-theme.css` (imported after the vendored Excalidraw CSS),
+  so it tracks the active palette — not just light/dark — and updates live on
+  theme switches. Brand-new empty drawings start on the theme's canvas color
+  (`--canvas`, resolved to hex); drawings with content keep their saved
+  background so attached images stay scene-faithful.
+
 ## How it works
 
 - Drawings are stored as serialized Excalidraw scenes (the same JSON format

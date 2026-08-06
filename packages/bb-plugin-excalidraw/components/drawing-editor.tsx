@@ -13,6 +13,9 @@ import type {
   ExcalidrawInitialDataState,
 } from "@excalidraw/excalidraw/types";
 import "../assets/excalidraw/excalidraw.css";
+// Re-maps Excalidraw's palette to bb's live theme tokens; must load after
+// the vendored css so the overrides win at equal specificity.
+import "../assets/excalidraw-theme.css";
 import {
   useComposer,
   useRealtimeConnectionState,
@@ -24,6 +27,7 @@ import { Icon } from "@/components/ui/icon";
 import {
   blobToBase64,
   parseScene,
+  resolveThemeColor,
   sanitizeAppStateForStorage,
   serializeSceneWithTombstones,
   useIsDark,
@@ -81,6 +85,19 @@ export function DrawingEditor({
           // Excalidraw on load ("collaborators.forEach is not a function").
           // Strip it to the export-safe keys Excalidraw itself persists.
           scene.appState = sanitizeAppStateForStorage(scene.appState);
+          // Brand-new drawings (empty scene, stock white canvas) start on
+          // the active bb theme's canvas color. Drawings with content keep
+          // their saved background so exports stay scene-faithful.
+          if (
+            scene.elements.length === 0 &&
+            (scene.appState.viewBackgroundColor === undefined ||
+              scene.appState.viewBackgroundColor === "#ffffff")
+          ) {
+            scene.appState = {
+              ...scene.appState,
+              viewBackgroundColor: resolveThemeColor("--canvas", "#ffffff"),
+            };
+          }
         }
         setInitialData(
           scene ? (scene as unknown as ExcalidrawInitialDataState) : null,

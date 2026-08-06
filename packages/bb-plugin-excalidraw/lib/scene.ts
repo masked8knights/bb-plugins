@@ -136,6 +136,34 @@ export function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+/**
+ * Resolve a bb theme CSS variable (--canvas, --ink, --primary, ...) to a
+ * concrete `#rrggbb` hex. bb's tokens may be hex, oklch(), or color-mix();
+ * a probe element + getComputedStyle resolves them to rgb. Used where
+ * Excalidraw needs a concrete scene color (e.g. the canvas background of
+ * new drawings) instead of a CSS variable reference.
+ */
+export function resolveThemeColor(
+  varName: string,
+  fallback = "#ffffff",
+): string {
+  if (typeof document === "undefined") return fallback;
+  const probe = document.createElement("div");
+  probe.style.backgroundColor = `var(${varName})`;
+  document.body.appendChild(probe);
+  const rgb = getComputedStyle(probe).backgroundColor;
+  probe.remove();
+  // Unresolvable variables compute to transparent black — use the fallback.
+  if (!rgb || rgb === "rgba(0, 0, 0, 0)" || rgb === "transparent") {
+    return fallback;
+  }
+  const match = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(rgb);
+  if (!match) return fallback;
+  return `#${[1, 2, 3]
+    .map((i) => Number(match[i]).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 /** Reflects the host app's light/dark mode for the Excalidraw theme prop. */
 export function useIsDark(): boolean {
   const [isDark, setIsDark] = useState(() => {
