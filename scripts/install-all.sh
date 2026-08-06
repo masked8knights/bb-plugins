@@ -19,4 +19,4 @@ done
 
 echo
 echo "Installed $ok plugin(s). Installed plugins from this repo:"
-bb plugin list 2>/dev/null | grep -E "^(ds4|excalidraw|prime-agent)@|bb-plugin" || true
+bb plugin list 2>/dev/null | grep -E "^(ds4|excalidraw|omp|prime-agent)@|bb-plugin" || true

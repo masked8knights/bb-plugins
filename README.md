@@ -8,6 +8,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
   attach Excalidraw drawings in conversations.
+- [`bb-plugin-omp`](packages/bb-plugin-omp/) — register Oh My Pi (`omp`) as an
+  ACP-based bb provider (`acp-omp`).
 - [`bb-plugin-prime-agent`](packages/bb-plugin-prime-agent/) — register
   Prime Agent as an ACP-based bb provider (`acp-prime-agent`).
 
