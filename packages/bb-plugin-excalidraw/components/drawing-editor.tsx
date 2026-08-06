@@ -7,22 +7,28 @@ import { toast } from "sonner";
 import {
   Excalidraw,
   exportToBlob,
-  serializeAsJSON,
 } from "@excalidraw/excalidraw";
 import type {
   ExcalidrawImperativeAPI,
   ExcalidrawInitialDataState,
 } from "@excalidraw/excalidraw/types";
 import "../assets/excalidraw/excalidraw.css";
-import { useComposer, useRpc } from "@bb/plugin-sdk/app";
+import {
+  useComposer,
+  useRealtimeConnectionState,
+  useRpc,
+} from "@bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import {
   blobToBase64,
   parseScene,
+  sanitizeAppStateForStorage,
+  serializeSceneWithTombstones,
   useIsDark,
 } from "../lib/scene";
+import { useDrawingSync } from "../lib/sync";
 
 export function DrawingEditor({
   drawingId,
@@ -47,6 +53,13 @@ export function DrawingEditor({
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const pendingRef = useRef<string | null>(null);
+  // Set while a scene change was caused by applying a remote (agent/other
+  // editor) update, so handleChange skips autosaving it back.
+  const applyingRemoteRef = useRef(false);
+  // Latest server revision (updated_at) — used to ignore our own writes.
+  const serverRevSetterRef = useRef<(rev: number) => void>(() => {});
+  const [syncedAt, setSyncedAt] = useState<number | null>(null);
+  const realtimeState = useRealtimeConnectionState();
 
   // Load the drawing scene once (component is keyed by drawingId).
   useEffect(() => {
@@ -62,10 +75,18 @@ export function DrawingEditor({
           return;
         }
         const scene = parseScene(drawing.data);
+        if (scene) {
+          // Scenes stored before the appState fix carry the full runtime
+          // AppState (JSON'd Maps like `collaborators: {}`), which crashes
+          // Excalidraw on load ("collaborators.forEach is not a function").
+          // Strip it to the export-safe keys Excalidraw itself persists.
+          scene.appState = sanitizeAppStateForStorage(scene.appState);
+        }
         setInitialData(
           scene ? (scene as unknown as ExcalidrawInitialDataState) : null,
         );
         loadedRef.current = true;
+        serverRevSetterRef.current(drawing.updatedAt);
         setLoading(false);
       })
       .catch((error) => {
@@ -79,6 +100,39 @@ export function DrawingEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawingId]);
 
+  // Live sync with other writers (agent edits via excalidraw_update_drawing,
+  // the CLI, or another open editor): apply remote scenes into this editor
+  // and notify when one lands. Local in-progress edits win via
+  // reconcileElements inside the hook.
+  const sync = useDrawingSync(
+    drawingId,
+    rpc as never,
+    () => {
+      const api = apiRef.current;
+      return api
+        ? {
+            getSceneElementsIncludingDeleted: () =>
+              api.getSceneElementsIncludingDeleted(),
+            getAppState: () => api.getAppState(),
+            updateScene: (opts: { elements: unknown }) =>
+              api.updateScene({ elements: opts.elements as never }),
+          }
+        : null;
+    },
+    (updatedAt) => setSyncedAt(updatedAt),
+    () => {
+      applyingRemoteRef.current = true;
+    },
+  );
+  serverRevSetterRef.current = sync.setServerRev;
+
+  // Briefly show "Synced" after a remote update lands.
+  useEffect(() => {
+    if (syncedAt === null) return;
+    const t = setTimeout(() => setSyncedAt(null), 3000);
+    return () => clearTimeout(t);
+  }, [syncedAt]);
+
   const flushSave = useCallback(() => {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -91,8 +145,11 @@ export function DrawingEditor({
     const payload = { id: drawingId, data: pending };
     saveChainRef.current = saveChainRef.current
       .then(() => rpc.call("saveDrawing", payload))
-      .then(() => {
+      .then((result) => {
         setSaving(false);
+        if (result?.ok && typeof result.updatedAt === "number") {
+          serverRevSetterRef.current(result.updatedAt);
+        }
       })
       .catch((error) => {
         setSaving(false);
@@ -131,12 +188,24 @@ export function DrawingEditor({
   const handleChange = useCallback(
     (elements: readonly unknown[], appState: unknown, files: unknown) => {
       if (!loadedRef.current) return;
+      if (applyingRemoteRef.current) {
+        // Change came from applying a remote (agent) update — the server
+        // already has that scene, so don't autosave it back (avoids write
+        // ping-pong between writers).
+        applyingRemoteRef.current = false;
+        return;
+      }
       try {
-        const serialized = serializeAsJSON(
-          elements as never,
-          appState as never,
-          files as never,
-          "local",
+        // Serialize WITH tombstones (deleted elements) so deletions propagate
+        // through the server-side merge instead of silently resurrecting.
+        const api = apiRef.current;
+        const allElements = api
+          ? [...api.getSceneElementsIncludingDeleted()]
+          : [...elements];
+        const serialized = serializeSceneWithTombstones(
+          allElements,
+          appState,
+          files,
         );
         scheduleSave(serialized);
       } catch (error) {
@@ -254,8 +323,23 @@ export function DrawingEditor({
             </Button>
           </span>
         )}
-        <span className="px-1 text-xs text-muted-foreground">
-          {saving ? "Saving…" : "Saved"}
+        <span
+          title={
+            realtimeState === "connected"
+              ? "Live — agent edits appear here automatically"
+              : "Reconnecting to live sync…"
+          }
+          className="inline-flex items-center gap-1.5 px-1 text-xs text-muted-foreground"
+        >
+          <span
+            className={
+              realtimeState === "connected"
+                ? "h-1.5 w-1.5 rounded-full bg-emerald-500"
+                : "h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500"
+            }
+            aria-hidden="true"
+          />
+          {saving ? "Saving…" : syncedAt ? "Synced" : "Saved"}
         </span>
         <div className="flex-1" />
         {threadId ? (

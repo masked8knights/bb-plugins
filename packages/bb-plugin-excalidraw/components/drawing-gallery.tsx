@@ -4,7 +4,7 @@
 // drawings can be attached to that conversation as rendered images.
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useComposer, useRpc } from "@bb/plugin-sdk/app";
+import { useComposer, useRealtime, useRpc } from "@bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
 import { blobToBase64, parseScene, renderSceneToPng } from "../lib/scene";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,12 @@ export function DrawingGallery({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Live refresh: any write to any drawing (agent tool, CLI, another open
+  // editor) reloads the gallery so thumbnails/order stay current.
+  useRealtime("excalidraw", () => {
+    void load();
+  });
 
   async function createDrawing() {
     if (creating) return;

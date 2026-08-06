@@ -15,6 +15,21 @@ import { randomUUID } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 import { mentionContext as buildMentionContext } from "./lib/mention";
+import {
+  applyElementUpserts,
+  elementCount,
+  getNonDeletedElements,
+  mergeFullScene,
+  parseSceneData,
+  serializeSceneData,
+  type SceneElement,
+  type StoredScene,
+} from "./lib/merge";
+
+/** Realtime channel: the server pushes scene updates to open editors. */
+const REALTIME_CHANNEL = "excalidraw";
+const DRAWING_UPDATE_TYPE = "drawing:updated";
+const MAX_TOOL_SCENE_CHARS = 400_000;
 
 const drawingMetaSchema = z.object({
   id: z.string(),
@@ -45,6 +60,10 @@ export const rpcContract = defineRpcContract({
   getDrawing: {
     input: z.object({ id: z.string() }),
     output: z.object({ drawing: drawingFullSchema.nullable() }),
+  },
+  getDrawingUpdatedAt: {
+    input: z.object({ id: z.string() }),
+    output: z.object({ updatedAt: z.number() }),
   },
   saveDrawing: {
     input: z.object({
@@ -88,19 +107,12 @@ type DrawingRow = {
 };
 
 function toMeta(row: DrawingRow) {
-  let elementCount = 0;
-  try {
-    const parsed = JSON.parse(row.data) as { elements?: unknown[] };
-    elementCount = Array.isArray(parsed.elements) ? parsed.elements.length : 0;
-  } catch {
-    elementCount = 0;
-  }
   return {
     id: row.id,
     name: row.name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    elementCount,
+    elementCount: elementCount(parseSceneData(row.data)),
   };
 }
 
@@ -121,6 +133,55 @@ export default async function plugin(bb: BbPluginApi) {
       | DrawingRow
       | undefined) ?? null;
 
+  /** Write a drawing row, bumping updated_at, and notify open editors. */
+  function writeDrawing(
+    row: DrawingRow,
+    data: string,
+    by: "editor" | "agent" | "cli" | "app",
+    opts: { name?: string } = {},
+  ): number {
+    const now = Date.now();
+    db.prepare(
+      "UPDATE drawings SET name = ?, data = ?, updated_at = ? WHERE id = ?",
+    ).run(opts.name ?? row.name, data, now, row.id);
+    try {
+      bb.realtime.publish(REALTIME_CHANNEL, {
+        type: DRAWING_UPDATE_TYPE,
+        drawingId: row.id,
+        updatedAt: now,
+        by,
+      });
+    } catch {
+      // publishing is best-effort; editors also poll
+    }
+    return now;
+  }
+
+  /** New empty scene in Excalidraw's file shape. */
+  function emptySceneData(): string {
+    return serializeSceneData({
+      elements: [],
+      appState: { viewBackgroundColor: "#ffffff" },
+      files: {},
+    });
+  }
+
+  /** Human-readable one-line summary of a scene (agent tool results). */
+  function sceneSummary(
+    scene: StoredScene | null,
+    fallback = "empty drawing",
+  ): string {
+    const elements = getNonDeletedElements(scene);
+    if (!elements.length) return fallback;
+    const byType = new Map<string, number>();
+    for (const el of elements) {
+      const t = typeof el.type === "string" ? el.type : "unknown";
+      byType.set(t, (byType.get(t) ?? 0) + 1);
+    }
+    const parts = [...byType.entries()].map(([t, n]) => `${n} ${t}${n > 1 ? "s" : ""}`);
+    return `${elements.length} element(s): ${parts.join(", ")}`;
+  }
+
   bb.log.info("loaded");
 
   bb.rpc.register(rpcContract, {
@@ -133,17 +194,11 @@ export default async function plugin(bb: BbPluginApi) {
     createDrawing({ name }) {
       const id = randomUUID();
       const now = Date.now();
-      const data = JSON.stringify({
-        type: "excalidraw",
-        version: 2,
-        source: `bb-plugin-excalidraw`,
-        elements: [],
-        appState: { viewBackgroundColor: "#ffffff" },
-        files: {},
-      });
+      const data = emptySceneData();
       db.prepare(
         "INSERT INTO drawings (id, name, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
       ).run(id, name, data, now, now);
+      writeDrawing(getRow(id)!, data, "app");
       return { drawing: toMeta(getRow(id)!) };
     },
     getDrawing({ id }) {
@@ -159,14 +214,22 @@ export default async function plugin(bb: BbPluginApi) {
         },
       };
     },
+    /** Cheap per-drawing revision check for the editor's polling fallback. */
+    getDrawingUpdatedAt({ id }) {
+      const row = getRow(id);
+      return { updatedAt: row?.updated_at ?? 0 };
+    },
     saveDrawing({ id, name, data }) {
       const row = getRow(id);
       if (!row) throw new Error(`Drawing ${id} not found`);
-      const now = Date.now();
-      db.prepare(
-        "UPDATE drawings SET name = ?, data = ?, updated_at = ? WHERE id = ?",
-      ).run(name ?? row.name, data, now, id);
-      return { ok: true, updatedAt: now };
+      // Multi-writer merge: element-level union, higher `version` wins,
+      // tombstones preserved — so concurrent user edits and agent writes
+      // both survive instead of last-writer-wins clobbering.
+      const merged = mergeFullScene(row.data, data);
+      const updatedAt = writeDrawing(row, serializeSceneData(merged), "editor", {
+        name,
+      });
+      return { ok: true, updatedAt };
     },
     deleteDrawing({ id }) {
       db.prepare("DELETE FROM drawings WHERE id = ?").run(id);
@@ -220,6 +283,164 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  // ---------------------------------------------------------------------
+  // Native agent tools — this is the "multiplayer" path: while the user has
+  // a drawing open in the side panel, the agent reads the live scene
+  // (excalidraw_get_drawing), edits it (excalidraw_update_drawing), and the
+  // open editor applies the change live (realtime + polling sync). Writes
+  // go through the same element-level merge as editor autosaves, so both
+  // writers' edits survive.
+  // ---------------------------------------------------------------------
+
+  const excalidrawElementSchema = z
+    .object({ id: z.string().min(1), type: z.string().min(1) })
+    .passthrough();
+
+  bb.agents.registerTool({
+    name: "excalidraw_list_drawings",
+    description:
+      "List Excalidraw drawings in the user's bb workspace (id, name, element count, last updated). Use when the user asks you to work with or edit an Excalidraw drawing.",
+    parameters: z.object({}),
+    execute() {
+      const rows = db
+        .prepare("SELECT * FROM drawings ORDER BY updated_at DESC")
+        .all() as DrawingRow[];
+      if (!rows.length) {
+        return "No Excalidraw drawings yet. Use excalidraw_create_drawing to make one.";
+      }
+      const lines = rows.map((r) => {
+        const m = toMeta(r);
+        return `- ${m.name} (id ${m.id}) — ${m.elementCount} element(s), updated ${new Date(m.updatedAt).toISOString()}`;
+      });
+      return `Excalidraw drawings:\n${lines.join("\n")}`;
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "excalidraw_get_drawing",
+    description:
+      "Read the current scene of an Excalidraw drawing: element JSON, appState, files, plus a text summary. Always call this immediately before editing so you see the user's latest changes. To edit, use excalidraw_update_drawing.",
+    parameters: z.object({ drawingId: z.string().min(1) }),
+    execute({ drawingId }) {
+      const row = getRow(drawingId);
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `Drawing ${drawingId} not found.` }],
+          isError: true,
+        };
+      }
+      const scene = parseSceneData(row.data);
+      const clean = getNonDeletedElements(scene);
+      const payload = {
+        drawing: {
+          id: row.id,
+          name: row.name,
+          elementCount: clean.length,
+          updatedAt: row.updated_at,
+          summary: sceneSummary(scene, "empty drawing"),
+        },
+        scene: {
+          type: "excalidraw",
+          version: 2,
+          elements: clean,
+          appState: scene?.appState ?? {},
+          files: scene?.files ?? {},
+        },
+      };
+      const json = JSON.stringify(payload, null, 2);
+      if (json.length > MAX_TOOL_SCENE_CHARS) {
+        const ids = clean
+          .map((el) => (typeof el.id === "string" ? el.id : "?"))
+          .join(", ");
+        return [
+          `Drawing "${row.name}" (id ${row.id}) has ${clean.length} element(s); scene JSON is ${json.length} bytes — too large to inline.`,
+          sceneSummary(scene, "empty drawing"),
+          `Element ids (in z-order):\n${ids}`,
+          `To edit, pass element ids in excalidraw_update_drawing. Raw scene: bb excalidraw show ${row.id}`,
+        ].join("\n\n");
+      }
+      return json;
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "excalidraw_create_drawing",
+    description:
+      "Create a new empty Excalidraw drawing and return its id and name. The user can open it from the Excalidraw panel.",
+    parameters: z.object({ name: z.string().min(1).max(200) }),
+    execute({ name }) {
+      const id = randomUUID();
+      const now = Date.now();
+      const data = emptySceneData();
+      db.prepare(
+        "INSERT INTO drawings (id, name, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run(id, name, data, now, now);
+      writeDrawing(getRow(id)!, data, "agent");
+      return `Created Excalidraw drawing "${name}" (id ${id}).`;
+    },
+  });
+
+  bb.agents.registerTool({
+    name: "excalidraw_update_drawing",
+    description:
+      "Edit an Excalidraw drawing the user may have open right now: upsert elements and/or delete elements by id. The user's open editor updates live. Merge is element-level: only the elements you send change, and any element you send wins (its version is bumped), so concurrent user edits to other elements are preserved. Fetch the latest scene with excalidraw_get_drawing first. Element objects must match Excalidraw's shape (id, type, x, y, width, height, strokeColor, backgroundColor, fillStyle, strokeWidth, roughness, opacity, seed, groupIds, frameId, roundness, ...) — safest to copy an existing element from excalidraw_get_drawing and change id/type/position/text. `index` (z-order) is assigned automatically when omitted. deletedElementIds removes elements for the user, not just hides them.",
+    parameters: z.object({
+      drawingId: z.string().min(1),
+      elements: z.array(excalidrawElementSchema).max(500).optional(),
+      deletedElementIds: z.array(z.string()).max(500).optional(),
+      appState: z.record(z.string(), z.unknown()).optional(),
+      files: z.record(z.string(), z.unknown()).optional(),
+    }),
+    execute({ drawingId, elements, deletedElementIds, appState, files }) {
+      const row = getRow(drawingId);
+      if (!row) {
+        return {
+          content: [{ type: "text", text: `Drawing ${drawingId} not found.` }],
+          isError: true,
+        };
+      }
+      if (
+        (!elements || elements.length === 0) &&
+        (!deletedElementIds || deletedElementIds.length === 0)
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Nothing to do: provide elements and/or deletedElementIds.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const merged = applyElementUpserts(row.data, (elements ?? []) as SceneElement[], {
+        deletedElementIds,
+        appState,
+        files,
+      });
+      const updatedAt = writeDrawing(row, serializeSceneData(merged), "agent");
+      const clean = getNonDeletedElements(merged);
+      return [
+        `Updated drawing "${row.name}" (id ${row.id}) — now ${clean.length} element(s): ${sceneSummary(merged)}.`,
+        `- upserted ${elements?.length ?? 0} element(s), deleted ${deletedElementIds?.length ?? 0} element(s)`,
+        `- saved at ${new Date(updatedAt).toISOString()}`,
+        `The user's open editor has been notified and shows the change live.`,
+      ].join("\n");
+    },
+  });
+
+  // Make the excalidraw tools available in every agent session. Static
+  // selection; tool-set changes apply on the next provider session start.
+  bb.agents.configure(() => ({
+    tools: [
+      "excalidraw_list_drawings",
+      "excalidraw_get_drawing",
+      "excalidraw_create_drawing",
+      "excalidraw_update_drawing",
+    ],
+    skills: [],
+  }));
+
   // Mention provider: `@drawing` in any composer. Pick a drawing; at send
   // time the agent receives its scene data as context.
   bb.ui.registerMentionProvider({
@@ -258,8 +479,8 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "show",
-        summary: "Show a drawing's scene JSON",
-        usage: "bb excalidraw show <id>",
+        summary: "Show a drawing's scene JSON (deleted elements filtered; use --raw for the unfiltered dump)",
+        usage: "bb excalidraw show <id> [--raw]",
       },
       {
         name: "rename",
@@ -270,6 +491,17 @@ export default async function plugin(bb: BbPluginApi) {
         name: "delete",
         summary: "Delete a drawing",
         usage: "bb excalidraw delete <id>",
+      },
+      {
+        name: "merge",
+        summary:
+          "Upsert elements into a drawing from a JSON file (elements array or full scene)",
+        usage: "bb excalidraw merge <id> <scene-file.json>",
+      },
+      {
+        name: "remove-elements",
+        summary: "Delete elements from a drawing by id",
+        usage: "bb excalidraw remove-elements <id> <element-id> [<element-id>…]",
       },
     ],
     async run(argv) {
@@ -296,37 +528,36 @@ export default async function plugin(bb: BbPluginApi) {
           }
           const id = randomUUID();
           const now = Date.now();
+          const data = emptySceneData();
           db.prepare(
             "INSERT INTO drawings (id, name, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-          ).run(
-            id,
-            name,
-            JSON.stringify({
-              type: "excalidraw",
-              version: 2,
-              source: "bb-plugin-excalidraw",
-              elements: [],
-              appState: { viewBackgroundColor: "#ffffff" },
-              files: {},
-            }),
-            now,
-            now,
-          );
+          ).run(id, name, data, now, now);
+          writeDrawing(getRow(id)!, data, "cli");
           return { exitCode: 0, stdout: `${id}\t${name}\n` };
         }
         case "show": {
-          const id = rest[0];
+          const [id, flag] = rest;
           if (!id) {
-            return { exitCode: 1, stderr: "usage: bb excalidraw show <id>\n" };
+            return { exitCode: 1, stderr: "usage: bb excalidraw show <id> [--raw]\n" };
           }
           const row = getRow(id);
           if (!row) {
             return { exitCode: 1, stderr: `Drawing ${id} not found\n` };
           }
+          // Default view filters tombstones (deleted elements) so agents and
+          // humans reason about the live drawing; --raw dumps everything.
+          const out =
+            flag === "--raw"
+              ? row.data
+              : serializeSceneData({
+                  elements: getNonDeletedElements(parseSceneData(row.data)),
+                  appState: parseSceneData(row.data)?.appState ?? {},
+                  files: parseSceneData(row.data)?.files ?? {},
+                });
           const printed =
-            row.data.length > 900_000
-              ? row.data.slice(0, 900_000) + "\n…(truncated)\n"
-              : row.data + "\n";
+            out.length > 900_000
+              ? out.slice(0, 900_000) + "\n…(truncated)\n"
+              : out + "\n";
           return { exitCode: 0, stdout: printed };
         }
         case "rename": {
@@ -355,11 +586,79 @@ export default async function plugin(bb: BbPluginApi) {
           db.prepare("DELETE FROM drawings WHERE id = ?").run(id);
           return { exitCode: 0, stdout: `deleted ${id}\n` };
         }
+        case "merge": {
+          const [id, filePath, ...extra] = rest;
+          if (!id || !filePath || extra.length) {
+            return {
+              exitCode: 1,
+              stderr: "usage: bb excalidraw merge <id> <scene-file.json>\n",
+            };
+          }
+          const row = getRow(id);
+          if (!row) {
+            return { exitCode: 1, stderr: `Drawing ${id} not found\n` };
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(
+              await (await import("node:fs/promises")).readFile(filePath, "utf8"),
+            );
+          } catch (error) {
+            return {
+              exitCode: 1,
+              stderr: `cannot read/parse ${filePath}: ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
+            };
+          }
+          const incoming =
+            Array.isArray(parsed)
+              ? parsed
+              : (parsed as { elements?: unknown[] })?.elements ?? [];
+          const upserts = incoming.filter(
+            (el): el is SceneElement =>
+              !!el &&
+              typeof el === "object" &&
+              typeof (el as SceneElement).id === "string",
+          );
+          const merged = applyElementUpserts(row.data, upserts);
+          const updatedAt = writeDrawing(row, serializeSceneData(merged), "cli");
+          return {
+            exitCode: 0,
+            stdout: `merged ${upserts.length} element(s) into ${id}; now ${elementCount(
+              merged,
+            )} element(s); updatedAt ${updatedAt}\n`,
+          };
+        }
+        case "remove-elements": {
+          const [id, ...elementIds] = rest;
+          if (!id || elementIds.length === 0) {
+            return {
+              exitCode: 1,
+              stderr:
+                "usage: bb excalidraw remove-elements <id> <element-id> [<element-id>…]\n",
+            };
+          }
+          const row = getRow(id);
+          if (!row) {
+            return { exitCode: 1, stderr: `Drawing ${id} not found\n` };
+          }
+          const merged = applyElementUpserts(row.data, [], {
+            deletedElementIds: elementIds,
+          });
+          const updatedAt = writeDrawing(row, serializeSceneData(merged), "cli");
+          return {
+            exitCode: 0,
+            stdout: `deleted ${elementIds.length} element(s) from ${id}; now ${elementCount(
+              merged,
+            )} element(s); updatedAt ${updatedAt}\n`,
+          };
+        }
         default:
           return {
             exitCode: 1,
             stderr:
-              "unknown command — try: list | create <name> | show <id> | rename <id> <name> | delete <id>\n",
+              "unknown command — try: list | create <name> | show <id> | rename <id> <name> | delete <id> | merge <id> <file> | remove-elements <id> <element-id…>\n",
           };
       }
     },

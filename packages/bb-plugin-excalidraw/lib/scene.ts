@@ -19,12 +19,72 @@ export function parseScene(data: string): StoredScene | null {
   }
 }
 
+/** Elements that are not deleted (rendering/reading surfaces). */
+export function getNonDeletedElements(scene: StoredScene | null): unknown[] {
+  return (scene?.elements ?? []).filter(
+    (el) => !(el as { isDeleted?: boolean }).isDeleted,
+  );
+}
+
+/**
+ * Serialize the live scene for storage, KEEPING deleted elements
+ * (`isDeleted: true`) as tombstones. The stock `serializeAsJSON` drops
+ * deleted elements, which would silently resurrect deletions during
+ * multi-writer merges. The server filters tombstones for rendering and
+ * reading, so the stored format stays Excalidraw-compatible.
+ */
+/**
+ * Keys Excalidraw's own save format keeps in appState (its
+ * `cleanAppStateForExport`). Everything else in the runtime AppState is
+ * transient — Maps like `collaborators`/`pointers` (which JSON-serialize to
+ * `{}` and crash Excalidraw on load with "collaborators.forEach is not a
+ * function"), caches, selection, activeTool, … — and must not be stored.
+ */
+const EXPORT_APP_STATE_KEYS = [
+  "viewBackgroundColor",
+  "gridModeEnabled",
+  "gridSize",
+  "gridStep",
+] as const;
+
+/** Keep only the export-safe appState keys (unknowns dropped). */
+export function sanitizeAppStateForStorage(
+  appState: unknown,
+): Record<string, unknown> {
+  if (!appState || typeof appState !== "object") return {};
+  const src = appState as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of EXPORT_APP_STATE_KEYS) {
+    if (src[key] !== undefined) out[key] = src[key];
+  }
+  return out;
+}
+
+export function serializeSceneWithTombstones(
+  elements: unknown[],
+  appState: unknown,
+  files: unknown,
+): string {
+  return JSON.stringify(
+    {
+      type: "excalidraw",
+      version: 2,
+      source: "bb-plugin-excalidraw",
+      elements,
+      appState: sanitizeAppStateForStorage(appState),
+      files: files ?? {},
+    },
+    null,
+    2,
+  );
+}
+
 /** Render a stored scene to a PNG blob (runs headless of the editor). */
 export async function renderSceneToPng(scene: StoredScene | null): Promise<Blob> {
   const elements = (scene?.elements ?? []).filter(
     (el) => !(el as { isDeleted?: boolean }).isDeleted,
   );
-  const appState = scene?.appState ?? {};
+  const appState = sanitizeAppStateForStorage(scene?.appState ?? {});
   const files = scene?.files ?? {};
   return exportToBlob({
     elements: elements as never,
@@ -44,7 +104,7 @@ export async function renderSceneToSvg(
   );
   return exportToSvg({
     elements: elements as never,
-    appState: (scene?.appState ?? {}) as never,
+    appState: sanitizeAppStateForStorage(scene?.appState ?? {}) as never,
     files: (scene?.files ?? null) as never,
     exportBackground: true,
     skipInliningFonts: true,
