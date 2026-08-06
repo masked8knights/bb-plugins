@@ -1,9 +1,11 @@
-// bb-plugin-ds4 — frontend: a DS4 Admin panel (status, start/stop/restart,
-// live logs, agent configs) plus quick actions on the plugin settings page.
+// bb-plugin-ds4 — frontend: a DwarfStar Admin panel (status, start/stop/
+// restart, live logs, agent configs), a thread-header status dot, and quick
+// actions on the plugin settings page.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  useBbNavigate,
   useRealtime,
   useRpc,
   useSettings,
@@ -11,6 +13,14 @@ import {
 import type { rpcContract, StatusDto } from "./server";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Card,
   CardContent,
@@ -443,11 +453,12 @@ function Dashboard() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-4 p-4 md:p-5">
+    <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+      <div className="mx-auto w-full max-w-4xl space-y-4">
       {status?.config.ds4Dir === null && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-500">
           DS4 checkout directory not found. Set it in Settings →
-          Extensions → DS4 Admin (<code>ds4Dir</code>), or clone{" "}
+          Extensions → DwarfStar (<code>ds4Dir</code>), or clone{" "}
           <code className="font-mono">github.com/antirez/ds4</code> to{" "}
           <code className="font-mono">~/workingdir/ds4</code>.
         </div>
@@ -489,7 +500,159 @@ function Dashboard() {
           </p>
         </CardContent>
       </Card>
+      </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live status indicator in the thread header action row: a DwarfStar glyph
+// tinted by server state — green ready, amber loading, red crashed, gray down.
+// ---------------------------------------------------------------------------
+
+function DwarfStarIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="none"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" />
+    </svg>
+  );
+}
+
+function DwarfStarStatusDot() {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [status, setStatus] = useState<StatusDto | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useRealtime("state", (payload) => {
+    setStatus(payload as StatusDto);
+  });
+
+  useEffect(() => {
+    const load = () => rpc.call("status").then(setStatus).catch(() => {});
+    load();
+    const iv = setInterval(load, 5000);
+    return () => clearInterval(iv);
+  }, [rpc]);
+
+  const s = status?.displayState ?? "unknown";
+  const ready = s === "ready";
+  const down = s === "stopped" || s === "exited";
+  const crashed = s === "crashed";
+  const busyState =
+    s === "starting" || s === "stopping" || s === "loading model…" || s === "running";
+  const colorClass = crashed
+    ? "text-red-500"
+    : ready
+      ? "text-emerald-500"
+      : down
+        ? "text-muted-foreground/50"
+        : "text-amber-500";
+  const label = crashed
+    ? "DwarfStar crashed"
+    : ready
+      ? "DwarfStar ready"
+      : down
+        ? "DwarfStar stopped"
+        : "DwarfStar loading…";
+
+  const running = s === "running" || s === "starting" || s === "ready" || s === "stopping";
+  const canStop = running && s !== "stopping";
+  const canRestart = s === "running" || s === "ready" || s === "loading model…";
+
+  const run = async (kind: "start" | "stop" | "restart") => {
+    setBusy(true);
+    try {
+      const st = await rpc.call(kind);
+      setStatus(st);
+      toast.success(
+        kind === "start"
+          ? "DwarfStar starting…"
+          : kind === "stop"
+            ? "DwarfStar stopped"
+            : "DwarfStar restarting…",
+      );
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={`${label} — click for controls`}
+          aria-label={label}
+          className="flex size-7 items-center justify-center rounded-md hover:bg-accent"
+        >
+          <DwarfStarIcon
+            className={`size-4 shrink-0 ${colorClass} ${busyState ? "animate-pulse" : ""}`}
+          />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuLabel className="flex items-center gap-1.5">
+          <DwarfStarIcon className={`size-3.5 shrink-0 ${colorClass}`} />
+          {label}
+        </DropdownMenuLabel>
+        {status?.health?.ok && (
+          <p className="px-2 pb-1.5 text-[11px] text-muted-foreground">
+            /v1/models ok ({status.health.latencyMs} ms) · port{" "}
+            {status.config.port}
+          </p>
+        )}
+        {status?.lastError && (
+          <p className="px-2 pb-1.5 text-[11px] text-red-500">
+            {status.lastError}
+          </p>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          disabled={running || busy}
+          onSelect={() => void run("start")}
+        >
+          Start server
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!canStop || busy}
+          onSelect={() => void run("stop")}
+        >
+          Stop server
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={!canRestart || busy}
+          onSelect={() => void run("restart")}
+        >
+          Restart server
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => navigate.toPluginPanel("dashboard")}>
+          Open DwarfStar admin
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={busy}
+          onSelect={() =>
+            rpc
+              .call("launchAgent")
+              .then(({ title }) =>
+                toast.success(`Opened "${title}" in the terminal area`),
+              )
+              .catch((err) => toast.error(String(err)))
+          }
+        >
+          Launch interactive ds4-agent
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -559,10 +722,15 @@ function SettingsActions() {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "dashboard",
-    title: "DS4 Admin",
+    title: "DwarfStar",
     icon: "Server",
     path: "dashboard",
     component: Dashboard,
+  });
+  app.slots.experimental_threadHeaderAction({
+    id: "dwarfstar-status",
+    title: "DwarfStar server status",
+    component: DwarfStarStatusDot,
   });
   app.slots.settingsSection({
     id: "actions",
