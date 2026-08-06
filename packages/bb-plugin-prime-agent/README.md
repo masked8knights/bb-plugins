@@ -14,6 +14,15 @@ bb prime-agent setup
 `customAcpAgents` entry, and reloads the running server config. Run it again
 any time to repair or refresh the integration.
 
+## Distribution
+
+Path installs are the supported route (same as the other packages in this
+repo). bb's `git:` source requires the plugin manifest at the repo root, so
+monorepo packages cannot be installed via `git:<url>`; if managed installs
+are ever needed, publish the package to npm and install with
+`bb plugin install npm:bb-plugin-prime-agent` (ship `dist/` in the npm
+tarball, not in git).
+
 ## What it does
 
 bb's plugin SDK has no provider-registration API (`bb.sdk.providers` is
