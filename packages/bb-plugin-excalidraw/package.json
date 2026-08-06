@@ -1,0 +1,36 @@
+{
+  "name": "bb-plugin-excalidraw",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.35",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "bb": {
+    "name": "Excalidraw",
+    "description": "Create and edit Excalidraw drawings, then attach them to conversations.",
+    "branding": {
+      "icon": "./assets/icon.svg"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bb plugin build ."
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "hono": "^4.11.9",
+    "sonner": "^2.0.7",
+    "typescript": "^5.7.0",
+    "zod": "^4.3.6"
+  }
+}
