@@ -4,6 +4,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
 
 ## Packages
 
+- [`bb-plugin-telemetry`](packages/bb-plugin-telemetry/) — compare
+  Codex, Claude Code, Pi, opencode, and omp sessions with native bb thread
+  telemetry and evidence-backed findings.
 - [`bb-plugin-auto-new-tab`](packages/bb-plugin-auto-new-tab/) — open the
   New Tab page automatically when the workspace panel has no tabs, instead
   of the default Info page.
