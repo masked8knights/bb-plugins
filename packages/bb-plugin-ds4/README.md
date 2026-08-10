@@ -11,6 +11,7 @@ model (see the [ds4 README](https://github.com/antirez/ds4#readme)):
 git clone https://github.com/antirez/ds4 ~/workingdir/ds4
 cd ~/workingdir/ds4 && make
 ./download_model.sh ds4f-q2      # or another target for your hardware
+./download_model.sh dspark-support
 ```
 
 ## Install
@@ -84,6 +85,9 @@ restart.
 | `kvDiskSpaceMb` | `8192` | KV cache disk budget |
 | `power` | `""` | GPU duty cycle (`--power 1..100`) |
 | `extraArgs` | `""` | Extra flags appended to the command line |
+| `dspark` | `true` | Enable DSpark speculative decoding; requires the support GGUF |
+| `dsparkSupportPath` | `""` | Absolute or DS4-relative support GGUF path; empty auto-detects `gguf/DeepSeek-V4-Flash-DSpark-support.gguf` |
+| `dsparkConfidence` | `0.9` | DSpark confidence pruning threshold (`0..1`) |
 | `autoStart` | `false` | Start the server when BB starts |
 | `restartOnCrash` | `true` | Restart after a crash (backoff) |
 | `configurePi` / `configureOpencode` / `configureCodex` | `true`/`false`/`false` | Which agent configs `bb ds4 agents apply` writes by default |
@@ -94,6 +98,12 @@ restart.
   server). The interactive **`ds4-agent`** TUI is launched into a BB terminal
   (`bb ds4 agent`) where you drive it directly — sessions save under
   `~/.ds4/kvcache` via `/save`.
+- DSpark is enabled by default for both `ds4-server` and `ds4-agent`, using
+  `--mtp <support.gguf> --dspark`. Download the support model with
+  `./download_model.sh dspark-support`; the plugin refuses to start while the
+  configured support file is missing so it cannot silently fall back to a
+  non-DSpark run. Set `dspark=false` for an explicit baseline or unsupported
+  model.
 - The plugin runs on the machine that runs the BB server (full-trust plugin
   code); it spawns the process locally and writes agent configs on the same
   host.

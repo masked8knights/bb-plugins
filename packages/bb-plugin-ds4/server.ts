@@ -54,6 +54,9 @@ const configSchema = z.object({
   ctx: z.number(),
   maxTokens: z.number(),
   backend: z.string(),
+  dspark: z.boolean(),
+  dsparkSupportPath: z.string().nullable(),
+  dsparkConfidence: z.number(),
   fingerprint: z.string(),
 });
 const statusSchema = z.object({
@@ -219,6 +222,26 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Free-form flags appended to the command line.",
       default: "",
     },
+    dspark: {
+      type: "boolean",
+      label: "Enable DSpark speculative decoding",
+      description:
+        "On by default. Requires DeepSeek-V4-Flash-DSpark-support.gguf; disable only for a baseline or unsupported model.",
+      default: true,
+    },
+    dsparkSupportPath: {
+      type: "string",
+      label: "DSpark support GGUF path",
+      description:
+        "Absolute or DS4-relative path. Empty auto-detects gguf/DeepSeek-V4-Flash-DSpark-support.gguf.",
+      default: "",
+    },
+    dsparkConfidence: {
+      type: "string",
+      label: "DSpark confidence threshold",
+      description: "0–1; the upstream default is 0.9.",
+      default: "0.9",
+    },
     autoStart: {
       type: "boolean",
       label: "Auto-start server when BB launches",
@@ -283,6 +306,9 @@ export default async function plugin(bb: BbPluginApi) {
       kvDiskSpaceMb: s.kvDiskSpaceMb ?? "8192",
       power: s.power ?? "",
       extraArgs: s.extraArgs ?? "",
+      dspark: s.dspark ?? true,
+      dsparkSupportPath: s.dsparkSupportPath ?? "",
+      dsparkConfidence: s.dsparkConfidence ?? "0.9",
       autoStart: s.autoStart ?? false,
       restartOnCrash: s.restartOnCrash ?? true,
       configurePi: s.configurePi ?? true,
@@ -293,6 +319,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function currentConfig(): Promise<ResolvedRunConfig> {
     return resolveConfig(await currentSettings());
+  }
+
+  function dsparkSupportError(cfg: ResolvedRunConfig): string | null {
+    if (!cfg.dspark) return null;
+    if (!cfg.dsparkSupportPath) {
+      return "DSpark is enabled but its support GGUF path could not be resolved. Set dsparkSupportPath or disable dspark.";
+    }
+    if (!existsSync(cfg.dsparkSupportPath)) {
+      return `DSpark support GGUF not found: ${cfg.dsparkSupportPath}. Run ./download_model.sh dspark-support or set dsparkSupportPath; disable dspark only for a baseline.`;
+    }
+    return null;
   }
 
   function deriveDisplay(state: ProcessState, cfg: ResolvedRunConfig): string {
@@ -377,6 +414,13 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (cfg.modelPath && !existsSync(cfg.modelPath)) {
       lastError = `Model not found: ${cfg.modelPath}. Download it first (./download_model.sh) or set modelPath.`;
+      bb.log.error(lastError);
+      await publishState();
+      return;
+    }
+    const dsparkError = dsparkSupportError(cfg);
+    if (dsparkError) {
+      lastError = dsparkError;
       bb.log.error(lastError);
       await publishState();
       return;
@@ -584,6 +628,8 @@ export default async function plugin(bb: BbPluginApi) {
     terminalId: string;
     title: string;
   }> {
+    const dsparkError = dsparkSupportError(cfg);
+    if (dsparkError) throw new Error(dsparkError);
     const hosts = await bb.sdk.hosts.list();
     const host = hosts.find((h) => h.status === "connected") ?? hosts[0];
     if (!host) throw new Error("No connected host available for a terminal");
@@ -881,8 +927,10 @@ function renderStatus(st: StatusDto): string {
     `port:      ${st.config.port}`,
     `ctx:       ${st.config.ctx}`,
     `max out:   ${st.config.maxTokens}`,
+    `dspark:    ${st.config.dspark ? `on (confidence ${st.config.dsparkConfidence})` : "off"}`,
     `model:     ${st.config.modelPath ?? "(none)"}`,
     `dir:       ${st.config.ds4Dir ?? "(not found)"}`,
+    `dspark GGUF: ${st.config.dsparkSupportPath ?? "(not found)"}`,
     `backend:   ${st.config.backend}`,
     `log file:  ${st.log.file}`,
   );

@@ -9,6 +9,8 @@ import { execFileSync } from "node:child_process";
 
 export type BackendChoice = "auto" | "metal" | "cuda" | "cpu";
 
+export const DEFAULT_DSPARK_SUPPORT_FILE = "DeepSeek-V4-Flash-DSpark-support.gguf";
+
 export interface RunSettings {
   ds4Dir: string;
   modelPath: string;
@@ -21,6 +23,9 @@ export interface RunSettings {
   kvDiskSpaceMb: string;
   power: string;
   extraArgs: string;
+  dspark: boolean;
+  dsparkSupportPath: string;
+  dsparkConfidence: string;
   autoStart: boolean;
   restartOnCrash: boolean;
   configurePi: boolean;
@@ -39,6 +44,10 @@ export interface ResolvedRunConfig {
   ctx: number;
   maxTokens: number;
   backend: BackendChoice;
+  dspark: boolean;
+  /** Absolute path to the DSpark support GGUF, or null when no checkout exists. */
+  dsparkSupportPath: string | null;
+  dsparkConfidence: number;
   fingerprint: string;
 }
 
@@ -93,6 +102,15 @@ export function resolveConfig(s: RunSettings): ResolvedRunConfig {
     s.backend === "metal" || s.backend === "cuda" || s.backend === "cpu"
       ? s.backend
       : "auto";
+  const dspark = s.dspark !== false;
+  const confidenceInput = s.dsparkConfidence.trim();
+  const parsedConfidence = /^[0-9]+(?:\.[0-9]+)?$/.test(confidenceInput)
+    ? Number(confidenceInput)
+    : Number.NaN;
+  const dsparkConfidence =
+    Number.isFinite(parsedConfidence) && parsedConfidence >= 0 && parsedConfidence <= 1
+      ? parsedConfidence
+      : 0.9;
 
   const modelPath = s.modelPath
     ? isAbsolute(s.modelPath)
@@ -104,6 +122,19 @@ export function resolveConfig(s: RunSettings): ResolvedRunConfig {
 
   const bin = ds4Dir ? join(ds4Dir, "ds4-server") : null;
 
+  const dsparkSupportSetting = s.dsparkSupportPath.trim();
+  const dsparkSupportPath = ds4Dir
+    ? dsparkSupportSetting
+      ? isAbsolute(dsparkSupportSetting)
+        ? dsparkSupportSetting
+        : join(ds4Dir, dsparkSupportSetting)
+      : [
+          join(ds4Dir, "gguf", DEFAULT_DSPARK_SUPPORT_FILE),
+          join(ds4Dir, DEFAULT_DSPARK_SUPPORT_FILE),
+        ].find((candidate) => existsSync(candidate)) ??
+        join(ds4Dir, "gguf", DEFAULT_DSPARK_SUPPORT_FILE)
+    : null;
+
   const args: string[] = [];
   if (modelPath) args.push("-m", modelPath);
   if (backend !== "auto") args.push(`--${backend}`);
@@ -114,6 +145,13 @@ export function resolveConfig(s: RunSettings): ResolvedRunConfig {
     args.push("--kv-disk-space-mb", String(parseInt(s.kvDiskSpaceMb, 10) || 4096));
   }
   if (s.power) args.push("--power", s.power);
+  if (dspark) {
+    if (dsparkSupportPath) args.push("--mtp", dsparkSupportPath);
+    args.push("--dspark");
+    if (dsparkConfidence !== 0.9) {
+      args.push("--dspark-confidence", String(dsparkConfidence));
+    }
+  }
   if (s.extraArgs.trim()) args.push(...splitArgs(s.extraArgs));
 
   const fingerprint = JSON.stringify({
@@ -128,6 +166,9 @@ export function resolveConfig(s: RunSettings): ResolvedRunConfig {
     kvDiskSpaceMb: s.kvDiskSpaceMb,
     power: s.power,
     extraArgs: s.extraArgs,
+    dspark,
+    dsparkSupportPath,
+    dsparkConfidence,
   });
 
   return {
@@ -140,6 +181,9 @@ export function resolveConfig(s: RunSettings): ResolvedRunConfig {
     ctx,
     maxTokens,
     backend,
+    dspark,
+    dsparkSupportPath,
+    dsparkConfidence,
     fingerprint,
   };
 }
@@ -159,6 +203,13 @@ export function agentCommand(cfg: ResolvedRunConfig): {
   if (cfg.modelPath) args.push("-m", cfg.modelPath);
   const backend = cfg.args.find((a) => a === "--metal" || a === "--cuda" || a === "--cpu");
   if (backend) args.push(backend);
+  if (cfg.dspark) {
+    if (cfg.dsparkSupportPath) args.push("--mtp", cfg.dsparkSupportPath);
+    args.push("--dspark");
+    if (cfg.dsparkConfidence !== 0.9) {
+      args.push("--dspark-confidence", String(cfg.dsparkConfidence));
+    }
+  }
   args.push("-c", String(cfg.ctx));
   return { bin, args };
 }
