@@ -40,7 +40,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   settings.onChange((next) => {
     bb.log.info(
-      `emoji reactions updated (${String(next.emojiItems ?? "").split(/[,;\n]/).filter((part) => part.trim().length > 0).length} items, quoteSelection=${String(next.quoteSelection)})`,
+      `emoji reactions updated (${String(next.emojiItems ?? "").split(/[,;\n]/).filter((part) => part.trim().length > 0).length} items, quoteSelection=${String(next.quoteSelection)}, quotePosition=${String(next.quotePosition)})`,
     );
   });
 }

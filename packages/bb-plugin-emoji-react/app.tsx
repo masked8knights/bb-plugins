@@ -36,6 +36,11 @@ import {
   serializeEmojiItems,
   type EmojiItem,
 } from "./src/emoji-items";
+import {
+  composeReactionDraft,
+  parseQuotePosition,
+  type QuotePosition,
+} from "./src/draft";
 
 const PLUGIN_ID = "emoji-react";
 
@@ -47,6 +52,7 @@ const PLUGIN_ID = "emoji-react";
 interface SettingsSnapshot {
   emojiItems: string | undefined;
   quoteSelection: boolean;
+  quotePosition: QuotePosition;
 }
 
 function readSettingsSnapshot(): SettingsSnapshot {
@@ -55,7 +61,7 @@ function readSettingsSnapshot(): SettingsSnapshot {
     xhr.open("GET", `/api/v1/plugins/${PLUGIN_ID}/settings`, false);
     xhr.send();
     if (xhr.status !== 200) {
-      return { emojiItems: undefined, quoteSelection: true };
+      return { emojiItems: undefined, quoteSelection: true, quotePosition: "before" };
     }
     const body = JSON.parse(xhr.responseText) as {
       values?: Record<string, unknown>;
@@ -65,11 +71,12 @@ function readSettingsSnapshot(): SettingsSnapshot {
       emojiItems:
         typeof values.emojiItems === "string" ? values.emojiItems : undefined,
       quoteSelection: values.quoteSelection !== false,
+      quotePosition: parseQuotePosition(values.quotePosition),
     };
   } catch {
     // Server unreachable / malformed response: fall back to defaults rather
     // than failing the whole frontend registration.
-    return { emojiItems: undefined, quoteSelection: true };
+    return { emojiItems: undefined, quoteSelection: true, quotePosition: "before" };
   }
 }
 
@@ -93,27 +100,26 @@ function ComposerBridge() {
   return null;
 }
 
-/** Draft the reaction: the quoted selection first, the reaction text below it. */
+/** Draft the reaction: quote and reaction text in the configured order. */
 function draftReaction(
   composer: PluginComposerApi,
   itemText: string,
   selectedText: string | null,
   quoteSelection: boolean,
+  quotePosition: QuotePosition,
 ): void {
-  if (
+  const quoted =
     quoteSelection &&
     selectedText !== null &&
-    selectedText.trim().length > 0
-  ) {
+    selectedText.trim().length > 0;
+  if (quoted) {
+    // `addQuote` appends the quote block to the draft; composeReactionDraft
+    // then slots the reaction text in before or after it.
     composer.addQuote(selectedText);
   }
-  // `addQuote` appends the quote block to the draft, so appending the
-  // reaction text after it yields: quote first, then the response.
-  composer.updateText((current) => {
-    const reaction = itemText.trim();
-    if (reaction.length === 0) return current;
-    return current.length > 0 ? `${current}\n\n${reaction}` : reaction;
-  });
+  composer.updateText((current) =>
+    composeReactionDraft(current, itemText, quoted, quotePosition),
+  );
   composer.focus();
 }
 
@@ -131,6 +137,9 @@ function EmojiReactionsSettings() {
   const [quoteSelection, setQuoteSelection] = useState(
     values?.quoteSelection !== false,
   );
+  const [quotePosition, setQuotePosition] = useState<QuotePosition>(
+    parseQuotePosition(values?.quotePosition),
+  );
   const [saving, setSaving] = useState(false);
 
   // Keep local state in sync when settings change elsewhere (CLI, the
@@ -142,7 +151,8 @@ function EmojiReactionsSettings() {
       ),
     );
     setQuoteSelection(values?.quoteSelection !== false);
-  }, [values?.emojiItems, values?.quoteSelection]);
+    setQuotePosition(parseQuotePosition(values?.quotePosition));
+  }, [values?.emojiItems, values?.quoteSelection, values?.quotePosition]);
 
   const updateItem = (index: number, patch: Partial<EmojiItem>) => {
     setItems((current) =>
@@ -180,7 +190,13 @@ function EmojiReactionsSettings() {
       const response = await fetch(`/api/v1/plugins/${PLUGIN_ID}/settings`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ values: { emojiItems: serializeEmojiItems(cleaned), quoteSelection } }),
+        body: JSON.stringify({
+          values: {
+            emojiItems: serializeEmojiItems(cleaned),
+            quoteSelection,
+            quotePosition,
+          },
+        }),
       });
       const body = (await response.json().catch(() => null)) as {
         ok?: boolean;
@@ -221,8 +237,9 @@ function EmojiReactionsSettings() {
         Each reaction appears as an emoji-only button in the assistant-message
         text-selection menu (the menu is a single horizontal row, so labels
         would make it too wide). Clicking one drafts a reply with the
-        highlighted text quoted first and the full reaction text — emoji +
-        label — below it. Save &amp; apply refreshes the menu immediately.
+        highlighted text quoted and the full reaction text — emoji + label —
+        in the order chosen below. Save &amp; apply refreshes the menu
+        immediately.
       </p>
       <div className="space-y-2">
         {items.map((item, index) => (
@@ -284,6 +301,20 @@ function EmojiReactionsSettings() {
           />
           Quote the highlighted text
         </label>
+        <select
+          value={quotePosition}
+          onChange={(event) =>
+            setQuotePosition(
+              event.target.value === "after" ? "after" : "before",
+            )
+          }
+          disabled={!quoteSelection}
+          aria-label="Quote position"
+          className="h-8 rounded-md border border-border bg-background px-2 text-sm text-foreground disabled:opacity-50"
+        >
+          <option value="before">Quote first</option>
+          <option value="after">Reaction first</option>
+        </select>
         <Button
           type="button"
           size="sm"
@@ -306,6 +337,7 @@ export default definePluginApp((app) => {
   const snapshot = readSettingsSnapshot();
   const items = parseEmojiItems(snapshot.emojiItems);
   const quoteSelection = snapshot.quoteSelection;
+  const quotePosition = snapshot.quotePosition;
 
   // One selection-menu action per configured reaction. The button label is
   // the emoji only (the host's selection menu is a horizontal row, so labeled
@@ -328,6 +360,7 @@ export default definePluginApp((app) => {
           item.text,
           context.selectedText ?? null,
           quoteSelection,
+          quotePosition,
         );
       },
     });

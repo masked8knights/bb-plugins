@@ -27,8 +27,11 @@ reply uses the full `emoji label` text.
   as the drafted reply text. Empty removes all reaction buttons.
   Default: `👍 Agree, 👎 Disagree, ✅ Do it, ❓ Clarify`
 - **Quote the highlighted text** (`quoteSelection`) — when enabled (default),
-  reacting drafts the highlighted text as a quote block beneath the reaction,
-  so the agent sees exactly what you reacted to.
+  reacting drafts the highlighted text as a quote block, so the agent sees
+  exactly what you reacted to.
+- **Quote position** (`quotePosition`) — where the quote goes relative to the
+  reaction text: `before` (default) drafts the quote first, then the reaction;
+  `after` drafts the reaction first, then the quote.
 
 Edit them in the plugin's settings page (the "Emoji reactions" editor, or the
 raw fields below it) or via the CLI:
@@ -36,6 +39,7 @@ raw fields below it) or via the CLI:
 ```sh
 bb plugin config emoji-react set emojiItems "👍 Agree, 👎 Disagree, ✅ Do it"
 bb plugin config emoji-react set quoteSelection true
+bb plugin config emoji-react set quotePosition before
 bb plugin reload emoji-react
 ```
 
