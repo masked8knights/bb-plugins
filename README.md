@@ -7,6 +7,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-telemetry`](packages/bb-plugin-telemetry/) — compare
   Codex, Claude Code, Pi, opencode, and omp sessions with native bb thread
   telemetry and evidence-backed findings.
+- [`bb-plugin-grove`](packages/bb-plugin-grove/) — bind Markdown documents to
+  visible owner agents, queue dictation, and shape it with SHA-protected edits.
 - [`bb-plugin-auto-new-tab`](packages/bb-plugin-auto-new-tab/) — open the
   New Tab page automatically when the workspace panel has no tabs, instead
   of the default Info page.
@@ -21,6 +23,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-sessions`](packages/bb-plugin-sessions/) — index Codex, Claude
   Code, and Pi (prime-agent) sessions on this machine, search them from a
   sidebar panel, and rehydrate any session into a BB thread.
+- [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
+  in the assistant-message text-selection menu; the reaction list is
+  configurable in plugin settings.
 
 ## Development
 

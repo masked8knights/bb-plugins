@@ -13,7 +13,10 @@ import {
 
 type JsonRecord = Record<string, unknown>;
 
-export const MAX_SOURCE_BYTES = 12 * 1024 * 1024;
+/** Whole-content reads (remote hosts) are capped; the primary host streams files line-by-line instead. */
+export const MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
+/** A single line larger than this (corrupt file) is skipped instead of parsed whole. */
+export const MAX_LINE_BYTES = 64 * 1024 * 1024;
 
 function asRecord(value: unknown): JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -160,13 +163,18 @@ function statusFor(type: string, record: JsonRecord): SessionStatus {
   const failedBlock = blocks.some((block) => Boolean(block.is_error ?? block.isError) || stringValue(block.status)?.toLowerCase().includes("fail"));
   const completedBlock = blocks.some((block) => ["tool_result", "function_call_output", "custom_tool_call_output"].includes(stringValue(block.type)?.toLowerCase() ?? ""));
   const activeBlock = blocks.some((block) => ["tool_use", "tool_call", "function_call", "custom_tool_call"].includes(stringValue(block.type)?.toLowerCase() ?? ""));
-  const explicit = stringValue(record.status, nested(record, "turn", "status"), nested(record, "payload", "status"), ...blocks.map((block) => block.status))?.toLowerCase();
+  // Pi/omp report lifecycle in `status.taskState` (agent_status) and
+  // `state.status` (session_state); omp closes sessions with a
+  // `customType: "session_exit"` event.
+  const taskState = stringValue(nested(record, "status", "taskState"))?.toLowerCase();
+  const explicit = stringValue(record.status, nested(record, "turn", "status"), nested(record, "payload", "status"), nested(record, "state", "status"), taskState, record.customType, ...blocks.map((block) => block.status))?.toLowerCase();
   if (failedBlock) return "failed";
   if (completedBlock) return "completed";
   if (activeBlock) return "active";
   if (explicit?.includes("fail") || explicit?.includes("error")) return "failed";
-  if (explicit?.includes("active") || explicit?.includes("run")) return "active";
-  if (explicit?.includes("complete") || explicit?.includes("success") || explicit === "idle") {
+  if (explicit?.includes("active") || explicit?.includes("run") || explicit?.includes("working") || explicit?.includes("busy") || explicit?.includes("in_progress")) return "active";
+  // Pi/omp end each completed turn in `needs_input` (waiting on the user).
+  if (explicit?.includes("complete") || explicit?.includes("success") || explicit?.includes("needs_input") || explicit === "idle" || explicit?.includes("exit")) {
     return "completed";
   }
   if (type.includes("error") || type.includes("fail") || type.includes("exception")) {
@@ -175,7 +183,7 @@ function statusFor(type: string, record: JsonRecord): SessionStatus {
   if (type.includes("complete") || type.includes("finish") || type.includes("stop")) {
     return "completed";
   }
-  if (type.includes("start") || type.includes("begin") || type.includes("message")) {
+  if (type.includes("start") || type.includes("begin")) {
     return "active";
   }
   return "unknown";
@@ -208,9 +216,23 @@ function modelName(record: JsonRecord): string | null {
     nested(record, "payload", "model"),
     nested(record, "payload", "modelId"),
     nested(record, "payload", "model_id"),
-    nested(record, "payload", "model_provider"),
+    nested(record, "completion", "model"),
+    nested(record, "payload", "response", "model"),
+    nested(record, "data", "model"),
+    // Not a model: payload.model_provider is an API provider name ("openai", …).
   );
 }
+
+const USAGE_KEYS = [
+  "input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input",
+  "output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output",
+  "cached_input_tokens", "cachedInputTokens", "cache_read_input_tokens", "cacheReadInputTokens", "cache_read", "cacheRead",
+  "cache_write_input_tokens", "cacheWriteInputTokens", "cache_write", "cacheWrite", "cache_creation_input_tokens",
+  "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens", "reasoning",
+  "total_tokens", "totalTokens", "total",
+  "context_used", "contextUsed", "context_tokens", "context_limit", "contextLimit",
+  "cost", "costUsd",
+];
 
 function usageObject(record: JsonRecord): JsonRecord {
   const recordPayload = payload(record);
@@ -222,11 +244,16 @@ function usageObject(record: JsonRecord): JsonRecord {
     nested(record, "message", "usage"),
     nested(record, "data", "usage"),
     nested(record, "result", "usage"),
+    nested(record, "completion", "usage"),
     nested(record, "payload", "usage"),
     nested(record, "payload", "token_usage"),
+    nested(record, "payload", "response", "usage"),
     nested(record, "payload", "info", "last_token_usage"),
     nested(record, "payload", "info", "total_token_usage"),
-    recordPayload,
+    // Last resort: usage keys directly on the record payload. Only accept the
+    // payload when it actually carries usage fields so unrelated events don't
+    // produce empty snapshots.
+    USAGE_KEYS.some((key) => key in recordPayload) ? recordPayload : undefined,
   ];
   return candidates.find((candidate) => candidate && typeof candidate === "object") as JsonRecord ?? {};
 }
@@ -247,6 +274,15 @@ function usageFrom(record: JsonRecord, sequence: number, at: number | null): Usa
     usage.cache_read_input_tokens,
     usage.cacheReadInputTokens,
     usage.cache_read,
+    usage.cacheRead,
+  );
+  const cachedWriteTokens = numberValue(
+    usage.cache_write_tokens,
+    usage.cacheWriteTokens,
+    usage.cache_write,
+    usage.cacheWrite,
+    usage.cache_creation_input_tokens,
+    usage.cacheCreationInputTokens,
   );
   const outputTokens = numberValue(
     usage.output_tokens,
@@ -282,18 +318,29 @@ function usageFrom(record: JsonRecord, sequence: number, at: number | null): Usa
     nested(record, "payload", "context_limit"),
     nested(record, "payload", "info", "model_context_window"),
   );
-  if ([inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens, contextUsed].every((value) => value === null)) {
+  // Providers that report exact per-message cost (Pi/omp `usage.cost.total`,
+  // Claude Code `completion.usage.cost` …) get it recorded directly; the
+  // price table is only a fallback for harnesses that omit cost.
+  const rawCost = usage.cost ?? usage.costUsd;
+  const costUsd =
+    typeof rawCost === "number" && Number.isFinite(rawCost) ? rawCost
+      : rawCost !== null && typeof rawCost === "object" ? numberValue((rawCost as JsonRecord).total, (rawCost as JsonRecord).cost)
+      : null;
+  if ([inputTokens, cachedInputTokens, cachedWriteTokens, outputTokens, reasoningTokens, totalTokens, contextUsed, contextLimit, costUsd].every((value) => value === null)) {
     return null;
   }
   return {
     turnId: turnId(record, "") || null,
     inputTokens,
     cachedInputTokens,
+    cachedWriteTokens,
     outputTokens,
     reasoningTokens,
     totalTokens,
     contextUsed,
     contextLimit,
+    costUsd,
+    costEstimated: costUsd !== null ? false : booleanValue(usage.estimated, record.estimated) ?? false,
     estimated: booleanValue(usage.estimated, record.estimated) ?? false,
     sourceSequence: sequence,
     at,
@@ -301,15 +348,18 @@ function usageFrom(record: JsonRecord, sequence: number, at: number | null): Usa
 }
 
 function isToolEvent(type: string, record: JsonRecord): boolean {
+  const customType = stringValue(record.customType)?.toLowerCase() ?? "";
   return (
     type.includes("tool") ||
     type.includes("function") ||
     type.includes("command") ||
+    customType.startsWith("tool") ||
     typeof record.tool_name === "string" ||
     typeof record.toolName === "string" ||
+    typeof nested(record, "data", "toolName") === "string" ||
     typeof nested(record, "tool", "name") === "string" ||
     typeof nested(record, "function", "name") === "string" ||
-    contentBlocks(record).some((block) => ["tool_use", "tool_result", "tool_call", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output"].includes(stringValue(block.type)?.toLowerCase() ?? ""))
+    contentBlocks(record).some((block) => ["tool_use", "tool_result", "tool_call", "toolcall", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output"].includes(stringValue(block.type)?.toLowerCase() ?? ""))
   );
 }
 
@@ -325,6 +375,7 @@ function toolName(record: JsonRecord): string | null {
     record.tool_name,
     record.toolName,
     record.name,
+    nested(record, "data", "toolName"),
     nested(record, "payload", "name"),
     nested(record, "payload", "toolName"),
     nested(record, "tool", "name"),
@@ -381,7 +432,7 @@ function baseSession(provider: ProviderId, hostId: string, path: string, id: str
     hostId,
     providerSessionId: id,
     bbThreadId: null,
-    title: `Untitled ${provider === "claude" ? "Claude Code" : provider} session`,
+    title: `Untitled ${providerLabel(provider)} session`,
     cwd: null,
     projectId: null,
     model: null,
@@ -396,6 +447,7 @@ function baseSession(provider: ProviderId, hostId: string, path: string, id: str
     toolErrors: 0,
     inputTokens: null,
     cachedInputTokens: null,
+    cachedWriteTokens: null,
     outputTokens: null,
     reasoningTokens: null,
     totalTokens: null,
@@ -404,8 +456,11 @@ function baseSession(provider: ProviderId, hostId: string, path: string, id: str
     failureCount: 0,
     delegatedCount: 0,
     archived: false,
+    costUsd: null,
+    costEstimated: false,
     coverage: emptyCapabilities(),
     storeLabel: fileLabel(path),
+    sourcePath: path,
     fingerprint: null,
     linkState: "none",
     findingCount: 0,
@@ -426,9 +481,13 @@ function mergeUsage(session: ProviderSessionRecord, snapshots: UsageSnapshot[]):
   };
   session.inputTokens = sum("inputTokens");
   session.cachedInputTokens = sum("cachedInputTokens");
+  session.cachedWriteTokens = sum("cachedWriteTokens");
   session.outputTokens = sum("outputTokens");
   session.reasoningTokens = sum("reasoningTokens");
   session.totalTokens = sum("totalTokens");
+  const costs = values.map((value) => value.costUsd).filter((value): value is number => typeof value === "number");
+  session.costUsd = costs.length ? costs.reduce((total, value) => total + value, 0) : null;
+  session.costEstimated = session.costUsd !== null && values.some((value) => value.costEstimated);
   const contexts = values.map(contextRatio).filter((value): value is number => typeof value === "number");
   session.contextPeak = contexts.length ? Math.max(...contexts) : null;
 }
@@ -450,16 +509,19 @@ function applyCoverage(session: ProviderSessionRecord, saw: Set<CapabilityName>)
   session.coverage.models = session.model ? "complete" : "unavailable";
 }
 
-export function parseProviderJsonl(
+export interface ProviderJsonlParser {
+  /** Feed one raw JSONL line. `index` is the 0-based line number. */
+  processLine(line: string, index: number): void;
+  /** Finalize aggregation once all lines are fed; `fingerprint` is the content hash. */
+  finish(fingerprint: string | null): ParsedProviderSession | null;
+}
+
+export function createProviderJsonlParser(
   provider: ProviderId,
   hostId: string,
   path: string,
-  content: string,
-  fingerprint: string | null,
-): ParsedProviderSession | null {
-  if (content.length > MAX_SOURCE_BYTES) return null;
+): ProviderJsonlParser {
   const fallbackId = fileLabel(path).replace(/\.jsonl$/i, "") || "unknown";
-  const lines = content.split(/\r?\n/);
   let currentSessionId = fallbackId;
   let session = baseSession(provider, hostId, path, currentSessionId);
   const turnMap = new Map<string, NormalizedTurn>();
@@ -484,10 +546,13 @@ export function parseProviderJsonl(
       toolErrors: 0,
       inputTokens: null,
       cachedInputTokens: null,
+      cachedWriteTokens: null,
       outputTokens: null,
       reasoningTokens: null,
       totalTokens: null,
       contextPeak: null,
+      costUsd: null,
+      costEstimated: false,
       sourceSequenceStart: null,
       sourceSequenceEnd: null,
     };
@@ -495,14 +560,39 @@ export function parseProviderJsonl(
     return next;
   };
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]?.trim();
-    if (!line) continue;
+  const processLine = (rawLine: string, index: number): void => {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    // Codex compaction snapshots dominate session file size (multi-MB lines
+    // carrying the compressed conversation) but telemetry only uses the event
+    // type (compaction counter) and timestamp, so read those off the line
+    // head instead of JSON.parse-ing the whole payload.
+    if (line.length > 512) {
+      const headType = /"type"\s*:\s*"([^"]+)"/.exec(line.slice(0, 512))?.[1]?.toLowerCase();
+      if (headType === "compacted") {
+        const atMatch = /"timestamp"\s*:\s*(?:"([^"]+)"|(\d+(?:\.\d+)?))/.exec(line.slice(0, 512));
+        const at = atMatch ? timestamp(atMatch[1] ?? atMatch[2]) : null;
+        if (at !== null) {
+          session.startedAt = session.startedAt === null ? at : Math.min(session.startedAt, at);
+          lastAt = lastAt === null ? at : Math.max(lastAt, at);
+          session.updatedAt = Math.max(session.updatedAt ?? at, at);
+        }
+        session.compactionCount += 1;
+        evidence.push({ source: "provider", sourceRecordId: session.id, sourceSequence: index + 1, eventType: "compacted", at });
+        return;
+      }
+    }
+
+    // A pathological single line (corrupt file) would be buffered and parsed
+    // whole; skip it rather than letting it blow up memory.
+    if (line.length > MAX_LINE_BYTES) return;
+
     let record: JsonRecord;
     try {
       record = asRecord(JSON.parse(line));
     } catch {
-      continue;
+      return;
     }
     const type = eventType(record);
     const at = eventTimestamp(record);
@@ -536,7 +626,9 @@ export function parseProviderJsonl(
     const role = stringValue(record.role, nested(record, "message", "role"), nested(record, "payload", "role"), nested(record, "payload", "message", "role"))?.toLowerCase();
     if (role === "user" || role === "assistant" || type.includes("/user_message") || type.includes("/agent_message")) session.messageCount += 1;
 
-    const isTurnEvent = type.includes("turn") || type.includes("run") || type.includes("response") || type.includes("generation") || type.includes("task_started") || type.includes("task_complete");
+    const isTurnEvent = type.includes("turn") || type.includes("run") || type.includes("response") || type.includes("generation") || type.includes("task_started") || type.includes("task_complete")
+      // Pi/omp sessions are plain message logs: each assistant message is a step.
+      || ((provider === "pi" || provider === "prime" || provider === "omp") && type === "message" && role === "assistant");
     const currentTurnId = turnId(record, "") ?? (isTurnEvent ? `line-${index + 1}` : null);
     if (isTurnEvent && currentTurnId) {
       const turn = ensureTurn(currentTurnId, at);
@@ -556,15 +648,23 @@ export function parseProviderJsonl(
     if (isToolEvent(type, record)) {
       seen.add("tools");
       const blockId = contentBlocks(record).map((block) => stringValue(block.id, block.toolUseId, block.tool_use_id, block.callId, block.call_id)).find((value): value is string => Boolean(value));
-      const id = stringValue(record.item_id, record.itemId, record.tool_call_id, record.toolCallId, nested(record, "payload", "call_id"), nested(record, "payload", "callId"), blockId, record.id) ?? `item-${index + 1}`;
+      const id = stringValue(record.item_id, record.itemId, record.tool_call_id, record.toolCallId, nested(record, "payload", "call_id"), nested(record, "payload", "callId"), nested(record, "data", "toolCallId"), blockId, record.id) ?? `item-${index + 1}`;
       const itemStatus = statusFor(type, record);
+      // Pi/omp log tool invocations without a completion event (a `toolCall`
+      // content block, or an omp `custom:tool_execution_start` record). The
+      // call demonstrably ran and no failure was recorded, so treat it as
+      // completed rather than leaving it "running" forever (failure markers
+      // are still honored via statusFor above).
+      const blockTypes = contentBlocks(record).map((block) => stringValue(block.type)?.toLowerCase() ?? "");
+      const requestOnlyTool = blockTypes.includes("toolcall")
+        || stringValue(record.customType)?.toLowerCase() === "tool_execution_start";
       const item: NormalizedItem = {
         id,
         turnId: currentTurnId,
-        kind: stringValue(nested(record, "payload", "type"), contentBlocks(record)[0]?.type, record.kind, record.type) ?? "tool",
+        kind: stringValue(record.customType, nested(record, "payload", "type"), contentBlocks(record)[0]?.type, record.kind, record.type) ?? "tool",
         toolName: toolName(record),
-        status: itemStatus === "failed" ? "failed" : itemStatus === "completed" ? "completed" : itemStatus === "active" ? "running" : "unknown",
-        durationMs: numberValue(record.durationMs, record.duration_ms),
+        status: itemStatus === "failed" ? "failed" : itemStatus === "completed" ? "completed" : requestOnlyTool ? "completed" : itemStatus === "active" ? "running" : "unknown",
+        durationMs: numberValue(record.durationMs, record.duration_ms, nested(record, "data", "durationMs")),
         errorCategory: errorCategory(record, type),
         approvalStatus: safeCategory(record.approvalStatus, record.approval_status, nested(record, "approval", "status"), ...contentBlocks(record).map((block) => block.approvalStatus ?? block.approval_status ?? nested(block, "approval", "status"))),
         sourceSequence: index + 1,
@@ -592,9 +692,12 @@ export function parseProviderJsonl(
         const turn = ensureTurn(currentTurnId, at);
         turn.inputTokens = snapshot.inputTokens;
         turn.cachedInputTokens = snapshot.cachedInputTokens;
+        turn.cachedWriteTokens = snapshot.cachedWriteTokens;
         turn.outputTokens = snapshot.outputTokens;
         turn.reasoningTokens = snapshot.reasoningTokens;
         turn.totalTokens = snapshot.totalTokens;
+        turn.costUsd = snapshot.costUsd;
+        turn.costEstimated = snapshot.costEstimated;
         turn.contextPeak = contextRatio(snapshot);
       }
     }
@@ -611,35 +714,55 @@ export function parseProviderJsonl(
       eventType: type,
       at,
     });
-  }
-
-  session.updatedAt = lastAt ?? session.updatedAt ?? session.startedAt;
-  session.turnCount = turnMap.size;
-  session.status = session.status === "unknown" && session.updatedAt ? "completed" : session.status;
-  const finalItems = [...itemMap.values()];
-  session.toolCalls = finalItems.length;
-  session.toolErrors = finalItems.filter((item) => item.status === "failed" || item.errorCategory).length;
-  session.failureCount = failureEvents;
-  for (const turn of turnMap.values()) {
-    const turnItems = finalItems.filter((item) => item.turnId === turn.id);
-    turn.toolCalls = turnItems.length;
-    turn.toolErrors = turnItems.filter((item) => item.status === "failed" || item.errorCategory).length;
-  }
-  session.durationMs = session.startedAt !== null && session.updatedAt !== null
-    ? Math.max(0, session.updatedAt - session.startedAt)
-    : null;
-  mergeUsage(session, usage);
-  applyCoverage(session, seen);
-  session.fingerprint = fingerprint;
-  if (!session.providerSessionId) return null;
-
-  return {
-    session,
-    turns: [...turnMap.values()],
-    items: [...itemMap.values()],
-    usage,
-    evidence,
   };
+
+  const finish = (fingerprint: string | null): ParsedProviderSession | null => {
+    session.updatedAt = lastAt ?? session.updatedAt ?? session.startedAt;
+    session.turnCount = turnMap.size;
+    session.status = session.status === "unknown" && session.updatedAt ? "completed" : session.status;
+    const finalItems = [...itemMap.values()];
+    session.toolCalls = finalItems.length;
+    session.toolErrors = finalItems.filter((item) => item.status === "failed" || item.errorCategory).length;
+    session.failureCount = failureEvents;
+    for (const turn of turnMap.values()) {
+      const turnItems = finalItems.filter((item) => item.turnId === turn.id);
+      turn.toolCalls = turnItems.length;
+      turn.toolErrors = turnItems.filter((item) => item.status === "failed" || item.errorCategory).length;
+    }
+    session.durationMs = session.startedAt !== null && session.updatedAt !== null
+      ? Math.max(0, session.updatedAt - session.startedAt)
+      : null;
+    mergeUsage(session, usage);
+    applyCoverage(session, seen);
+    session.fingerprint = fingerprint;
+    if (!session.providerSessionId) return null;
+
+    return {
+      session,
+      turns: [...turnMap.values()],
+      items: [...itemMap.values()],
+      usage,
+      evidence,
+    };
+  };
+
+  return { processLine, finish };
+}
+
+export function parseProviderJsonl(
+  provider: ProviderId,
+  hostId: string,
+  path: string,
+  content: string,
+  fingerprint: string | null,
+): ParsedProviderSession | null {
+  if (content.length > MAX_SOURCE_BYTES) return null;
+  const parser = createProviderJsonlParser(provider, hostId, path);
+  const lines = content.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    parser.processLine(lines[index] ?? "", index);
+  }
+  return parser.finish(fingerprint);
 }
 
 export function parseProviderMetadataSession(args: {
@@ -654,6 +777,18 @@ export function parseProviderMetadataSession(args: {
   startedAt?: number | null;
   updatedAt?: number | null;
   messageCount?: number;
+  toolCalls?: number;
+  toolErrors?: number;
+  inputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  cachedWriteTokens?: number | null;
+  outputTokens?: number | null;
+  reasoningTokens?: number | null;
+  totalTokens?: number | null;
+  costUsd?: number | null;
+  costEstimated?: boolean;
+  status?: SessionStatus;
+  archived?: boolean;
   fingerprint?: string | null;
 }): ParsedProviderSession {
   const session = baseSession(args.provider, args.hostId, args.path, args.providerSessionId);
@@ -664,13 +799,30 @@ export function parseProviderMetadataSession(args: {
   session.startedAt = args.startedAt ?? null;
   session.updatedAt = args.updatedAt ?? args.startedAt ?? null;
   session.messageCount = args.messageCount ?? 0;
-  session.status = session.updatedAt ? "completed" : "unknown";
+  session.toolCalls = args.toolCalls ?? 0;
+  session.toolErrors = args.toolErrors ?? 0;
+  session.inputTokens = args.inputTokens ?? null;
+  session.cachedInputTokens = args.cachedInputTokens ?? null;
+  session.cachedWriteTokens = args.cachedWriteTokens ?? null;
+  session.outputTokens = args.outputTokens ?? null;
+  session.reasoningTokens = args.reasoningTokens ?? null;
+  session.totalTokens = args.totalTokens ?? null;
+  session.costUsd = args.costUsd ?? null;
+  session.costEstimated = args.costEstimated ?? false;
+  session.archived = args.archived ?? false;
+  session.status = args.status ?? (session.updatedAt ? "completed" : "unknown");
   session.coverage.metadata = "complete";
   session.coverage.models = session.model ? "complete" : "unavailable";
+  session.coverage.tokens = [session.inputTokens, session.cachedInputTokens, session.cachedWriteTokens, session.outputTokens, session.reasoningTokens, session.totalTokens]
+    .some((value) => value !== null) ? "complete" : "unavailable";
+  session.coverage.tools = session.toolCalls > 0 ? "complete" : "unavailable";
   session.fingerprint = args.fingerprint ?? null;
   return { session, turns: [], items: [], usage: [], evidence: [] };
 }
 
 export function providerLabel(provider: ProviderId): string {
-  return provider === "claude" ? "Claude Code" : provider === "prime" ? "Pi / Prime Agent" : provider;
+  if (provider === "claude") return "Claude Code";
+  if (provider === "pi") return "Pi";
+  if (provider === "prime") return "Prime Agent";
+  return provider;
 }

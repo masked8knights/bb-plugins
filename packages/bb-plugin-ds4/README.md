@@ -23,13 +23,13 @@ bb plugin build      # optional: precompile the frontend
 
 ## What you get
 
-- **DwarfStar panel** (sidebar → DwarfStar): live status + health, Start /
-  Stop / Restart buttons, streaming process log (with follow / clear), agent
-  connection manager, and a one-click "launch interactive ds4-agent in a BB
-  terminal".
+- **DwarfStar settings** (Settings → Plugins → DwarfStar): configuration,
+  live status + health, Start / Stop / Restart buttons, streaming process log
+  (with follow / clear), agent connection manager, and a one-click "launch
+  interactive ds4-agent in a BB terminal".
 - **Thread-header status dot**: every thread's header shows a live DwarfStar
   indicator (green = ready, amber pulsing = loading/starting, gray = stopped,
-  red = crashed). Click it to jump to the admin panel.
+  red = crashed). Click it for quick Start / Stop / Restart controls.
 - **`bb ds4` CLI**:
   - `bb ds4 status` — state, pid, uptime, health, served models
   - `bb ds4 start | stop | restart`

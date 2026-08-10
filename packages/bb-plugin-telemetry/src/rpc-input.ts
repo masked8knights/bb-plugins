@@ -2,6 +2,7 @@ import type { DashboardInput } from "./types";
 
 export interface ReindexInput {
   full: boolean;
+  clear?: boolean;
   providers?: string[];
   hostId?: string;
 }

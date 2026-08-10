@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BbPluginApi } from "@bb/plugin-sdk";
 import { defaultSettings } from "./source-registry";
@@ -66,104 +66,177 @@ describe("telemetry source host resolution", () => {
   });
 
   it("surfaces truncated JSONL listings as partial scans", async () => {
-    const bb = {
-      sdk: {
-        files: {
-          listPaths: vi.fn(async () => ({
-            paths: [{ kind: "file", path: "/tmp/codex.jsonl" }],
-            truncated: true,
-          })),
-          read: vi.fn(async () => ({
-            content: '{"type":"session","session_id":"session-1","timestamp":1760000000000}',
-            contentEncoding: "utf8" as const,
-            sha256: "fingerprint-1",
-          })),
+    const root = mkdtempSync(join("/tmp", "telemetry-truncated-"));
+    try {
+      const sessionPath = join(root, "codex.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","session_id":"session-1","timestamp":1760000000000}');
+      const bb = {
+        sdk: {
+          files: {
+            listPaths: vi.fn(async () => ({
+              paths: [{ kind: "file", path: sessionPath }],
+              truncated: true,
+            })),
+          },
         },
-      },
-    } as unknown as BbPluginApi;
+      } as unknown as BbPluginApi;
 
-    const result = await scanProviderSource(
-      bb,
-      defaultSettings(),
-      "codex",
-      { id: "primary", name: "Primary host", homePath: "/tmp", connected: true },
-    );
+      const result = await scanProviderSource(
+        bb,
+        defaultSettings(),
+        "codex",
+        { id: "primary", name: "Primary host", homePath: root, connected: true },
+      );
 
-    expect(result.truncated).toBe(true);
-    expect(result.warning).toMatch(/truncated/u);
-    expect(result.records).toHaveLength(1);
+      expect(result.truncated).toBe(true);
+      expect(result.warning).toMatch(/truncated/u);
+      expect(result.records).toHaveLength(1);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   it("includes archived Codex sessions and marks them archived", async () => {
-    const listPaths = vi.fn(async ({ path }: { path: string }) => ({
-      paths: [{
-        kind: "file" as const,
-        path: path.includes("archived_sessions")
-          ? `${path}/archived.jsonl`
-          : `${path}/regular.jsonl`,
-      }],
-      truncated: false,
-    }));
-    const read = vi.fn(async ({ path }: { path: string }) => ({
-      content: JSON.stringify({
-        type: "session",
-        session_id: path.includes("archived_sessions") ? "archived-1" : "regular-1",
-        timestamp: "2026-08-07T21:00:00Z",
-      }),
-      contentEncoding: "utf8" as const,
-      sha256: path,
-    }));
+    const root = mkdtempSync(join("/tmp", "telemetry-archived-"));
+    try {
+      const sessionsDir = join(root, ".codex", "sessions");
+      const archiveDir = join(root, ".codex", "archived_sessions");
+      mkdirSync(sessionsDir, { recursive: true });
+      mkdirSync(archiveDir, { recursive: true });
+      writeFileSync(join(sessionsDir, "regular.jsonl"), '{"type":"session","session_id":"regular-1","timestamp":"2026-08-07T21:00:00Z"}');
+      writeFileSync(join(archiveDir, "archived.jsonl"), '{"type":"session","session_id":"archived-1","timestamp":"2026-08-07T21:00:00Z"}');
+      const listPaths = vi.fn(async ({ path }: { path: string }) => ({
+        paths: [{
+          kind: "file" as const,
+          path: path.includes("archived_sessions")
+            ? join(archiveDir, "archived.jsonl")
+            : join(sessionsDir, "regular.jsonl"),
+        }],
+        truncated: false,
+      }));
+      const bb = {
+        sdk: { files: { listPaths } },
+      } as unknown as BbPluginApi;
+
+      const result = await scanProviderSource(
+        bb,
+        defaultSettings(),
+        "codex",
+        { id: "primary", name: "Primary host", homePath: root, connected: true },
+      );
+
+      expect(listPaths).toHaveBeenCalledTimes(2);
+      expect(result.records).toHaveLength(2);
+      expect(result.records.find((record) => record.session.providerSessionId === "archived-1")?.session.archived).toBe(true);
+      expect(result.records.find((record) => record.session.providerSessionId === "regular-1")?.session.archived).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("excludes CodexBar sessions by path and working directory", async () => {
+    const root = mkdtempSync(join("/tmp", "telemetry-codexbar-"));
+    try {
+      const sessionsDir = join(root, ".claude", "projects");
+      mkdirSync(sessionsDir, { recursive: true });
+      writeFileSync(join(sessionsDir, "session.jsonl"), '{"type":"session_meta","timestamp":"2026-08-07T21:00:00Z","payload":{"id":"session-path"}}');
+      writeFileSync(join(sessionsDir, "cwd-marker.jsonl"), '{"type":"session_meta","timestamp":"2026-08-07T21:00:00Z","payload":{"id":"session-cwd","cwd":"/Users/patrick/Library/Application Support/CodexBar/ClaudeProbe"}}');
+      const bb = {
+        sdk: {
+          files: {
+            listPaths: vi.fn(async () => ({
+              paths: [
+                { kind: "file" as const, path: join(root, "CodexBar", "ClaudeProbe", "session.jsonl") },
+                { kind: "file" as const, path: join(sessionsDir, "cwd-marker.jsonl") },
+              ],
+              truncated: false,
+            })),
+          },
+        },
+      } as unknown as BbPluginApi;
+
+      const result = await scanProviderSource(
+        bb,
+        defaultSettings(),
+        "claude",
+        { id: "primary", name: "Primary host", homePath: root, connected: true },
+      );
+
+      expect(result.records).toHaveLength(0);
+      expect(result.count).toBe(0);
+      expect(result.warning).toMatch(/Excluded 2 CodexBar sessions/u);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("skips unchanged files via stat fingerprints on incremental scans", async () => {
+    const root = mkdtempSync(join("/tmp", "telemetry-unchanged-"));
+    try {
+      const sessionsDir = join(root, ".codex", "sessions");
+      mkdirSync(sessionsDir, { recursive: true });
+      const sessionPath = join(sessionsDir, "session-1.jsonl");
+      writeFileSync(sessionPath, '{"type":"session","session_id":"session-1","timestamp":1760000000000}');
+      const bb = {
+        sdk: {
+          files: {
+            listPaths: vi.fn(async () => ({ paths: [{ kind: "file", path: sessionPath }], truncated: false })),
+          },
+        },
+      } as unknown as BbPluginApi;
+      const host = { id: "primary", name: "Primary host", homePath: root, connected: true };
+
+      // First scan has nothing stored, so the file is read and fingerprinted.
+      const first = await scanProviderSource(bb, defaultSettings(), "codex", host);
+      expect(first.records).toHaveLength(1);
+      const storedFingerprint = first.records[0]!.session.fingerprint;
+      if (!storedFingerprint) throw new Error("expected a stat fingerprint");
+      expect(storedFingerprint).toMatch(/:\d+:\d+:\d+:\d+$/); // stat-based, not a content hash
+      const storedFiles = new Map([[sessionPath, { fingerprint: storedFingerprint, sessionId: "session-1" }]]);
+
+      // Incremental scan with a matching stored fingerprint skips the file.
+      const incremental = await scanProviderSource(bb, defaultSettings(), "codex", host, {
+        full: false,
+        existingFiles: storedFiles,
+      });
+      expect(incremental.records).toHaveLength(0);
+      expect(incremental.skippedStoreLabels).toContain("session-1.jsonl");
+      expect(incremental.files.get(sessionPath)).toEqual({ fingerprint: storedFingerprint, sessionId: "session-1" });
+
+      // A changed file (different mtime) is re-read.
+      writeFileSync(sessionPath, '{"type":"session","session_id":"session-1","timestamp":1760000000001}');
+      utimesSync(sessionPath, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+      const changed = await scanProviderSource(bb, defaultSettings(), "codex", host, {
+        full: false,
+        existingFiles: storedFiles,
+      });
+      expect(changed.records).toHaveLength(1);
+      expect(changed.records[0]!.session.fingerprint).not.toBe(storedFingerprint);
+
+      // A full scan ignores the stored fingerprint and re-reads.
+      const full = await scanProviderSource(bb, defaultSettings(), "codex", host, {
+        full: true,
+        existingFiles: storedFiles,
+      });
+      expect(full.records).toHaveLength(1);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it("requests file listings up to bb's server-side cap", async () => {
+    const listPaths = vi.fn(async () => ({ paths: [], truncated: false }));
     const bb = {
-      sdk: { files: { listPaths, read } },
+      sdk: { files: { listPaths } },
     } as unknown as BbPluginApi;
 
-    const result = await scanProviderSource(
+    await scanProviderSource(
       bb,
       defaultSettings(),
       "codex",
       { id: "primary", name: "Primary host", homePath: "/tmp", connected: true },
     );
 
-    expect(listPaths).toHaveBeenCalledTimes(2);
-    expect(result.records).toHaveLength(2);
-    expect(result.records.find((record) => record.session.providerSessionId === "archived-1")?.session.archived).toBe(true);
-    expect(result.records.find((record) => record.session.providerSessionId === "regular-1")?.session.archived).toBe(false);
-  });
-
-  it("excludes CodexBar sessions by path and working directory", async () => {
-    const paths = [
-      "/tmp/CodexBar/ClaudeProbe/session.jsonl",
-      "/tmp/session-with-cwd-marker.jsonl",
-    ];
-    const read = vi.fn(async ({ path }: { path: string }) => ({
-      content: path.includes("cwd")
-        ? '{"type":"session_meta","timestamp":"2026-08-07T21:00:00Z","payload":{"id":"session-cwd","cwd":"/Users/patrick/Library/Application Support/CodexBar/ClaudeProbe"}}'
-        : '{"type":"session_meta","timestamp":"2026-08-07T21:00:00Z","payload":{"id":"session-path"}}',
-      contentEncoding: "utf8" as const,
-      sha256: path,
-    }));
-    const bb = {
-      sdk: {
-        files: {
-          listPaths: vi.fn(async () => ({
-            paths: paths.map((path) => ({ kind: "file" as const, path })),
-            truncated: false,
-          })),
-          read,
-        },
-      },
-    } as unknown as BbPluginApi;
-
-    const result = await scanProviderSource(
-      bb,
-      defaultSettings(),
-      "claude",
-      { id: "primary", name: "Primary host", homePath: "/tmp", connected: true },
-    );
-
-    expect(result.records).toHaveLength(0);
-    expect(result.count).toBe(0);
-    expect(result.warning).toMatch(/Excluded 2 CodexBar sessions/u);
-    expect(read).toHaveBeenCalledTimes(1);
+    expect(listPaths).toHaveBeenCalledWith(expect.objectContaining({ limit: 10_000 }));
   });
 });

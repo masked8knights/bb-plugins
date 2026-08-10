@@ -1,11 +1,13 @@
 import { PROVIDER_LABELS, PROVIDER_SOURCES } from "./source-registry";
 import { RANGE_MS } from "./types";
+import { sessionCost, withSessionCost } from "./pricing";
 import type {
   DashboardInput,
   DashboardResult,
   DashboardTotals,
   FindingRecord,
   NormalizedItem,
+  PriceOverrides,
   ProviderSessionRecord,
   ProviderSummary,
   SourceStatusRecord,
@@ -69,7 +71,22 @@ function sessionFilter(
   });
 }
 
-function totalsFor(sessions: ProviderSessionRecord[]): DashboardTotals {
+function sumCosts(sessions: ProviderSessionRecord[], overrides: PriceOverrides) {
+  let costUsd = 0;
+  let anyPriced = false;
+  let anyEstimated = false;
+  for (const session of sessions) {
+    const cost = sessionCost(session, overrides);
+    if (!cost) continue;
+    costUsd += cost.totalUsd;
+    anyPriced = true;
+    anyEstimated ||= cost.estimated;
+  }
+  return { costUsd: anyPriced ? costUsd : null, costEstimated: anyEstimated };
+}
+
+function totalsFor(sessions: ProviderSessionRecord[], overrides: PriceOverrides): DashboardTotals {
+  const cost = sumCosts(sessions, overrides);
   return {
     sessions: sessions.length,
     active: sessions.filter((session) => session.status === "active").length,
@@ -83,6 +100,8 @@ function totalsFor(sessions: ProviderSessionRecord[]): DashboardTotals {
     outputTokens: sumNullable(sessions.map((session) => session.outputTokens)),
     reasoningTokens: sumNullable(sessions.map((session) => session.reasoningTokens)),
     totalTokens: sumNullable(sessions.map((session) => session.totalTokens)),
+    costUsd: cost.costUsd,
+    costEstimated: cost.costEstimated,
     contextPeak: Math.max(...sessions.map((session) => session.contextPeak).filter((value): value is number => typeof value === "number"), 0) || null,
     compactions: sessions.reduce((total, session) => total + session.compactionCount, 0),
     sampleSize: sessions.length,
@@ -92,6 +111,7 @@ function totalsFor(sessions: ProviderSessionRecord[]): DashboardTotals {
 function providerSummaries(
   sessions: ProviderSessionRecord[],
   sources: SourceStatusRecord[],
+  overrides: PriceOverrides,
 ): ProviderSummary[] {
   const providerIds = new Set<ProviderSessionRecord["provider"]>([
     ...PROVIDER_SOURCES.map((source) => source.id),
@@ -99,6 +119,7 @@ function providerSummaries(
   ]);
   return [...providerIds].map((provider) => {
     const rows = sessions.filter((session) => session.provider === provider);
+    const cost = sumCosts(rows, overrides);
     return {
       provider,
       label: providerLabel(provider),
@@ -112,6 +133,8 @@ function providerSummaries(
       inputTokens: sumNullable(rows.map((session) => session.inputTokens)),
       outputTokens: sumNullable(rows.map((session) => session.outputTokens)),
       totalTokens: sumNullable(rows.map((session) => session.totalTokens)),
+      costUsd: cost.costUsd,
+      costEstimated: cost.costEstimated,
       contextIssues: rows.filter((session) => (session.contextPeak ?? 0) >= 0.85 || session.compactionCount > 0).length,
       lastActivityAt: rows.reduce<number | null>((latest, session) => Math.max(latest ?? 0, session.updatedAt ?? 0) || latest, null),
       sampleSize: rows.length,
@@ -242,6 +265,7 @@ export function buildDashboard(
   sources: SourceStatusRecord[],
   input: DashboardInput,
   now = Date.now(),
+  overrides: PriceOverrides = {},
 ): DashboardResult {
   const sessions = sessionFilter(allSessions, input, now);
   const ids = new Set(sessions.map((session) => session.id));
@@ -254,10 +278,10 @@ export function buildDashboard(
     range: input.range,
     generatedAt: now,
     stale: false,
-    totals: totalsFor(sessions),
-    providers: providerSummaries(sessions, sources),
+    totals: totalsFor(sessions, overrides),
+    providers: providerSummaries(sessions, sources, overrides),
     findings: providerFindings,
-    sessions: sessions.slice(0, 100),
+    sessions: sessions.slice(0, 100).map((session) => withSessionCost(session, overrides)),
     tools: toolSummary(sessionItems, sessions),
     daily: dailySummary(sessions),
     models: modelSummary(sessions),

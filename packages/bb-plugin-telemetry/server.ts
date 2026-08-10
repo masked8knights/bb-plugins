@@ -3,15 +3,27 @@ import { z } from "zod";
 import { AnalyticsStore } from "./src/db";
 import { buildDashboard, sessionFilter } from "./src/aggregate";
 import { analyzeFindings } from "./src/findings";
-import { migrateLegacyPluginState } from "./src/legacy-migration";
 import { indexBbThreads } from "./src/bb-indexer";
 import { explicitProviderLinkKey, linkProviderSessions } from "./src/linker";
+import {
+  costForTokens,
+  currentPriceTable,
+  lookupModelPrice,
+  modelsDevToTable,
+  parsePriceOverrides,
+  PRICES_REFRESH_MS,
+  providerFallbackPrices,
+  setRuntimePriceTable,
+  withSessionCost,
+} from "./src/pricing";
 import { PROVIDER_LABELS, PROVIDER_SOURCES, defaultSettings, isProviderId } from "./src/source-registry";
 import { resolveHost, scanProviderSource } from "./src/source-reader";
 import type {
   DashboardInput,
   DashboardResult,
   FindingRecord,
+  ModelPrice,
+  PriceOverrides,
   ProviderId,
   RangeId,
   SessionDetailResult,
@@ -20,7 +32,7 @@ import type {
   SourceSettings,
 } from "./src/types";
 
-const providerSchema = z.enum(["codex", "claude", "prime", "opencode", "omp", "other"]);
+const providerSchema = z.enum(["codex", "claude", "pi", "prime", "opencode", "omp", "other"]);
 const sourceSchema = z.enum(["provider", "bb"]);
 const rangeSchema = z.enum(["1h", "6h", "24h", "7d", "30d", "lifetime"]);
 const capabilityLevelSchema = z.enum(["complete", "partial", "unavailable"]);
@@ -40,6 +52,13 @@ const evidenceSchema = z.object({
   sourceSequence: z.number().nullable(),
   eventType: z.string(),
   at: z.number().nullable(),
+});
+const costSchema = z.object({
+  totalUsd: z.number(),
+  estimated: z.boolean(),
+  priceSource: z.enum(["model", "provider-fallback", "provider"]),
+  model: z.string().nullable(),
+  pricedTokens: z.number(),
 });
 const sessionSchema = z.object({
   id: z.string(),
@@ -63,16 +82,20 @@ const sessionSchema = z.object({
   toolErrors: z.number(),
   inputTokens: z.number().nullable(),
   cachedInputTokens: z.number().nullable(),
+  cachedWriteTokens: z.number().nullable(),
   outputTokens: z.number().nullable(),
   reasoningTokens: z.number().nullable(),
   totalTokens: z.number().nullable(),
   contextPeak: z.number().nullable(),
+  costUsd: z.number().nullable(),
+  costEstimated: z.boolean(),
   compactionCount: z.number(),
   failureCount: z.number(),
   delegatedCount: z.number(),
   archived: z.boolean(),
   coverage: capabilitySchema,
   storeLabel: z.string(),
+  sourcePath: z.string().nullable(),
   fingerprint: z.string().nullable(),
   linkState: z.enum(["none", "suggested", "linked"]),
   findingCount: z.number(),
@@ -148,6 +171,8 @@ const totalsSchema = z.object({
   outputTokens: z.number().nullable(),
   reasoningTokens: z.number().nullable(),
   totalTokens: z.number().nullable(),
+  costUsd: z.number().nullable(),
+  costEstimated: z.boolean(),
   contextPeak: z.number().nullable(),
   compactions: z.number(),
   sampleSize: z.number(),
@@ -165,6 +190,8 @@ const providerSummarySchema = z.object({
   inputTokens: z.number().nullable(),
   outputTokens: z.number().nullable(),
   totalTokens: z.number().nullable(),
+  costUsd: z.number().nullable(),
+  costEstimated: z.boolean(),
   contextIssues: z.number(),
   lastActivityAt: z.number().nullable(),
   sampleSize: z.number(),
@@ -181,9 +208,12 @@ const turnSchema = z.object({
   toolErrors: z.number(),
   inputTokens: z.number().nullable(),
   cachedInputTokens: z.number().nullable(),
+  cachedWriteTokens: z.number().nullable(),
   outputTokens: z.number().nullable(),
   reasoningTokens: z.number().nullable(),
   totalTokens: z.number().nullable(),
+  costUsd: z.number().nullable(),
+  costEstimated: z.boolean(),
   contextPeak: z.number().nullable(),
   sourceSequenceStart: z.number().nullable(),
   sourceSequenceEnd: z.number().nullable(),
@@ -249,8 +279,8 @@ const sessionDetailOutputSchema = z.object({
   findings: z.array(findingSchema),
   links: z.array(linkSchema),
   evidence: z.array(evidenceSchema),
-  cost: z.null(),
-  costCoverage: z.literal("unavailable-until-price-table"),
+  cost: costSchema.nullable(),
+  costCoverage: z.enum(["model-priced", "fallback-priced", "unavailable"]),
 });
 
 export const rpcContract = defineRpcContract({
@@ -275,7 +305,7 @@ export const rpcContract = defineRpcContract({
     output: sessionDetailOutputSchema,
   },
   reindex: {
-    input: z.object({ full: z.boolean().optional(), providers: z.array(z.string()).optional(), hostId: z.string().optional() }).strict(),
+    input: z.object({ full: z.boolean().optional(), clear: z.boolean().optional(), providers: z.array(z.string()).optional(), hostId: z.string().optional() }).strict(),
     output: z.object({ started: z.boolean() }),
   },
   findings: {
@@ -300,12 +330,24 @@ const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) =
   signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
 });
 
+const MODELS_DEV_URL = "https://models.dev/api.json";
+const PRICE_CACHE_KEY = "models-dev-price-table";
+
 function bool(value: string | boolean | undefined, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
 function text(value: string | boolean | undefined, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(value);
 }
 
 function isDashboardView(value: string): value is DashboardInput["view"] {
@@ -324,6 +366,15 @@ function parseSettings(values: Record<string, string | boolean | undefined>): So
   const defaults = defaultSettings();
   const defaultView = text(values.defaultView, defaults.defaultView);
   const defaultRange = text(values.defaultRange, defaults.defaultRange);
+  // Pre-split settings lived under `prime*` keys (the old "Pi / Prime Agent"
+  // source); they describe Pi's store, so carry them over to the `pi*` keys.
+  const legacyKeys: Record<string, string> = { pi: "prime" };
+  const valueFor = (source: (typeof PROVIDER_SOURCES)[number], suffix: "Enabled" | "Path" | "HostId"): string | boolean | undefined => {
+    const current = values[`${source.id}${suffix}`];
+    if (current !== undefined) return current;
+    const legacy = legacyKeys[source.id];
+    return legacy ? values[`${legacy}${suffix}`] : undefined;
+  };
   return {
     ...defaults,
     autoIndex: bool(values.autoIndex, defaults.autoIndex),
@@ -333,10 +384,11 @@ function parseSettings(values: Record<string, string | boolean | undefined>): So
     defaultRange: isRangeId(defaultRange) ? defaultRange : defaults.defaultRange,
     retentionDays: Number(values.retentionDays ?? defaults.retentionDays) || defaults.retentionDays,
     hostId: text(values.hostId, defaults.hostId),
+    priceOverrides: parsePriceOverrides(values.priceTable),
     sources: Object.fromEntries(PROVIDER_SOURCES.map((source) => [source.id, {
-      enabled: bool(values[`${source.id}Enabled`], true),
-      path: text(values[`${source.id}Path`], source.defaultPath),
-      hostId: text(values[`${source.id}HostId`], ""),
+      enabled: bool(valueFor(source, "Enabled"), true),
+      path: text(valueFor(source, "Path") ?? source.defaultPath, source.defaultPath),
+      hostId: text(valueFor(source, "HostId") ?? "", ""),
     }])) as SourceSettings["sources"],
   };
 }
@@ -365,14 +417,6 @@ export default async function plugin(bb: BbPluginApi) {
   const database = bb.storage.database();
   const store = new AnalyticsStore(database);
   store.migrate((db, statements) => bb.storage.migrate(db, statements));
-  try {
-    const migration = migrateLegacyPluginState(database);
-    if (migration.applied) {
-      bb.log.info(`Migrated ${migration.copiedDatabaseRows} telemetry rows and ${migration.copiedSettingsRows + migration.copiedKvRows} namespaced state rows from the legacy plugin id.`);
-    }
-  } catch (error) {
-    bb.log.warn(`Legacy telemetry state migration skipped: ${error instanceof Error ? error.message : String(error)}`);
-  }
   const settingsHandle = bb.settings.define({
     autoIndex: { type: "boolean", label: "Index provider sessions automatically", default: true },
     includeArchived: { type: "boolean", label: "Include archived bb threads", default: true },
@@ -381,6 +425,7 @@ export default async function plugin(bb: BbPluginApi) {
     defaultRange: { type: "select", label: "Default time range", options: ["1h", "6h", "24h", "7d", "30d", "lifetime"], default: "7d" },
     retentionDays: { type: "string", label: "Retention days", default: "90" },
     hostId: { type: "string", label: "Default source host", description: "Leave empty to use the primary host.", default: "" },
+    priceTable: { type: "string", label: "Price table overrides (JSON)", description: "Optional verified prices, keyed by provider then model: {\"codex\": {\"gpt-5\": {\"inputPerM\": 1.25, \"cachedInputPerM\": 0.125, \"outputPerM\": 10}}}. Costs for models without a price use provider fallback pricing and are marked estimated.", default: "" },
     ...Object.fromEntries(PROVIDER_SOURCES.flatMap((source) => [
       [`${source.id}Enabled`, { type: "boolean", label: `Index ${source.label} sessions`, default: true }],
       [`${source.id}Path`, { type: "string", label: `${source.label} store path`, default: source.defaultPath }],
@@ -414,6 +459,69 @@ export default async function plugin(bb: BbPluginApi) {
     return analyzeFindings(visible, store.getItemsForSessions(ids), sources, now);
   }
 
+  function enrichDetail(detail: SessionDetailResult, overrides: PriceOverrides): SessionDetailResult {
+    const cost = costForTokens(
+      detail.session.provider,
+      detail.session.model,
+      detail.session.inputTokens,
+      detail.session.cachedInputTokens,
+      detail.session.outputTokens,
+      overrides,
+    );
+    return {
+      ...detail,
+      session: withSessionCost(detail.session, overrides),
+      turns: detail.turns.map((turn) => {
+        const turnCost = costForTokens(
+          detail.session.provider,
+          detail.session.model,
+          turn.inputTokens,
+          turn.cachedInputTokens,
+          turn.outputTokens,
+          overrides,
+        );
+        return {
+          ...turn,
+          costUsd: turn.costUsd ?? turnCost?.totalUsd ?? null,
+          costEstimated: turn.costUsd !== null ? turn.costEstimated : (turnCost?.estimated ?? false),
+        };
+      }),
+      cost,
+      costCoverage: cost === null ? "unavailable" : cost.priceSource === "provider-fallback" ? "fallback-priced" : "model-priced",
+    };
+  }
+
+  let pricesRefreshing: Promise<void> | null = null;
+
+  async function refreshPrices(force = false): Promise<void> {
+    if (pricesRefreshing) return pricesRefreshing;
+    const task = (async () => {
+      const cached = store.getPriceCache<Record<string, ModelPrice>>(PRICE_CACHE_KEY);
+      if (cached && !force && Date.now() - cached.updatedAt < PRICES_REFRESH_MS) {
+        setRuntimePriceTable(cached.value);
+        return;
+      }
+      try {
+        const response = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(20_000) });
+        if (!response.ok) throw new Error(`models.dev responded with ${response.status}`);
+        const payload: unknown = await response.json();
+        const table = modelsDevToTable(payload);
+        if (!Object.keys(table).length) throw new Error("models.dev returned no priced models");
+        store.setPriceCache(PRICE_CACHE_KEY, table);
+        setRuntimePriceTable(table);
+        bb.log.info(`Telemetry prices refreshed from models.dev (${Object.keys(table).length} models).`);
+      } catch (error) {
+        if (cached) setRuntimePriceTable(cached.value);
+        bb.log.warn(`Telemetry price refresh failed; using ${cached ? "cached" : "bundled fallback"} prices. ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+    pricesRefreshing = task;
+    void task.finally(() => {
+      if (pricesRefreshing === task) pricesRefreshing = null;
+    });
+    return task;
+  }
+
   async function sync(options: SyncOptions = {}): Promise<void> {
     if (running) {
       if (!options.full && !options.providers?.length && !options.hostId) return running;
@@ -442,7 +550,14 @@ export default async function plugin(bb: BbPluginApi) {
       for (const provider of wanted) {
         job = { ...job, provider, done };
         publish(job);
-        const result = await scanProviderSource(bb, current, provider, host);
+        // The scan consults the per-file skip cache before reading anything;
+        // resolve the effective source host the same way scanProviderSource does.
+        const scanHostId = current.sources[provider].hostId || current.hostId || host.id;
+        const existingFiles = store.getSourceFileFingerprints(provider, scanHostId);
+        const result = await scanProviderSource(bb, current, provider, host, {
+          full: Boolean(options.full),
+          existingFiles,
+        });
         const bbIds = await bbProviderIds();
         const sourceStatus = {
           id: `${provider}:${result.hostId}`,
@@ -465,6 +580,15 @@ export default async function plugin(bb: BbPluginApi) {
         store.upsertSource(sourceStatus);
         const seen = new Set<string>();
         for (const parsed of result.records) {
+          // Pi and Prime Agent share `~/.prime/agent/sessions`; identical
+          // files must not be indexed under both providers. Prime yields to
+          // Pi (the store's canonical owner): a file already indexed under
+          // Pi is skipped here, and the Pi scan never defers, so ownership
+          // converges to Pi on the next full sync.
+          if (parsed.session.provider === "prime" && parsed.session.fingerprint) {
+            const claimed = store.getSessionByFingerprint(parsed.session.fingerprint, "prime");
+            if (claimed) continue;
+          }
           seen.add(parsed.session.id);
           const existing = store.getSession(parsed.session.id);
           if (!options.full && existing?.fingerprint && existing.fingerprint === parsed.session.fingerprint) {
@@ -474,7 +598,18 @@ export default async function plugin(bb: BbPluginApi) {
           store.replaceProviderSession(parsed.session, parsed.turns, parsed.items, parsed.usage, parsed.evidence);
           providerSessions.push(parsed.session);
         }
-        if (!result.error && !result.truncated) store.pruneProvider(provider, result.hostId, seen, new Set(result.skippedStoreLabels));
+        if (!result.error && !result.truncated) {
+          store.pruneProvider(provider, result.hostId, seen, new Set(result.skippedStoreLabels));
+          // Unchanged files are skipped by the scan, so result.count only
+          // reflects new/changed sessions; show the store's real total.
+          store.updateSourceCount(provider, result.hostId, store.countProviderSessions(provider, result.hostId));
+        }
+        // Persist the skip-cache for every listed file and forget paths that
+        // disappeared from disk.
+        for (const [path, info] of result.files) {
+          store.upsertSourceFile(provider, result.hostId, path, info.fingerprint, info.sessionId);
+        }
+        if (!result.error && !result.truncated) store.pruneSourceFiles(provider, result.hostId, new Set(result.files.keys()));
         done += 1;
         job = { ...job, done };
         publish(job);
@@ -572,7 +707,7 @@ export default async function plugin(bb: BbPluginApi) {
     const sessions = filterSessionsForSettings(store.getSessions(), current);
     const now = Date.now();
     const input: DashboardInput = { view: current.defaultView, range: current.defaultRange };
-    const dashboard = buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sourceRows, input, now), sourceRows, input, now);
+    const dashboard = buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sourceRows, input, now), sourceRows, input, now, current.priceOverrides);
     return {
       generatedAt: Date.now(),
       sources: sourceRows,
@@ -595,7 +730,7 @@ export default async function plugin(bb: BbPluginApi) {
       const validProviders = (input.providers ?? []).filter(isProviderId) as ProviderId[];
       const normalized: DashboardInput = { ...input, range: input.range, view: input.view, providers: validProviders };
       const now = Date.now();
-      return buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sources, normalized, now), sources, normalized, now);
+      return buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sources, normalized, now), sources, normalized, now, current.priceOverrides);
     },
     async listSessions(input) {
       const current = await getSettings();
@@ -604,12 +739,12 @@ export default async function plugin(bb: BbPluginApi) {
       const normalized: DashboardInput = { ...input, providers: validProviders };
       const filtered = sessionFilter(sessions, normalized, Date.now());
       const offset = input.offset ?? 0;
-      return { sessions: filtered.slice(offset, offset + (input.limit ?? 100)), total: filtered.length };
+      return { sessions: filtered.slice(offset, offset + (input.limit ?? 100)).map((session) => withSessionCost(session, current.priceOverrides)), total: filtered.length };
     },
     async sessionDetail({ sourceRecordId }) {
       const detail = store.getSessionDetail(sourceRecordId);
       if (!detail) throw new Error(`Telemetry session not found: ${sourceRecordId}`);
-      return detail;
+      return enrichDetail(detail, (await getSettings()).priceOverrides);
     },
     async threadDetail({ threadId }) {
       let detail = store.getSessionDetail(`bb:${threadId}`);
@@ -618,11 +753,15 @@ export default async function plugin(bb: BbPluginApi) {
         detail = store.getSessionDetail(`bb:${threadId}`);
       }
       if (!detail) throw new Error(`BB thread is not indexed yet: ${threadId}`);
-      return detail;
+      return enrichDetail(detail, (await getSettings()).priceOverrides);
     },
     async reindex(input) {
       const providers = (input.providers ?? []).filter(isProviderId) as ProviderId[];
-      void sync({ full: input.full, providers: providers.length ? providers : undefined, hostId: input.hostId }).catch(() => undefined);
+      if (input.clear) {
+        store.clearAll();
+        bb.log.info("Telemetry store cleared; rescanning everything.");
+      }
+      void sync({ full: input.full || Boolean(input.clear), providers: providers.length ? providers : undefined, hostId: input.hostId }).catch(() => undefined);
       return { started: true };
     },
     async findings(input) {
@@ -644,8 +783,9 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       { name: "status", summary: "Show source health and index status", usage: "bb telemetry status [--json]" },
       { name: "providers", summary: "Show provider-specific summaries", usage: "bb telemetry providers [--json]" },
-      { name: "reindex", summary: "Scan provider stores and bb threads", usage: "bb telemetry reindex [--full] [--provider <id>] [--machine <hostId>] [--json]" },
+      { name: "reindex", summary: "Scan provider stores and bb threads", usage: "bb telemetry reindex [--full] [--clear] [--provider <id>] [--machine <hostId>] [--json]" },
       { name: "summary", summary: "Show provider-aware telemetry totals", usage: "bb telemetry summary [--view provider|unified|bb] [--provider <id>] [--range 7d] [--json]" },
+      { name: "prices", summary: "Show the effective model price table", usage: "bb telemetry prices [--refresh] [--model <id>] [--json]" },
       { name: "findings", summary: "Show evidence-backed findings", usage: "bb telemetry findings [--provider <id>] [--range 7d] [--severity warning] [--json]" },
       { name: "session", summary: "Show one provider or bb session", usage: "bb telemetry session <source-record-id> [--json]" },
       { name: "thread", summary: "Show one indexed bb thread", usage: "bb telemetry thread <thread-id> [--json]" },
@@ -666,12 +806,16 @@ export default async function plugin(bb: BbPluginApi) {
       }
       if (command === "providers") {
         const result = await status();
-        return output({ providers: result.providers }, result.providers.map((provider) => `${String(provider.label)} [${String(provider.provider)}] — ${String(provider.sessions)} sessions, ${String(provider.turns)} turns`).join("\n"));
+        return output({ providers: result.providers }, result.providers.map((provider) => `${String(provider.label)} [${String(provider.provider)}] — ${String(provider.sessions)} sessions, ${String(provider.turns)} turns, cost ${provider.costUsd === null ? "Not available" : formatUsd(provider.costUsd)}${provider.costEstimated ? " (estimated)" : ""}`).join("\n"));
       }
       if (command === "reindex") {
         const provider = cliFlag(rest, "--provider");
         if (provider && !isProviderId(provider)) return { exitCode: 2, stderr: `Unknown provider: ${provider}\n` };
-        await sync({ full: hasFlag(rest, "--full"), providers: provider ? [provider as ProviderId] : undefined, hostId: cliFlag(rest, "--machine") });
+        if (hasFlag(rest, "--clear")) {
+          store.clearAll();
+          bb.log.info("Telemetry store cleared; rescanning everything.");
+        }
+        await sync({ full: hasFlag(rest, "--full") || hasFlag(rest, "--clear"), providers: provider ? [provider as ProviderId] : undefined, hostId: cliFlag(rest, "--machine") });
         return output({ started: true, status: await status() }, "Telemetry index refreshed.");
       }
       if (command === "summary") {
@@ -688,9 +832,35 @@ export default async function plugin(bb: BbPluginApi) {
         const sessions = filterSessionsForSettings(store.getSessions(), current);
         const sources = store.getSources();
         const now = Date.now();
-        const result = buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sources, input, now), sources, input, now);
-        const human = [`View: ${view}`, `Range: ${range}`, `Sessions: ${result.totals.sessions}`, `Turns: ${result.totals.turns}`, `Tool errors: ${result.totals.toolErrors}/${result.totals.toolCalls}`, `Total tokens: ${result.totals.totalTokens ?? "Not available"}`, ...result.providers.filter((provider) => provider.sampleSize > 0).map((provider) => `  ${provider.label} [${provider.provider}] — ${provider.sessions} sessions, ${provider.turns} turns, tokens ${provider.totalTokens ?? "Not available"}`)].join("\n");
+        const result = buildDashboard(sessions, store.getItemsForSessions(new Set(sessions.map((session) => session.id))), findingsFor(sessions, sources, input, now), sources, input, now, current.priceOverrides);
+        const human = [`View: ${view}`, `Range: ${range}`, `Sessions: ${result.totals.sessions}`, `Turns: ${result.totals.turns}`, `Tool errors: ${result.totals.toolErrors}/${result.totals.toolCalls}`, `Total tokens: ${result.totals.totalTokens ?? "Not available"}`, `Estimated cost: ${result.totals.costUsd === null ? "Not available" : formatUsd(result.totals.costUsd)}${result.totals.costEstimated ? " (some models use fallback pricing)" : ""}`, ...result.providers.filter((provider) => provider.sampleSize > 0).map((provider) => `  ${provider.label} [${provider.provider}] — ${provider.sessions} sessions, ${provider.turns} turns, tokens ${provider.totalTokens ?? "Not available"}, cost ${provider.costUsd === null ? "Not available" : formatUsd(provider.costUsd)}${provider.costEstimated ? " (estimated)" : ""}`)].join("\n");
         return output(result, human);
+      }
+      if (command === "prices") {
+        if (hasFlag(rest, "--refresh")) await refreshPrices(true);
+        const current = await getSettings();
+        const modelArg = cliFlag(rest, "--model");
+        const cached = store.getPriceCache<Record<string, ModelPrice>>(PRICE_CACHE_KEY);
+        const sourceLine = cached
+          ? `Source: models.dev (fetched ${new Date(cached.updatedAt).toISOString()}, ${Object.keys(cached.value).length} models)`
+          : "Source: bundled fallback table (models.dev not fetched yet; run with --refresh)";
+        if (modelArg) {
+          const lookup = lookupModelPrice(modelArg, current.priceOverrides);
+          if (!lookup) return output({ model: modelArg, price: null }, `No price found for ${modelArg}; provider fallback pricing applies.`);
+          const human = `${sourceLine}\n${lookup.model} (${lookup.origin}): ${formatUsd(lookup.price.inputPerM)}/M in, ${formatUsd(lookup.price.cachedInputPerM)}/M cached, ${formatUsd(lookup.price.outputPerM)}/M out`;
+          return output({ model: lookup.model, origin: lookup.origin, price: lookup.price }, human);
+        }
+        const table = currentPriceTable();
+        const fallbacks = providerFallbackPrices();
+        const overrides = current.priceOverrides;
+        const human = [
+          sourceLine,
+          `Models priced: ${Object.keys(table).length}`,
+          ...Object.entries(fallbacks).map(([provider, fallback]) => `${PROVIDER_LABELS[provider as ProviderId] ?? provider} [${provider}] fallback: ${formatUsd(fallback.inputPerM)}/M in, ${formatUsd(fallback.cachedInputPerM)}/M cached, ${formatUsd(fallback.outputPerM)}/M out`),
+          ...Object.entries(overrides).flatMap(([provider, models]) => Object.entries(models).map(([model, price]) => `  ${model} [${provider}] (override): ${formatUsd(price.inputPerM)}/M in, ${formatUsd(price.cachedInputPerM)}/M cached, ${formatUsd(price.outputPerM)}/M out`)),
+          "Use --model <id> to look up one model, or --json for the full table.",
+        ].join("\n");
+        return output({ source: cached ? "models-dev" : "bundled", fetchedAt: cached?.updatedAt ?? null, modelCount: Object.keys(table).length, fallbacks, overrides, models: table }, human);
       }
       if (command === "findings") {
         const current = await getSettings();
@@ -712,21 +882,25 @@ export default async function plugin(bb: BbPluginApi) {
         if (!id) return { exitCode: 1, stderr: `Usage: bb telemetry ${command} <id>\n` };
         const detail = store.getSessionDetail(command === "thread" ? `bb:${id}` : id);
         if (!detail) return { exitCode: 1, stderr: `Telemetry record not found: ${id}\n` };
-        const human = [`${detail.session.title}`, `Source: ${detail.session.source}`, `Provider: ${detail.session.provider}`, `Host: ${detail.session.hostId}`, `Status: ${detail.session.status}`, `Turns: ${detail.session.turnCount}`, `Tools: ${detail.session.toolCalls} (${detail.session.toolErrors} errors)`, `Tokens: ${detail.session.totalTokens ?? "Not available"}`, `Cost: Not available until a verified price table exists`].join("\n");
+        const enriched = enrichDetail(detail, (await getSettings()).priceOverrides);
+        const costLine = enriched.cost === null
+          ? "Cost: Not available (no token usage recorded)"
+          : `Cost: ${formatUsd(enriched.cost.totalUsd)}${enriched.cost.estimated ? " (estimated — model not in the price table)" : ""} via ${enriched.cost.model ?? enriched.session.provider}`;
+        const human = [`${enriched.session.title}`, `Source: ${enriched.session.source}`, `Provider: ${enriched.session.provider}`, `Host: ${enriched.session.hostId}`, `Status: ${enriched.session.status}`, `Turns: ${enriched.session.turnCount}`, `Tools: ${enriched.session.toolCalls} (${enriched.session.toolErrors} errors)`, `Tokens: ${enriched.session.totalTokens ?? "Not available"}`, costLine].join("\n");
         const jsonDetail = {
-          ...detail,
-          turns: detail.turns.slice(0, 200),
-          items: detail.items.slice(0, 500),
-          evidence: detail.evidence.slice(0, 200),
+          ...enriched,
+          turns: enriched.turns.slice(0, 200),
+          items: enriched.items.slice(0, 500),
+          evidence: enriched.evidence.slice(0, 200),
           truncated: {
-            turns: detail.turns.length > 200,
-            items: detail.items.length > 500,
-            evidence: detail.evidence.length > 200,
+            turns: enriched.turns.length > 200,
+            items: enriched.items.length > 500,
+            evidence: enriched.evidence.length > 200,
           },
         };
-        return output(jsonOutput ? jsonDetail : detail, human);
+        return output(jsonOutput ? jsonDetail : enriched, human);
       }
-      return { exitCode: 1, stderr: "Unknown command. Try: status | providers | reindex | summary | findings | session <id> | thread <id>\n" };
+      return { exitCode: 1, stderr: "Unknown command. Try: status | providers | reindex | summary | prices | findings | session <id> | thread <id>\n" };
     },
   });
 
@@ -737,10 +911,16 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("indexer", {
     async start(signal) {
       const current = await getSettings();
-      if (current.autoIndex) await sync({ full: false });
+      if (current.autoIndex) {
+        await refreshPrices(false);
+        await sync({ full: false });
+      }
       while (!signal.aborted) {
         await sleep(5 * 60 * 1000, signal);
-        if (!signal.aborted && (await getSettings()).autoIndex) await sync({ full: false });
+        if (!signal.aborted && (await getSettings()).autoIndex) {
+          await refreshPrices(false);
+          await sync({ full: false });
+        }
       }
     },
   });

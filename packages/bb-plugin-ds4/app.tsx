@@ -1,14 +1,11 @@
-// bb-plugin-ds4 — frontend: a DwarfStar Admin panel (status, start/stop/
-// restart, live logs, agent configs), a thread-header status dot, and quick
-// actions on the plugin settings page.
+// bb-plugin-ds4 — frontend: DwarfStar runtime controls in plugin settings,
+// a thread-header status dot, and live server/agent actions.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
-  useBbNavigate,
   useRealtime,
   useRpc,
-  useSettings,
 } from "@bb/plugin-sdk/app";
 import type { rpcContract, StatusDto } from "./server";
 import { toast } from "sonner";
@@ -352,7 +349,7 @@ function AgentsCard({
 
 // ---------------------------------------------------------------------------
 
-function Dashboard() {
+function DwarfStarRuntimeSection() {
   const rpc = useRpc<typeof rpcContract>();
   const [status, setStatus] = useState<StatusDto | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -453,12 +450,11 @@ function Dashboard() {
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
-      <div className="mx-auto w-full max-w-4xl space-y-4">
+    <div className="space-y-4">
       {status?.config.ds4Dir === null && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-500">
           DS4 checkout directory not found. Set it in Settings →
-          Extensions → DwarfStar (<code>ds4Dir</code>), or clone{" "}
+          Plugins → DwarfStar (<code>ds4Dir</code>), or clone{" "}
           <code className="font-mono">github.com/antirez/ds4</code> to{" "}
           <code className="font-mono">~/workingdir/ds4</code>.
         </div>
@@ -500,7 +496,6 @@ function Dashboard() {
           </p>
         </CardContent>
       </Card>
-      </div>
     </div>
   );
 }
@@ -526,7 +521,6 @@ function DwarfStarIcon({ className }: { className?: string }) {
 
 function DwarfStarStatusDot() {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
   const [status, setStatus] = useState<StatusDto | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -635,9 +629,6 @@ function DwarfStarStatusDot() {
           Restart server
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate.toPluginPanel("dashboard")}>
-          Open DwarfStar admin
-        </DropdownMenuItem>
         <DropdownMenuItem
           disabled={busy}
           onSelect={() =>
@@ -658,84 +649,16 @@ function DwarfStarStatusDot() {
 
 // ---------------------------------------------------------------------------
 
-function SettingsActions() {
-  const rpc = useRpc<typeof rpcContract>();
-  const { values, isLoading } = useSettings();
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const applyFromSettings = async () => {
-    const targets = AGENT_IDS.filter((id) => Boolean(values?.[`configure${id[0].toUpperCase()}${id.slice(1)}`]));
-    if (!targets.length) {
-      toast.error("Enable at least one agent toggle in settings first");
-      return;
-    }
-    setBusy("agents");
-    try {
-      const { results } = await rpc.call("applyAgentConfigs", { targets });
-      for (const r of results) {
-        if (r.ok) toast.success(r.message);
-        else toast.error(r.message);
-      }
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const launch = async () => {
-    setBusy("agent");
-    try {
-      const { title } = await rpc.call("launchAgent");
-      toast.success(`Opened "${title}" in the terminal area`);
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={busy !== null || isLoading}
-        onClick={() => void applyFromSettings()}
-      >
-        Apply agent configs
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={busy !== null}
-        onClick={() => void launch()}
-      >
-        Launch interactive ds4-agent
-      </Button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-
 export default definePluginApp((app) => {
-  app.slots.navPanel({
-    id: "dashboard",
-    title: "DwarfStar",
-    icon: "Server",
-    path: "dashboard",
-    component: Dashboard,
-  });
   app.slots.experimental_threadHeaderAction({
     id: "dwarfstar-status",
     title: "DwarfStar server status",
     component: DwarfStarStatusDot,
   });
   app.slots.settingsSection({
-    id: "actions",
-    title: "Actions",
-    description: "Write agent provider configs or launch the interactive agent.",
-    component: SettingsActions,
+    id: "runtime",
+    title: "Runtime",
+    description: "Monitor the server, inspect logs, and manage agent connections.",
+    component: DwarfStarRuntimeSection,
   });
 });

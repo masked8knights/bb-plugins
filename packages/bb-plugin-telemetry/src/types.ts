@@ -1,6 +1,7 @@
 export const PROVIDER_IDS = [
   "codex",
   "claude",
+  "pi",
   "prime",
   "opencode",
   "omp",
@@ -64,10 +65,30 @@ export interface SourceSettings {
   retentionDays: number;
   privacyMode: "strict";
   hostId: string;
+  priceOverrides: PriceOverrides;
   sources: Record<ProviderId, { enabled: boolean; path: string; hostId: string }>;
 }
 
 export type RangeId = "1h" | "6h" | "24h" | "7d" | "30d" | "lifetime";
+
+/** USD cost per 1,000,000 tokens for one model (see src/pricing.ts). */
+export interface ModelPrice {
+  inputPerM: number;
+  cachedInputPerM: number;
+  outputPerM: number;
+}
+
+/** User-supplied per-provider, per-model price overrides. */
+export type PriceOverrides = Partial<Record<ProviderId, Record<string, ModelPrice>>>;
+
+/** A computed cost estimate for a session or turn. */
+export interface CostEstimate {
+  totalUsd: number;
+  estimated: boolean;
+  priceSource: "model" | "provider-fallback" | "provider";
+  model: string | null;
+  pricedTokens: number;
+}
 
 export const RANGE_MS: Record<Exclude<RangeId, "lifetime">, number> = {
   "1h": 60 * 60 * 1000,
@@ -81,11 +102,14 @@ export interface UsageSnapshot {
   turnId: string | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cachedWriteTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
   contextUsed: number | null;
   contextLimit: number | null;
+  costUsd: number | null;
+  costEstimated: boolean;
   estimated: boolean;
   sourceSequence: number;
   at: number | null;
@@ -102,10 +126,13 @@ export interface NormalizedTurn {
   toolErrors: number;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cachedWriteTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
   contextPeak: number | null;
+  costUsd: number | null;
+  costEstimated: boolean;
   sourceSequenceStart: number | null;
   sourceSequenceEnd: number | null;
 }
@@ -154,6 +181,7 @@ export interface ProviderSessionRecord {
   toolErrors: number;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cachedWriteTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
@@ -162,8 +190,12 @@ export interface ProviderSessionRecord {
   failureCount: number;
   delegatedCount: number;
   archived: boolean;
+  costUsd: number | null;
+  costEstimated: boolean;
   coverage: CapabilityReport;
   storeLabel: string;
+  /** Absolute path the session was scanned from (provider sources only). */
+  sourcePath: string | null;
   fingerprint: string | null;
   linkState: "none" | "suggested" | "linked";
   findingCount: number;
@@ -281,6 +313,8 @@ export interface ProviderSummary {
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  costUsd: number | null;
+  costEstimated: boolean;
   contextIssues: number;
   lastActivityAt: number | null;
   sampleSize: number;
@@ -300,6 +334,8 @@ export interface DashboardTotals {
   outputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
+  costUsd: number | null;
+  costEstimated: boolean;
   contextPeak: number | null;
   compactions: number;
   sampleSize: number;
@@ -348,6 +384,6 @@ export interface SessionDetailResult {
   findings: FindingRecord[];
   links: LinkRecord[];
   evidence: EvidenceRef[];
-  cost: null;
-  costCoverage: "unavailable-until-price-table";
+  cost: CostEstimate | null;
+  costCoverage: "model-priced" | "fallback-priced" | "unavailable";
 }

@@ -61,6 +61,8 @@ describe("bb thread indexing", () => {
       failureCount: 0,
       delegatedCount: 0,
       archived: false,
+      costUsd: null,
+      costEstimated: false,
       coverage: emptyCapabilities("complete"),
       storeLabel: "bb event stream",
       fingerprint: null,

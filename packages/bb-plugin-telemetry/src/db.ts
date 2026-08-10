@@ -183,9 +183,24 @@ export const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_analytics_items_tool ON analytics_items(tool_name)`,
   `CREATE INDEX IF NOT EXISTS idx_analytics_findings_severity ON analytics_findings(severity)`,
   `ALTER TABLE analytics_sources ADD COLUMN last_warning TEXT`,
-  `CREATE TABLE IF NOT EXISTS telemetry_state_migrations (
-     id TEXT PRIMARY KEY,
-     applied_at INTEGER NOT NULL
+  `ALTER TABLE analytics_sessions ADD COLUMN cached_write_tokens INTEGER`,
+  `ALTER TABLE analytics_turns ADD COLUMN cached_write_tokens INTEGER`,
+  `ALTER TABLE analytics_sessions ADD COLUMN cost_usd REAL`,
+  `ALTER TABLE analytics_sessions ADD COLUMN cost_estimated INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE analytics_sessions ADD COLUMN source_path TEXT`,
+  `CREATE TABLE IF NOT EXISTS analytics_source_files (
+     provider TEXT NOT NULL,
+     host_id TEXT NOT NULL,
+     path TEXT NOT NULL,
+     fingerprint TEXT NOT NULL,
+     session_id TEXT,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (provider, host_id, path)
+   )`,
+  `CREATE TABLE IF NOT EXISTS telemetry_prices (
+     key TEXT PRIMARY KEY,
+     value TEXT NOT NULL,
+     updated_at INTEGER NOT NULL
    )`,
 ];
 
@@ -227,6 +242,7 @@ function sessionFromRow(row: Row): ProviderSessionRecord {
     toolErrors: Number(row.tool_errors ?? 0),
     inputTokens: nullableNumber(row.input_tokens),
     cachedInputTokens: nullableNumber(row.cached_input_tokens),
+    cachedWriteTokens: nullableNumber(row.cached_write_tokens),
     outputTokens: nullableNumber(row.output_tokens),
     reasoningTokens: nullableNumber(row.reasoning_tokens),
     totalTokens: nullableNumber(row.total_tokens),
@@ -235,8 +251,11 @@ function sessionFromRow(row: Row): ProviderSessionRecord {
     failureCount: Number(row.failure_count ?? 0),
     delegatedCount: Number(row.delegated_count ?? 0),
     archived: Number(row.archived ?? 0) === 1,
+    costUsd: nullableNumber(row.cost_usd),
+    costEstimated: Number(row.cost_estimated ?? 0) === 1,
     coverage: json<CapabilityReport>(row.coverage_json, emptyCapabilities()),
     storeLabel: String(row.store_label ?? "provider store"),
+    sourcePath: typeof row.source_path === "string" ? row.source_path : null,
     fingerprint: typeof row.fingerprint === "string" ? row.fingerprint : null,
     linkState: String(row.link_state ?? "none") as ProviderSessionRecord["linkState"],
     findingCount: Number(row.finding_count ?? 0),
@@ -276,10 +295,13 @@ function turnFromRow(row: Row): NormalizedTurn {
     toolErrors: Number(row.tool_errors ?? 0),
     inputTokens: nullableNumber(row.input_tokens),
     cachedInputTokens: nullableNumber(row.cached_input_tokens),
+    cachedWriteTokens: nullableNumber(row.cached_write_tokens),
     outputTokens: nullableNumber(row.output_tokens),
     reasoningTokens: nullableNumber(row.reasoning_tokens),
     totalTokens: nullableNumber(row.total_tokens),
     contextPeak: nullableNumber(row.context_peak),
+    costUsd: null,
+    costEstimated: false,
     sourceSequenceStart: nullableNumber(row.source_sequence_start),
     sourceSequenceEnd: nullableNumber(row.source_sequence_end),
   };
@@ -383,17 +405,17 @@ export class AnalyticsStore {
           id, source, provider, host_id, provider_session_id, bb_thread_id,
           title, cwd, project_id, model, origin, status, started_at, updated_at,
           duration_ms, message_count, turn_count, tool_calls, tool_errors,
-          input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
-          total_tokens, context_peak, compaction_count, failure_count,
-          delegated_count, archived, coverage_json, store_label, fingerprint,
+          input_tokens, cached_input_tokens, cached_write_tokens, output_tokens,
+          reasoning_tokens, total_tokens, context_peak, compaction_count, failure_count,
+          delegated_count, archived, cost_usd, cost_estimated, coverage_json, store_label, source_path, fingerprint,
           link_state, finding_count
         ) VALUES (
           @id, @source, @provider, @hostId, @providerSessionId, @bbThreadId,
           @title, @cwd, @projectId, @model, @origin, @status, @startedAt, @updatedAt,
           @durationMs, @messageCount, @turnCount, @toolCalls, @toolErrors,
-          @inputTokens, @cachedInputTokens, @outputTokens, @reasoningTokens,
+          @inputTokens, @cachedInputTokens, @cachedWriteTokens, @outputTokens, @reasoningTokens,
           @totalTokens, @contextPeak, @compactionCount, @failureCount,
-          @delegatedCount, @archived, @coverageJson, @storeLabel, @fingerprint,
+          @delegatedCount, @archived, @costUsd, @costEstimated, @coverageJson, @storeLabel, @sourcePath, @fingerprint,
           @linkState, @findingCount
         ) ON CONFLICT(id) DO UPDATE SET
           source = excluded.source, provider = excluded.provider, host_id = excluded.host_id,
@@ -404,12 +426,16 @@ export class AnalyticsStore {
           duration_ms = excluded.duration_ms, message_count = excluded.message_count,
           turn_count = excluded.turn_count, tool_calls = excluded.tool_calls,
           tool_errors = excluded.tool_errors, input_tokens = excluded.input_tokens,
-          cached_input_tokens = excluded.cached_input_tokens, output_tokens = excluded.output_tokens,
+          cached_input_tokens = excluded.cached_input_tokens,
+          cached_write_tokens = excluded.cached_write_tokens,
+          output_tokens = excluded.output_tokens,
           reasoning_tokens = excluded.reasoning_tokens, total_tokens = excluded.total_tokens,
           context_peak = excluded.context_peak, compaction_count = excluded.compaction_count,
           failure_count = excluded.failure_count, delegated_count = excluded.delegated_count,
-          archived = excluded.archived, coverage_json = excluded.coverage_json,
-          store_label = excluded.store_label, fingerprint = excluded.fingerprint,
+          archived = excluded.archived, cost_usd = excluded.cost_usd,
+          cost_estimated = excluded.cost_estimated, coverage_json = excluded.coverage_json,
+          store_label = excluded.store_label, source_path = excluded.source_path,
+          fingerprint = excluded.fingerprint,
           link_state = excluded.link_state, finding_count = excluded.finding_count
       `).run({
         id: session.id,
@@ -433,6 +459,7 @@ export class AnalyticsStore {
         toolErrors: session.toolErrors,
         inputTokens: session.inputTokens,
         cachedInputTokens: session.cachedInputTokens,
+        cachedWriteTokens: session.cachedWriteTokens,
         outputTokens: session.outputTokens,
         reasoningTokens: session.reasoningTokens,
         totalTokens: session.totalTokens,
@@ -441,18 +468,21 @@ export class AnalyticsStore {
         failureCount: session.failureCount,
         delegatedCount: session.delegatedCount,
         archived: session.archived ? 1 : 0,
+        costUsd: session.costUsd,
+        costEstimated: session.costEstimated ? 1 : 0,
         coverageJson: JSON.stringify(session.coverage),
         storeLabel: session.storeLabel,
+        sourcePath: session.sourcePath,
         fingerprint: session.fingerprint,
         linkState: session.linkState,
         findingCount: session.findingCount,
       });
       const turnInsert = this.db.prepare(`INSERT INTO analytics_turns (
         id, session_id, started_at, ended_at, status, duration_ms, steps, tool_calls,
-        tool_errors, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+        tool_errors, input_tokens, cached_input_tokens, cached_write_tokens, output_tokens, reasoning_tokens,
         total_tokens, context_peak, source_sequence_start, source_sequence_end
       ) VALUES (@id, @sessionId, @startedAt, @endedAt, @status, @durationMs, @steps,
-        @toolCalls, @toolErrors, @inputTokens, @cachedInputTokens, @outputTokens,
+        @toolCalls, @toolErrors, @inputTokens, @cachedInputTokens, @cachedWriteTokens, @outputTokens,
         @reasoningTokens, @totalTokens, @contextPeak, @sourceSequenceStart, @sourceSequenceEnd)`);
       for (const turn of turns) turnInsert.run({ ...turn, sessionId: session.id });
       const itemInsert = this.db.prepare(`INSERT INTO analytics_items (
@@ -483,6 +513,24 @@ export class AnalyticsStore {
         session_id, source_sequence, event_type, source, at
       ) VALUES (@sessionId, @sourceSequence, @eventType, @source, @at)`);
       for (const row of evidence) evidenceInsert.run({ ...row, sessionId: session.id });
+    });
+    transaction();
+  }
+
+  /**
+   * Wipe every indexed session, source status, link, and finding so a full
+   * rescan starts from a clean slate. The models.dev price cache is kept.
+   */
+  clearAll(): void {
+    const transaction = this.db.transaction(() => {
+      for (const table of ["analytics_turns", "analytics_items", "analytics_usage", "analytics_events", "analytics_evidence"]) {
+        this.db.prepare(`DELETE FROM ${table}`).run();
+      }
+      this.db.prepare("DELETE FROM analytics_session_links").run();
+      this.db.prepare("DELETE FROM analytics_findings").run();
+      this.db.prepare("DELETE FROM analytics_sessions").run();
+      this.db.prepare("DELETE FROM analytics_sources").run();
+      this.db.prepare("DELETE FROM analytics_source_files").run();
     });
     transaction();
   }
@@ -563,6 +611,79 @@ export class AnalyticsStore {
   getSession(id: string): ProviderSessionRecord | null {
     const row = this.db.prepare("SELECT * FROM analytics_sessions WHERE id = ?").get(id) as Row | undefined;
     return row ? sessionFromRow(row) : null;
+  }
+
+  /**
+   * Find a provider-store session with the same content fingerprint under a
+   * different provider. Pi and Prime Agent share `~/.prime/agent/sessions`,
+   * so identical files must not be indexed twice (once per provider); the
+   * first scan to claim a file keeps it.
+   */
+  getSessionByFingerprint(fingerprint: string, excludeProvider: string): ProviderSessionRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM analytics_sessions WHERE source = 'provider' AND fingerprint = ? AND provider != ? LIMIT 1")
+      .get(fingerprint, excludeProvider) as Row | undefined;
+    return row ? sessionFromRow(row) : null;
+  }
+
+  /**
+   * Per-file fingerprints for incremental scans. Keyed by file path (not
+   * session) because one Codex session can span many rollout files that all
+   * share the same session id — a session row alone can only remember one.
+   */
+  getSourceFileFingerprints(provider: string, hostId: string): Map<string, { fingerprint: string; sessionId: string | null }> {
+    const rows = this.db
+      .prepare("SELECT path, fingerprint, session_id FROM analytics_source_files WHERE provider = ? AND host_id = ?")
+      .all(provider, hostId) as Row[];
+    const map = new Map<string, { fingerprint: string; sessionId: string | null }>();
+    for (const row of rows) {
+      if (typeof row.path !== "string" || typeof row.fingerprint !== "string") continue;
+      map.set(row.path, {
+        fingerprint: row.fingerprint,
+        sessionId: typeof row.session_id === "string" ? row.session_id : null,
+      });
+    }
+    return map;
+  }
+
+  upsertSourceFile(provider: string, hostId: string, path: string, fingerprint: string, sessionId: string | null, now = Date.now()): void {
+    this.db
+      .prepare(`INSERT INTO analytics_source_files (provider, host_id, path, fingerprint, session_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, host_id, path) DO UPDATE SET
+          fingerprint = excluded.fingerprint, session_id = excluded.session_id, updated_at = excluded.updated_at`)
+      .run(provider, hostId, path, fingerprint, sessionId, now);
+  }
+
+  /** Forget fingerprint rows for paths that are no longer listed on disk. */
+  pruneSourceFiles(provider: string, hostId: string, keepPaths: Set<string>): number {
+    const rows = this.db
+      .prepare("SELECT path FROM analytics_source_files WHERE provider = ? AND host_id = ?")
+      .all(provider, hostId) as Row[];
+    let removed = 0;
+    const transaction = this.db.transaction(() => {
+      for (const row of rows) {
+        const path = String(row.path);
+        if (keepPaths.has(path)) continue;
+        this.db.prepare("DELETE FROM analytics_source_files WHERE provider = ? AND host_id = ? AND path = ?").run(provider, hostId, path);
+        removed += 1;
+      }
+    });
+    transaction();
+    return removed;
+  }
+
+  countProviderSessions(provider: string, hostId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS c FROM analytics_sessions WHERE source = 'provider' AND provider = ? AND host_id = ?")
+      .get(provider, hostId) as Row | undefined;
+    return Number(row?.c ?? 0);
+  }
+
+  updateSourceCount(provider: string, hostId: string, count: number, now = Date.now()): void {
+    this.db
+      .prepare("UPDATE analytics_sources SET count = ?, updated_at = ? WHERE provider = ? AND host_id = ?")
+      .run(count, now, provider, hostId);
   }
 
   getTurns(sessionId: string): NormalizedTurn[] {
@@ -687,13 +808,27 @@ export class AnalyticsStore {
       links: this.getLinksForSession(id),
       evidence: this.getEvidence(id),
       cost: null,
-      costCoverage: "unavailable-until-price-table",
+      costCoverage: "unavailable",
     };
   }
 
   latestEventSequence(sessionId: string): number {
     const row = this.db.prepare("SELECT MAX(source_sequence) AS maxSeq FROM analytics_events WHERE session_id = ?").get(sessionId) as Row | undefined;
     return Number(row?.maxSeq ?? 0);
+  }
+
+  getPriceCache<T>(key: string): { value: T; updatedAt: number } | null {
+    const row = this.db.prepare("SELECT value, updated_at FROM telemetry_prices WHERE key = ?").get(key) as Row | undefined;
+    if (!row) return null;
+    const value = json<T>(row.value, null as T);
+    if (value === null || typeof value !== "object") return null;
+    return { value, updatedAt: Number(row.updated_at) };
+  }
+
+  setPriceCache(key: string, value: unknown, now = Date.now()): void {
+    this.db.prepare(`INSERT INTO telemetry_prices (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+      .run(key, JSON.stringify(value), now);
   }
 
   pruneRetention(days: number, now = Date.now()): number {

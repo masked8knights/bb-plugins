@@ -24,12 +24,24 @@ export const PROVIDER_SOURCES: ProviderSourceDescriptor[] = [
     defaultPath: "~/.claude/projects",
   },
   {
-    id: "prime",
-    label: "Pi / Prime Agent",
-    bbProviderIds: ["pi", "acp-prime-agent", "acp-hermes-agent"],
+    id: "pi",
+    label: "Pi",
+    bbProviderIds: ["pi", "acp-hermes-agent"],
     storeKind: "jsonl",
     defaultPath: "~/.prime/agent/sessions",
     defaultDbPath: "~/.hermes/state.db",
+  },
+  {
+    id: "prime",
+    label: "Prime Agent",
+    bbProviderIds: ["acp-prime-agent"],
+    storeKind: "jsonl",
+    // Prime Agent writes the same JSONL format to the same directory as Pi
+    // (both are built on the pi coding agent). Sessions found in the shared
+    // store are attributed to whichever provider indexes them first (Pi wins
+    // during a full sync); point the Prime Agent path at a dedicated
+    // directory to keep its sessions separate.
+    defaultPath: "~/.prime/agent/sessions",
   },
   {
     id: "opencode",
@@ -69,6 +81,7 @@ export function defaultSettings(): SourceSettings {
     retentionDays: 90,
     privacyMode: "strict",
     hostId: "",
+    priceOverrides: {},
     sources: Object.fromEntries(
       PROVIDER_SOURCES.map((source) => [
         source.id,

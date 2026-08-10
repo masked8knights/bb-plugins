@@ -26,7 +26,8 @@ type BreakdownMode = "model" | "day";
 const providerColor: Record<string, string> = {
   codex: "#b8b8b8",
   claude: "#d97757",
-  prime: "#a78bfa",
+  pi: "#a78bfa",
+  prime: "#818cf8",
   opencode: "#38bdf8",
   omp: "#fb7185",
   other: "#94a3b8",
@@ -35,7 +36,8 @@ const providerColor: Record<string, string> = {
 const providerTone: Record<string, string> = {
   codex: "border-foreground/25 bg-foreground/5",
   claude: "border-orange-500/35 bg-orange-500/10",
-  prime: "border-violet-500/35 bg-violet-500/10",
+  pi: "border-violet-500/35 bg-violet-500/10",
+  prime: "border-indigo-500/35 bg-indigo-500/10",
   opencode: "border-sky-500/35 bg-sky-500/10",
   omp: "border-rose-500/35 bg-rose-500/10",
   other: "border-border bg-muted/50",
@@ -89,6 +91,16 @@ function formatTokens(value: number | null | undefined): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}m`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
   return formatNumber(value);
+}
+
+function formatUsd(value: number | null | undefined): string {
+  if (value == null) return "—";
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(value);
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -438,9 +450,11 @@ function MetricsStrip({ dashboard }: { dashboard: DashboardResult }) {
   const metrics = deriveMetrics(dashboard);
   const cacheDetail = dashboard.totals.cachedInputTokens == null ? "Token cache data unavailable" : `${formatTokens(dashboard.totals.cachedInputTokens)} cached input`;
   const contextDetail = dashboard.totals.contextPeak == null ? "No context snapshots" : `${formatNumber(dashboard.totals.compactions)} compactions`;
+  const costDetail = dashboard.totals.costUsd == null ? "Token usage unavailable" : dashboard.totals.costEstimated ? "Some models use fallback pricing" : "Model-matched list prices";
   return (
-    <section className="grid grid-cols-2 gap-px border-y border-border bg-border md:grid-cols-6">
+    <section className="grid grid-cols-2 gap-px border-y border-border bg-border md:grid-cols-4 lg:grid-cols-7">
       <Metric label="Processed tokens" value={formatTokens(dashboard.totals.totalTokens)} detail={`${formatTokens(metrics.tokensPerTurn)} per turn`} />
+      <Metric label="Estimated cost" value={formatUsd(dashboard.totals.costUsd)} detail={costDetail} />
       <Metric label="Cache read share" value={formatPercent(metrics.cacheReadShare)} detail={cacheDetail} />
       <Metric label="Tool success" value={formatPercent(metrics.toolSuccess)} detail={`${formatNumber(dashboard.totals.toolCalls)} calls observed`} />
       <Metric label="Context peak" value={formatPercent(dashboard.totals.contextPeak)} detail={contextDetail} />
@@ -482,6 +496,7 @@ function HarnessTable({ dashboard }: { dashboard: DashboardResult }) {
               <th className="px-3 py-2 text-right font-normal">Tool calls</th>
               <th className="px-3 py-2 text-right font-normal">Tool success</th>
               <th className="px-3 py-2 text-right font-normal">Context peak</th>
+              <th className="px-3 py-2 text-right font-normal">Cost</th>
               <th className="py-2 pl-3 text-right font-normal">Avg session</th>
             </tr>
           </thead>
@@ -497,10 +512,11 @@ function HarnessTable({ dashboard }: { dashboard: DashboardResult }) {
                   <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{formatNumber(provider.toolCalls)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${stats.toolSuccess != null && stats.toolSuccess < 0.9 ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}>{formatPercent(stats.toolSuccess)}</td>
                   <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{formatPercent(stats.contextPeak)}</td>
+                  <td className="px-3 py-2 text-right text-muted-foreground tabular-nums" title={provider.costEstimated ? "Some sessions use fallback pricing" : undefined}>{formatUsd(provider.costUsd)}{provider.costEstimated ? "*" : ""}</td>
                   <td className="py-2 pl-3 text-right text-muted-foreground tabular-nums">{formatDuration(stats.averageDuration)}</td>
                 </tr>
               );
-            }) : <tr><td colSpan={8} className="py-6 text-center text-muted-foreground">No harness activity in this window.</td></tr>}
+            }) : <tr><td colSpan={9} className="py-6 text-center text-muted-foreground">No harness activity in this window.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -607,7 +623,7 @@ function SessionTable({ sessions, onOpen }: { sessions: ProviderSessionRecord[];
       <div className="overflow-x-auto border-y border-border">
         <table className="w-full min-w-[820px] text-sm">
           <thead className="border-b border-border text-left text-xs text-muted-foreground">
-            <tr><th className="py-2 pr-3 font-normal">Session</th><th className="px-3 py-2 font-normal">Harness</th><th className="px-3 py-2 font-normal">Model</th><th className="px-3 py-2 text-right font-normal">Turns</th><th className="px-3 py-2 text-right font-normal">Tokens</th><th className="px-3 py-2 text-right font-normal">Failures</th><th className="py-2 pl-3 font-normal">Updated</th></tr>
+            <tr><th className="py-2 pr-3 font-normal">Session</th><th className="px-3 py-2 font-normal">Harness</th><th className="px-3 py-2 font-normal">Model</th><th className="px-3 py-2 text-right font-normal">Turns</th><th className="px-3 py-2 text-right font-normal">Tokens</th><th className="px-3 py-2 text-right font-normal">Cost</th><th className="px-3 py-2 text-right font-normal">Failures</th><th className="py-2 pl-3 font-normal">Updated</th></tr>
           </thead>
           <tbody>
             {sessions.length ? sessions.map((session) => (
@@ -622,10 +638,11 @@ function SessionTable({ sessions, onOpen }: { sessions: ProviderSessionRecord[];
                 <td className="max-w-[170px] truncate px-3 py-2 font-mono text-[11px] text-muted-foreground" title={session.model ?? undefined}>{session.model ?? "—"}</td>
                 <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{formatNumber(session.turnCount)}</td>
                 <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{formatTokens(session.totalTokens)}</td>
+                <td className="px-3 py-2 text-right text-muted-foreground tabular-nums" title={session.costEstimated ? "Fallback pricing — model not in the price table" : undefined}>{formatUsd(session.costUsd)}{session.costEstimated ? "*" : ""}</td>
                 <td className={`px-3 py-2 text-right tabular-nums ${session.failureCount || session.toolErrors ? "text-destructive" : "text-muted-foreground"}`}>{formatNumber(session.failureCount + session.toolErrors)}</td>
                 <td className="whitespace-nowrap py-2 pl-3 text-muted-foreground">{timeAgo(session.updatedAt)}</td>
               </tr>
-            )) : <tr><td colSpan={7} className="py-6 text-center text-muted-foreground">No sessions match these filters.</td></tr>}
+            )) : <tr><td colSpan={8} className="py-6 text-center text-muted-foreground">No sessions match these filters.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -680,6 +697,18 @@ function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       setBusy(false);
     }
   };
+  const clearAndRescan = async () => {
+    if (!window.confirm("Clear all indexed telemetry and rescan every provider store and bb thread?")) return;
+    setBusy(true);
+    try {
+      await rpc.call("reindex", { clear: true });
+      setRefreshToken((value) => value + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (firstLoad && !dashboard) return <div className="h-full min-h-0 overflow-y-auto p-5 text-sm text-muted-foreground">Loading telemetry…</div>;
   return (
@@ -692,6 +721,7 @@ function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <SegmentedControl ariaLabel="Time range" options={ranges.map(({ id, short }) => ({ id, label: short }))} value={input.range} onChange={(range) => updateInput({ range })} />
+            <button type="button" aria-label="Clear and rescan" title="Clear all indexed telemetry and rescan from scratch" onClick={() => void clearAndRescan()} disabled={busy} className="rounded-md border border-destructive/40 px-2.5 py-2 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-wait disabled:opacity-50">Clear &amp; rescan</button>
             <button type="button" aria-label="Refresh" title="Refresh telemetry" onClick={() => void refresh()} disabled={busy} className="rounded-md border border-border p-2 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-wait disabled:opacity-50"><RefreshIcon /></button>
           </div>
         </header>
@@ -746,6 +776,7 @@ function SessionDetail({ sourceRecordId, onBack }: { sourceRecordId: string; onB
   if (error) return <div className="h-full min-h-0 overflow-y-auto p-5"><button type="button" onClick={onBack} className="mb-4 text-sm text-muted-foreground hover:text-foreground">← Back to telemetry</button><div className="border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">{error}</div></div>;
   if (!detail) return <div className="h-full min-h-0 overflow-y-auto p-5 text-sm text-muted-foreground">Loading session…</div>;
   const session = detail.session;
+  const anyEstimatedCost = (detail.cost?.estimated ?? false) || detail.turns.some((turn) => turn.costEstimated);
   return (
     <div className="h-full min-h-0 overflow-y-auto text-foreground">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-5 py-6 md:px-6">
@@ -757,12 +788,24 @@ function SessionDetail({ sourceRecordId, onBack }: { sourceRecordId: string; onB
           </div>
           {session.bbThreadId ? <button type="button" onClick={() => navigate.toThread(session.bbThreadId!)} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent">Open thread</button> : null}
         </div>
-        <div className="grid gap-3 border-y border-border py-3 sm:grid-cols-2 lg:grid-cols-4"><DetailValue label="Host" value={session.hostId} /><DetailValue label="Store" value={session.storeLabel} /><DetailValue label="Model" value={session.model ?? "Not available"} mono /><DetailValue label="Updated" value={session.updatedAt ? new Date(session.updatedAt).toLocaleString() : "Not available"} /><DetailValue label="Provider session ID" value={session.providerSessionId ?? "Not available"} mono /><DetailValue label="Turns" value={formatNumber(session.turnCount)} /><DetailValue label="Tools" value={`${formatNumber(session.toolCalls)} · ${formatNumber(session.toolErrors)} errors`} /><DetailValue label="Tokens" value={formatTokens(session.totalTokens)} /></div>
+        <div className="grid gap-3 border-y border-border py-3 sm:grid-cols-2 lg:grid-cols-4"><DetailValue label="Host" value={session.hostId} /><DetailValue label="Store" value={session.storeLabel} /><DetailValue label="Model" value={session.model ?? "Not available"} mono /><DetailValue label="Updated" value={session.updatedAt ? new Date(session.updatedAt).toLocaleString() : "Not available"} /><DetailValue label="Provider session ID" value={session.providerSessionId ?? "Not available"} mono /><DetailValue label="Turns" value={formatNumber(session.turnCount)} /><DetailValue label="Tools" value={`${formatNumber(session.toolCalls)} · ${formatNumber(session.toolErrors)} errors`} /><DetailValue label="Tokens" value={formatTokens(session.totalTokens)} /><DetailValue label="Cost" value={`${formatUsd(session.costUsd)}${session.costEstimated ? "*" : ""}`} /></div>
         <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Coverage</h2><div className="flex flex-wrap gap-2 border-y border-border py-3">{Object.entries(session.coverage).map(([name, level]) => <span key={name} className={`rounded-md border px-2 py-1 text-xs ${level === "complete" ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300" : level === "partial" ? "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300" : "border-border text-muted-foreground"}`}>{name}: {level}</span>)}</div></section>
         {detail.findings.length ? <FindingList findings={detail.findings} onOpen={() => undefined} /> : null}
-        <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Turn summary</h2><div className="overflow-x-auto border-y border-border"><table className="w-full min-w-[600px] text-sm"><thead className="border-b border-border text-left text-xs text-muted-foreground"><tr><th className="py-2 pr-3 font-normal">Turn</th><th className="px-3 py-2 font-normal">Status</th><th className="px-3 py-2 text-right font-normal">Steps</th><th className="px-3 py-2 text-right font-normal">Tools</th><th className="px-3 py-2 text-right font-normal">Tokens</th><th className="py-2 pl-3 text-right font-normal">Duration</th></tr></thead><tbody>{detail.turns.length ? detail.turns.map((turn) => <tr key={turn.id} className="border-b border-border/50 last:border-b-0"><td className="py-2 pr-3 font-mono text-[11px]">{turn.id}</td><td className="px-3 py-2">{turn.status}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.steps)}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.toolCalls)}{turn.toolErrors ? ` · ${turn.toolErrors} errors` : ""}</td><td className="px-3 py-2 text-right tabular-nums">{formatTokens(turn.totalTokens)}</td><td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{formatDuration(turn.durationMs)}</td></tr>) : <tr><td colSpan={6} className="py-4 text-muted-foreground">No structured turn events are available.</td></tr>}</tbody></table></div></section>
+        <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Turn summary</h2><div className="overflow-x-auto border-y border-border"><table className="w-full min-w-[600px] text-sm"><thead className="border-b border-border text-left text-xs text-muted-foreground"><tr><th className="py-2 pr-3 font-normal">Turn</th><th className="px-3 py-2 font-normal">Status</th><th className="px-3 py-2 text-right font-normal">Steps</th><th className="px-3 py-2 text-right font-normal">Tools</th><th className="px-3 py-2 text-right font-normal">Tokens</th><th className="px-3 py-2 text-right font-normal">Cost</th><th className="py-2 pl-3 text-right font-normal">Duration</th></tr></thead><tbody>{detail.turns.length ? detail.turns.map((turn) => <tr key={turn.id} className="border-b border-border/50 last:border-b-0"><td className="py-2 pr-3 font-mono text-[11px]">{turn.id}</td><td className="px-3 py-2">{turn.status}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.steps)}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.toolCalls)}{turn.toolErrors ? ` · ${turn.toolErrors} errors` : ""}</td><td className="px-3 py-2 text-right tabular-nums">{formatTokens(turn.totalTokens)}</td><td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{formatUsd(turn.costUsd)}</td><td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{formatDuration(turn.durationMs)}</td></tr>) : <tr><td colSpan={7} className="py-4 text-muted-foreground">No structured turn events are available.</td></tr>}</tbody></table></div></section>
         <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Evidence</h2><div className="border-y border-border">{detail.evidence.slice(0, 80).map((evidence) => <div key={`${evidence.source}:${evidence.sourceSequence}:${evidence.eventType}`} className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border/50 py-2 text-xs last:border-b-0"><span className="text-muted-foreground">{evidence.source}</span><span className="font-mono">{evidence.eventType}</span><span className="text-muted-foreground">seq {evidence.sourceSequence ?? "—"}</span><span className="text-muted-foreground">{evidence.at ? new Date(evidence.at).toLocaleTimeString() : "—"}</span></div>)}</div></section>
-        <div className="border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">Cost is not shown. Token counts do not establish cost without a verified provider and model price table.</div>
+        {detail.cost ? (
+          <div className="border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
+            Estimated cost: <span className="font-medium text-foreground">{formatUsd(detail.cost.totalUsd)}</span> · {formatNumber(detail.cost.pricedTokens)} tokens priced ·{" "}
+            {detail.cost.estimated ? (
+              <>fallback {session.provider} pricing for <span className="font-mono">{session.model ?? "unknown model"}</span> — set the telemetry <span className="font-mono">priceTable</span> setting for verified prices</>
+            ) : (
+              <>priced from the price table{detail.cost.model ? <> for <span className="font-mono">{detail.cost.model}</span></> : null}</>
+            )}
+          </div>
+        ) : (
+          <div className="border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">Cost is not available — no token usage was recorded for this session.</div>
+        )}
+        {anyEstimatedCost ? <div className="text-[11px] text-muted-foreground">* fallback price used; see <span className="font-mono">bb telemetry prices</span> for the effective table.</div> : null}
       </div>
     </div>
   );
@@ -770,9 +813,19 @@ function SessionDetail({ sourceRecordId, onBack }: { sourceRecordId: string; onB
 
 function TelemetryPanel({ subPath }: PluginNavPanelProps) {
   const navigate = useBbNavigate();
-  const detailId = subPath.startsWith("session/") ? decodeURIComponent(subPath.slice("session/".length)) : null;
+  // bb's panel route encodes each subPath segment and passes the splat back
+  // raw (matchPath does not decode), so decode exactly once here. Do NOT
+  // encode on the way out — getPluginPanelRoutePath already encodes.
+  let detailId: string | null = null;
+  if (subPath.startsWith("session/")) {
+    try {
+      detailId = decodeURIComponent(subPath.slice("session/".length));
+    } catch {
+      detailId = null;
+    }
+  }
   if (detailId) return <SessionDetail sourceRecordId={detailId} onBack={() => navigate.toPluginPanel("telemetry")} />;
-  return <Dashboard onOpen={(id) => navigate.toPluginPanel("telemetry", { subPath: `session/${encodeURIComponent(id)}` })} />;
+  return <Dashboard onOpen={(id) => navigate.toPluginPanel("telemetry", { subPath: `session/${id}` })} />;
 }
 
 function ThreadTelemetryPanel({ threadId }: PluginThreadPanelProps) {
