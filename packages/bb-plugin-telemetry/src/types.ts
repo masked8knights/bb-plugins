@@ -376,14 +376,3 @@ export interface DashboardResult {
   coverage: Array<{ provider: AnalyticsProviderId; capability: CapabilityName; level: CapabilityLevel; note: string }>;
 }
 
-export interface SessionDetailResult {
-  session: ProviderSessionRecord;
-  source: SourceStatusRecord | null;
-  turns: NormalizedTurn[];
-  items: NormalizedItem[];
-  findings: FindingRecord[];
-  links: LinkRecord[];
-  evidence: EvidenceRef[];
-  cost: CostEstimate | null;
-  costCoverage: "model-priced" | "fallback-priced" | "unavailable";
-}

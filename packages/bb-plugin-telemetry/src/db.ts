@@ -8,7 +8,6 @@ import type {
   NormalizedItem,
   NormalizedTurn,
   ProviderSessionRecord,
-  SessionDetailResult,
   SourceStatusRecord,
   UsageSnapshot,
 } from "./types";
@@ -283,30 +282,6 @@ function sourceFromRow(row: Row): SourceStatusRecord {
   };
 }
 
-function turnFromRow(row: Row): NormalizedTurn {
-  return {
-    id: String(row.id),
-    startedAt: nullableNumber(row.started_at),
-    endedAt: nullableNumber(row.ended_at),
-    status: String(row.status ?? "unknown") as NormalizedTurn["status"],
-    durationMs: nullableNumber(row.duration_ms),
-    steps: Number(row.steps ?? 0),
-    toolCalls: Number(row.tool_calls ?? 0),
-    toolErrors: Number(row.tool_errors ?? 0),
-    inputTokens: nullableNumber(row.input_tokens),
-    cachedInputTokens: nullableNumber(row.cached_input_tokens),
-    cachedWriteTokens: nullableNumber(row.cached_write_tokens),
-    outputTokens: nullableNumber(row.output_tokens),
-    reasoningTokens: nullableNumber(row.reasoning_tokens),
-    totalTokens: nullableNumber(row.total_tokens),
-    contextPeak: nullableNumber(row.context_peak),
-    costUsd: null,
-    costEstimated: false,
-    sourceSequenceStart: nullableNumber(row.source_sequence_start),
-    sourceSequenceEnd: nullableNumber(row.source_sequence_end),
-  };
-}
-
 function itemFromRow(row: Row): NormalizedItem {
   return {
     sessionId: String(row.session_id),
@@ -319,16 +294,6 @@ function itemFromRow(row: Row): NormalizedItem {
     errorCategory: typeof row.error_category === "string" ? row.error_category : null,
     approvalStatus: typeof row.approval_status === "string" ? row.approval_status : null,
     sourceSequence: Number(row.source_sequence ?? 0),
-    at: nullableNumber(row.at),
-  };
-}
-
-function evidenceFromRow(row: Row): EvidenceRef {
-  return {
-    source: row.source === "bb" ? "bb" : "provider",
-    sourceRecordId: String(row.session_id),
-    sourceSequence: nullableNumber(row.source_sequence),
-    eventType: String(row.event_type),
     at: nullableNumber(row.at),
   };
 }
@@ -686,18 +651,6 @@ export class AnalyticsStore {
       .run(count, now, provider, hostId);
   }
 
-  getTurns(sessionId: string): NormalizedTurn[] {
-    return (this.db.prepare("SELECT * FROM analytics_turns WHERE session_id = ? ORDER BY COALESCE(started_at, 0)").all(sessionId) as Row[]).map(turnFromRow);
-  }
-
-  getItems(sessionId: string): NormalizedItem[] {
-    return (this.db.prepare("SELECT * FROM analytics_items WHERE session_id = ? ORDER BY source_sequence").all(sessionId) as Row[]).map(itemFromRow);
-  }
-
-  getEvidence(sessionId: string): EvidenceRef[] {
-    return (this.db.prepare("SELECT * FROM analytics_evidence WHERE session_id = ? ORDER BY COALESCE(source_sequence, 0)").all(sessionId) as Row[]).map(evidenceFromRow);
-  }
-
   getSources(): SourceStatusRecord[] {
     return (this.db.prepare("SELECT * FROM analytics_sources ORDER BY provider, host_id").all() as Row[]).map(sourceFromRow);
   }
@@ -739,18 +692,6 @@ export class AnalyticsStore {
     transaction();
   }
 
-  getLinksForSession(sessionId: string): LinkRecord[] {
-    const rows = this.db.prepare("SELECT * FROM analytics_session_links WHERE provider_record_id = ? OR bb_thread_id = ?").all(sessionId, sessionId.replace(/^bb:/, "")) as Row[];
-    return rows.map((row) => ({
-      providerSessionId: String(row.provider_record_id),
-      bbThreadId: String(row.bb_thread_id),
-      strategy: String(row.strategy) as LinkRecord["strategy"],
-      confidence: Number(row.confidence),
-      policy: String(row.policy) as LinkRecord["policy"],
-      evidence: json(row.evidence_json, []),
-      matchedAt: Number(row.matched_at),
-    }));
-  }
 
   replaceFindings(findings: FindingRecord[]): void {
     const transaction = this.db.transaction(() => {
@@ -792,24 +733,6 @@ export class AnalyticsStore {
       evidence: json(row.evidence_json, []),
       createdAt: Number(row.created_at),
     }));
-  }
-
-  getSessionDetail(id: string): SessionDetailResult | null {
-    const session = this.getSession(id);
-    if (!session) return null;
-    const source = this.getSources().find((candidate) => candidate.provider === session.provider && candidate.hostId === session.hostId) ?? null;
-    const findings = this.getFindings().filter((finding) => finding.scopeId === id || (finding.scope === "provider" && finding.provider === session.provider));
-    return {
-      session,
-      source,
-      turns: this.getTurns(id),
-      items: this.getItems(id),
-      findings,
-      links: this.getLinksForSession(id),
-      evidence: this.getEvidence(id),
-      cost: null,
-      costCoverage: "unavailable",
-    };
   }
 
   latestEventSequence(sessionId: string): number {

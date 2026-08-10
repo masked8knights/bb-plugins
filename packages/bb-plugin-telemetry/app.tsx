@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   definePluginApp,
-  type PluginNavPanelProps,
-  type PluginThreadPanelProps,
-  useBbNavigate,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
@@ -13,7 +10,6 @@ import type {
   DashboardResult,
   FindingRecord,
   ProviderSessionRecord,
-  SessionDetailResult,
   SourceStatusRecord,
 } from "./src/types";
 import { compactDashboardInput, reindexInput } from "./src/rpc-input";
@@ -199,7 +195,7 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
   );
 }
 
-function FindingList({ findings, onOpen }: { findings: FindingRecord[]; onOpen: (id: string) => void }) {
+function FindingList({ findings }: { findings: FindingRecord[] }) {
   if (!findings.length) return null;
   return (
     <section className="flex flex-col gap-3">
@@ -218,11 +214,6 @@ function FindingList({ findings, onOpen }: { findings: FindingRecord[]; onOpen: 
               <div className="mt-1 text-sm text-muted-foreground">{finding.summary}</div>
               <div className="mt-1 text-xs text-muted-foreground">{finding.coverageNote}</div>
             </div>
-            {finding.scopeId && finding.scope === "session" ? (
-              <button type="button" onClick={() => onOpen(finding.scopeId!)} className="shrink-0 rounded-md border border-border px-2 py-1 text-xs text-foreground hover:bg-accent">
-                Open session
-              </button>
-            ) : null}
           </div>
         ))}
       </div>
@@ -613,7 +604,7 @@ function Breakdown({ dashboard, mode, onModeChange }: { dashboard: DashboardResu
   );
 }
 
-function SessionTable({ sessions, onOpen }: { sessions: ProviderSessionRecord[]; onOpen: (id: string) => void }) {
+function SessionTable({ sessions }: { sessions: ProviderSessionRecord[] }) {
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between gap-3">
@@ -629,10 +620,10 @@ function SessionTable({ sessions, onOpen }: { sessions: ProviderSessionRecord[];
             {sessions.length ? sessions.map((session) => (
               <tr key={session.id} className="border-b border-border/50 last:border-b-0 hover:bg-accent/45">
                 <td className="max-w-[340px] py-2 pr-3">
-                  <button type="button" onClick={() => onOpen(session.id)} className="block max-w-full text-left">
+                  <div className="block max-w-full">
                     <span className="block truncate font-medium text-foreground" title={session.title}>{session.title}</span>
                     <span className="block truncate text-[11px] text-muted-foreground">{session.linkState === "linked" ? "Linked to a bb thread" : session.linkState === "suggested" ? "Possible bb link" : session.source === "bb" ? "Native bb thread" : "Provider session"}</span>
-                  </button>
+                  </div>
                 </td>
                 <td className="px-3 py-2"><ProviderBadge provider={session.provider} /></td>
                 <td className="max-w-[170px] truncate px-3 py-2 font-mono text-[11px] text-muted-foreground" title={session.model ?? undefined}>{session.model ?? "—"}</td>
@@ -650,7 +641,7 @@ function SessionTable({ sessions, onOpen }: { sessions: ProviderSessionRecord[];
   );
 }
 
-function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
+function Dashboard() {
   const rpc = useRpc<typeof rpcContract>();
   const connection = useRealtimeConnectionState();
   const [input, setInput] = useState<DashboardInput>({ view: "provider", range: "7d" });
@@ -745,92 +736,19 @@ function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           </section>
 
           <MetricsStrip dashboard={dashboard} />
-          <FindingList findings={dashboard.findings} onOpen={onOpen} />
+          <FindingList findings={dashboard.findings} />
           <HarnessTable dashboard={dashboard} />
           <ToolsTable dashboard={dashboard} />
           <Breakdown dashboard={dashboard} mode={breakdownMode} onModeChange={setBreakdownMode} />
-          <SessionTable sessions={dashboard.sessions} onOpen={onOpen} />
+          <SessionTable sessions={dashboard.sessions} />
         </> : <div className="border-y border-border py-8 text-sm text-muted-foreground">No indexed data yet. Use Refresh to discover provider sessions and bb threads.</div>}
       </div>
     </div>
   );
 }
 
-function DetailValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return <div className="min-w-0"><div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div><div className={`mt-1 truncate text-sm ${mono ? "font-mono" : ""}`} title={value}>{value}</div></div>;
-}
-
-function SessionDetail({ sourceRecordId, onBack }: { sourceRecordId: string; onBack: () => void }) {
-  const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
-  const [detail, setDetail] = useState<SessionDetailResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setDetail(null);
-    setError(null);
-    const request = sourceRecordId.startsWith("bb:")
-      ? rpc.call("threadDetail", { threadId: sourceRecordId.slice(3) })
-      : rpc.call("sessionDetail", { sourceRecordId });
-    void request.then(setDetail).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, [rpc, sourceRecordId]);
-  if (error) return <div className="h-full min-h-0 overflow-y-auto p-5"><button type="button" onClick={onBack} className="mb-4 text-sm text-muted-foreground hover:text-foreground">← Back to telemetry</button><div className="border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">{error}</div></div>;
-  if (!detail) return <div className="h-full min-h-0 overflow-y-auto p-5 text-sm text-muted-foreground">Loading session…</div>;
-  const session = detail.session;
-  const anyEstimatedCost = (detail.cost?.estimated ?? false) || detail.turns.some((turn) => turn.costEstimated);
-  return (
-    <div className="h-full min-h-0 overflow-y-auto text-foreground">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-5 py-6 md:px-6">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
-          <div>
-            <button type="button" onClick={onBack} className="mb-2 text-xs text-muted-foreground hover:text-foreground">← Back to telemetry</button>
-            <h1 className="max-w-2xl text-lg font-semibold">{session.title}</h1>
-            <div className="mt-2 flex flex-wrap items-center gap-2"><ProviderBadge provider={session.provider} /><span className="text-xs text-muted-foreground">{session.source} · {session.status}</span>{session.linkState !== "none" ? <span className="text-xs text-muted-foreground">· {session.linkState} bb link</span> : null}</div>
-          </div>
-          {session.bbThreadId ? <button type="button" onClick={() => navigate.toThread(session.bbThreadId!)} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent">Open thread</button> : null}
-        </div>
-        <div className="grid gap-3 border-y border-border py-3 sm:grid-cols-2 lg:grid-cols-4"><DetailValue label="Host" value={session.hostId} /><DetailValue label="Store" value={session.storeLabel} /><DetailValue label="Model" value={session.model ?? "Not available"} mono /><DetailValue label="Updated" value={session.updatedAt ? new Date(session.updatedAt).toLocaleString() : "Not available"} /><DetailValue label="Provider session ID" value={session.providerSessionId ?? "Not available"} mono /><DetailValue label="Turns" value={formatNumber(session.turnCount)} /><DetailValue label="Tools" value={`${formatNumber(session.toolCalls)} · ${formatNumber(session.toolErrors)} errors`} /><DetailValue label="Tokens" value={formatTokens(session.totalTokens)} /><DetailValue label="Cost" value={`${formatUsd(session.costUsd)}${session.costEstimated ? "*" : ""}`} /></div>
-        <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Coverage</h2><div className="flex flex-wrap gap-2 border-y border-border py-3">{Object.entries(session.coverage).map(([name, level]) => <span key={name} className={`rounded-md border px-2 py-1 text-xs ${level === "complete" ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300" : level === "partial" ? "border-amber-500/30 bg-amber-500/5 text-amber-700 dark:text-amber-300" : "border-border text-muted-foreground"}`}>{name}: {level}</span>)}</div></section>
-        {detail.findings.length ? <FindingList findings={detail.findings} onOpen={() => undefined} /> : null}
-        <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Turn summary</h2><div className="overflow-x-auto border-y border-border"><table className="w-full min-w-[600px] text-sm"><thead className="border-b border-border text-left text-xs text-muted-foreground"><tr><th className="py-2 pr-3 font-normal">Turn</th><th className="px-3 py-2 font-normal">Status</th><th className="px-3 py-2 text-right font-normal">Steps</th><th className="px-3 py-2 text-right font-normal">Tools</th><th className="px-3 py-2 text-right font-normal">Tokens</th><th className="px-3 py-2 text-right font-normal">Cost</th><th className="py-2 pl-3 text-right font-normal">Duration</th></tr></thead><tbody>{detail.turns.length ? detail.turns.map((turn) => <tr key={turn.id} className="border-b border-border/50 last:border-b-0"><td className="py-2 pr-3 font-mono text-[11px]">{turn.id}</td><td className="px-3 py-2">{turn.status}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.steps)}</td><td className="px-3 py-2 text-right tabular-nums">{formatNumber(turn.toolCalls)}{turn.toolErrors ? ` · ${turn.toolErrors} errors` : ""}</td><td className="px-3 py-2 text-right tabular-nums">{formatTokens(turn.totalTokens)}</td><td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{formatUsd(turn.costUsd)}</td><td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{formatDuration(turn.durationMs)}</td></tr>) : <tr><td colSpan={7} className="py-4 text-muted-foreground">No structured turn events are available.</td></tr>}</tbody></table></div></section>
-        <section className="flex flex-col gap-2"><h2 className="text-sm font-medium">Evidence</h2><div className="border-y border-border">{detail.evidence.slice(0, 80).map((evidence) => <div key={`${evidence.source}:${evidence.sourceSequence}:${evidence.eventType}`} className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border/50 py-2 text-xs last:border-b-0"><span className="text-muted-foreground">{evidence.source}</span><span className="font-mono">{evidence.eventType}</span><span className="text-muted-foreground">seq {evidence.sourceSequence ?? "—"}</span><span className="text-muted-foreground">{evidence.at ? new Date(evidence.at).toLocaleTimeString() : "—"}</span></div>)}</div></section>
-        {detail.cost ? (
-          <div className="border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-            Estimated cost: <span className="font-medium text-foreground">{formatUsd(detail.cost.totalUsd)}</span> · {formatNumber(detail.cost.pricedTokens)} tokens priced ·{" "}
-            {detail.cost.estimated ? (
-              <>fallback {session.provider} pricing for <span className="font-mono">{session.model ?? "unknown model"}</span> — set the telemetry <span className="font-mono">priceTable</span> setting for verified prices</>
-            ) : (
-              <>priced from the price table{detail.cost.model ? <> for <span className="font-mono">{detail.cost.model}</span></> : null}</>
-            )}
-          </div>
-        ) : (
-          <div className="border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">Cost is not available — no token usage was recorded for this session.</div>
-        )}
-        {anyEstimatedCost ? <div className="text-[11px] text-muted-foreground">* fallback price used; see <span className="font-mono">bb telemetry prices</span> for the effective table.</div> : null}
-      </div>
-    </div>
-  );
-}
-
-function TelemetryPanel({ subPath }: PluginNavPanelProps) {
-  const navigate = useBbNavigate();
-  // bb's panel route encodes each subPath segment and passes the splat back
-  // raw (matchPath does not decode), so decode exactly once here. Do NOT
-  // encode on the way out — getPluginPanelRoutePath already encodes.
-  let detailId: string | null = null;
-  if (subPath.startsWith("session/")) {
-    try {
-      detailId = decodeURIComponent(subPath.slice("session/".length));
-    } catch {
-      detailId = null;
-    }
-  }
-  if (detailId) return <SessionDetail sourceRecordId={detailId} onBack={() => navigate.toPluginPanel("telemetry")} />;
-  return <Dashboard onOpen={(id) => navigate.toPluginPanel("telemetry", { subPath: `session/${id}` })} />;
-}
-
-function ThreadTelemetryPanel({ threadId }: PluginThreadPanelProps) {
-  const navigate = useBbNavigate();
-  return <SessionDetail sourceRecordId={`bb:${threadId}`} onBack={() => navigate.toPluginPanel("telemetry")} />;
+function TelemetryPanel() {
+  return <Dashboard />;
 }
 
 export default definePluginApp((app) => {
@@ -840,13 +758,5 @@ export default definePluginApp((app) => {
     icon: "Activity",
     path: "telemetry",
     component: TelemetryPanel,
-  });
-  app.slots.threadPanelAction({
-    id: "analyze-thread",
-    title: "Analyze thread",
-    icon: "Activity",
-    layout: "flush",
-    run: async ({ openPanel }) => openPanel({ title: "Thread telemetry" }),
-    component: ThreadTelemetryPanel,
   });
 });

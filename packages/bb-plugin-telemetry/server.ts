@@ -6,7 +6,6 @@ import { analyzeFindings } from "./src/findings";
 import { indexBbThreads } from "./src/bb-indexer";
 import { explicitProviderLinkKey, linkProviderSessions } from "./src/linker";
 import {
-  costForTokens,
   currentPriceTable,
   lookupModelPrice,
   modelsDevToTable,
@@ -26,7 +25,6 @@ import type {
   PriceOverrides,
   ProviderId,
   RangeId,
-  SessionDetailResult,
   SourceStatusRecord,
   SourceKind,
   SourceSettings,
@@ -197,48 +195,6 @@ const providerSummarySchema = z.object({
   sampleSize: z.number(),
   coverage: capabilitySchema,
 });
-const turnSchema = z.object({
-  id: z.string(),
-  startedAt: z.number().nullable(),
-  endedAt: z.number().nullable(),
-  status: z.enum(["active", "completed", "failed", "unknown"]),
-  durationMs: z.number().nullable(),
-  steps: z.number(),
-  toolCalls: z.number(),
-  toolErrors: z.number(),
-  inputTokens: z.number().nullable(),
-  cachedInputTokens: z.number().nullable(),
-  cachedWriteTokens: z.number().nullable(),
-  outputTokens: z.number().nullable(),
-  reasoningTokens: z.number().nullable(),
-  totalTokens: z.number().nullable(),
-  costUsd: z.number().nullable(),
-  costEstimated: z.boolean(),
-  contextPeak: z.number().nullable(),
-  sourceSequenceStart: z.number().nullable(),
-  sourceSequenceEnd: z.number().nullable(),
-});
-const itemSchema = z.object({
-  id: z.string(),
-  turnId: z.string().nullable(),
-  kind: z.string(),
-  toolName: z.string().nullable(),
-  status: z.enum(["running", "completed", "failed", "interrupted", "unknown"]),
-  durationMs: z.number().nullable(),
-  errorCategory: z.string().nullable(),
-  approvalStatus: z.string().nullable(),
-  sourceSequence: z.number(),
-  at: z.number().nullable(),
-});
-const linkSchema = z.object({
-  providerSessionId: z.string(),
-  bbThreadId: z.string(),
-  strategy: z.enum(["explicit-session-id", "provider-thread-id", "metadata-window"]),
-  confidence: z.number(),
-  policy: z.enum(["suggested", "accepted"]),
-  evidence: z.array(evidenceSchema),
-  matchedAt: z.number(),
-});
 const statusOutputSchema = z.object({
   generatedAt: z.number(),
   sources: z.array(sourceStatusSchema),
@@ -271,18 +227,6 @@ const dashboardOutputSchema = z.object({
   models: z.array(z.object({ model: z.string(), provider: providerSchema, sessions: z.number(), totalTokens: z.number().nullable() })),
   coverage: z.array(z.object({ provider: providerSchema, capability: z.enum(["metadata", "turns", "tools", "tokens", "context", "errors", "latency", "models"]), level: capabilityLevelSchema, note: z.string() })),
 });
-const sessionDetailOutputSchema = z.object({
-  session: sessionSchema,
-  source: sourceStatusSchema.nullable(),
-  turns: z.array(turnSchema),
-  items: z.array(itemSchema),
-  findings: z.array(findingSchema),
-  links: z.array(linkSchema),
-  evidence: z.array(evidenceSchema),
-  cost: costSchema.nullable(),
-  costCoverage: z.enum(["model-priced", "fallback-priced", "unavailable"]),
-});
-
 export const rpcContract = defineRpcContract({
   status: {
     input: z.null(),
@@ -295,14 +239,6 @@ export const rpcContract = defineRpcContract({
   listSessions: {
     input: dashboardInputSchema.extend({ limit: z.number().int().min(1).max(200).optional(), offset: z.number().int().min(0).optional() }).strict(),
     output: z.object({ sessions: z.array(sessionSchema), total: z.number() }),
-  },
-  sessionDetail: {
-    input: z.object({ sourceRecordId: z.string().min(1) }).strict(),
-    output: sessionDetailOutputSchema,
-  },
-  threadDetail: {
-    input: z.object({ threadId: z.string().min(1) }).strict(),
-    output: sessionDetailOutputSchema,
   },
   reindex: {
     input: z.object({ full: z.boolean().optional(), clear: z.boolean().optional(), providers: z.array(z.string()).optional(), hostId: z.string().optional() }).strict(),
@@ -457,38 +393,6 @@ export default async function plugin(bb: BbPluginApi) {
     const visible = sessionFilter(sessions, input, now);
     const ids = new Set(visible.map((session) => session.id));
     return analyzeFindings(visible, store.getItemsForSessions(ids), sources, now);
-  }
-
-  function enrichDetail(detail: SessionDetailResult, overrides: PriceOverrides): SessionDetailResult {
-    const cost = costForTokens(
-      detail.session.provider,
-      detail.session.model,
-      detail.session.inputTokens,
-      detail.session.cachedInputTokens,
-      detail.session.outputTokens,
-      overrides,
-    );
-    return {
-      ...detail,
-      session: withSessionCost(detail.session, overrides),
-      turns: detail.turns.map((turn) => {
-        const turnCost = costForTokens(
-          detail.session.provider,
-          detail.session.model,
-          turn.inputTokens,
-          turn.cachedInputTokens,
-          turn.outputTokens,
-          overrides,
-        );
-        return {
-          ...turn,
-          costUsd: turn.costUsd ?? turnCost?.totalUsd ?? null,
-          costEstimated: turn.costUsd !== null ? turn.costEstimated : (turnCost?.estimated ?? false),
-        };
-      }),
-      cost,
-      costCoverage: cost === null ? "unavailable" : cost.priceSource === "provider-fallback" ? "fallback-priced" : "model-priced",
-    };
   }
 
   let pricesRefreshing: Promise<void> | null = null;
@@ -741,20 +645,6 @@ export default async function plugin(bb: BbPluginApi) {
       const offset = input.offset ?? 0;
       return { sessions: filtered.slice(offset, offset + (input.limit ?? 100)).map((session) => withSessionCost(session, current.priceOverrides)), total: filtered.length };
     },
-    async sessionDetail({ sourceRecordId }) {
-      const detail = store.getSessionDetail(sourceRecordId);
-      if (!detail) throw new Error(`Telemetry session not found: ${sourceRecordId}`);
-      return enrichDetail(detail, (await getSettings()).priceOverrides);
-    },
-    async threadDetail({ threadId }) {
-      let detail = store.getSessionDetail(`bb:${threadId}`);
-      if (!detail) {
-        await sync({ full: false });
-        detail = store.getSessionDetail(`bb:${threadId}`);
-      }
-      if (!detail) throw new Error(`BB thread is not indexed yet: ${threadId}`);
-      return enrichDetail(detail, (await getSettings()).priceOverrides);
-    },
     async reindex(input) {
       const providers = (input.providers ?? []).filter(isProviderId) as ProviderId[];
       if (input.clear) {
@@ -787,8 +677,6 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "summary", summary: "Show provider-aware telemetry totals", usage: "bb telemetry summary [--view provider|unified|bb] [--provider <id>] [--range 7d] [--json]" },
       { name: "prices", summary: "Show the effective model price table", usage: "bb telemetry prices [--refresh] [--model <id>] [--json]" },
       { name: "findings", summary: "Show evidence-backed findings", usage: "bb telemetry findings [--provider <id>] [--range 7d] [--severity warning] [--json]" },
-      { name: "session", summary: "Show one provider or bb session", usage: "bb telemetry session <source-record-id> [--json]" },
-      { name: "thread", summary: "Show one indexed bb thread", usage: "bb telemetry thread <thread-id> [--json]" },
     ],
     async run(argv) {
       const [command, ...rest] = argv;
@@ -877,30 +765,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (severity) findings = findings.filter((finding) => finding.severity === severity);
         return output({ findings, total: findings.length }, findings.length ? findings.map((finding) => `[${finding.severity}] ${finding.title} — ${finding.summary}`).join("\n") : "No findings.");
       }
-      if (command === "session" || command === "thread") {
-        const id = rest.find((value) => !value.startsWith("-"));
-        if (!id) return { exitCode: 1, stderr: `Usage: bb telemetry ${command} <id>\n` };
-        const detail = store.getSessionDetail(command === "thread" ? `bb:${id}` : id);
-        if (!detail) return { exitCode: 1, stderr: `Telemetry record not found: ${id}\n` };
-        const enriched = enrichDetail(detail, (await getSettings()).priceOverrides);
-        const costLine = enriched.cost === null
-          ? "Cost: Not available (no token usage recorded)"
-          : `Cost: ${formatUsd(enriched.cost.totalUsd)}${enriched.cost.estimated ? " (estimated — model not in the price table)" : ""} via ${enriched.cost.model ?? enriched.session.provider}`;
-        const human = [`${enriched.session.title}`, `Source: ${enriched.session.source}`, `Provider: ${enriched.session.provider}`, `Host: ${enriched.session.hostId}`, `Status: ${enriched.session.status}`, `Turns: ${enriched.session.turnCount}`, `Tools: ${enriched.session.toolCalls} (${enriched.session.toolErrors} errors)`, `Tokens: ${enriched.session.totalTokens ?? "Not available"}`, costLine].join("\n");
-        const jsonDetail = {
-          ...enriched,
-          turns: enriched.turns.slice(0, 200),
-          items: enriched.items.slice(0, 500),
-          evidence: enriched.evidence.slice(0, 200),
-          truncated: {
-            turns: enriched.turns.length > 200,
-            items: enriched.items.length > 500,
-            evidence: enriched.evidence.length > 200,
-          },
-        };
-        return output(jsonOutput ? jsonDetail : enriched, human);
-      }
-      return { exitCode: 1, stderr: "Unknown command. Try: status | providers | reindex | summary | prices | findings | session <id> | thread <id>\n" };
+      return { exitCode: 1, stderr: "Unknown command. Try: status | providers | reindex | summary | prices | findings\n" };
     },
   });
 
@@ -929,4 +794,4 @@ export default async function plugin(bb: BbPluginApi) {
   bb.onDispose(() => store.dispose());
 }
 
-export type { DashboardInput, FindingRecord, SessionDetailResult, SourceKind };
+export type { DashboardInput, FindingRecord, SourceKind };

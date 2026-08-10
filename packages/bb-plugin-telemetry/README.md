@@ -47,8 +47,7 @@ token counts.
   the counts as inclusive when input ≥ cached and as additive otherwise.
 - Reasoning tokens are billed at the output rate.
 
-The dashboard shows an **Estimated cost** metric and per-harness costs; the
-session view shows total and per-turn costs.
+The dashboard shows an **Estimated cost** metric and per-harness costs.
 
 ```sh
 bb telemetry prices                     # source, fallbacks, and model count
@@ -66,8 +65,8 @@ bb plugin config telemetry set priceTable '{"codex": {"gpt-5": {"inputPerM": 1.2
 ```
 
 Overrides are matched case-insensitively after stripping `-latest` and dated
-suffixes (`-20250929`), and apply to dashboards, session detail, and CLI
-output immediately — no reindex needed.
+suffixes (`-20250929`), and apply to dashboards and CLI output immediately —
+no reindex needed.
 
 ## Install
 
@@ -77,8 +76,7 @@ bb plugin install ./packages/bb-plugin-telemetry --yes
 bb plugin reload telemetry
 ```
 
-The sidebar entry is **Telemetry**. Native thread panels expose
-**Analyze thread**.
+The sidebar entry is **Telemetry**.
 
 ## CLI
 
@@ -89,8 +87,6 @@ bb telemetry reindex [--full] [--clear] [--provider codex] [--machine <hostId>]
 bb telemetry summary --view provider --range 7d
 bb telemetry prices
 bb telemetry findings --severity warning
-bb telemetry session <source-record-id>
-bb telemetry thread <thread-id>
 ```
 
 ## Source settings

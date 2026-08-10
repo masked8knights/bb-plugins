@@ -2,7 +2,7 @@
 import { fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@bb/plugin-sdk/testing/app";
-import type { DashboardResult, ProviderSessionRecord, SourceStatusRecord } from "./src/types";
+import type { DashboardResult, SourceStatusRecord } from "./src/types";
 
 const dashboardFixture: DashboardResult = {
   view: "provider",
@@ -77,57 +77,6 @@ const statusFixture = {
   indexing: { active: false, phase: "idle", provider: null, done: 1, total: 1 },
 };
 
-const sessionId = "provider:primary:omp:019fe435-99fc-7001-bdc1-4996f75b3981";
-const sessionFixture: ProviderSessionRecord = {
-  id: sessionId,
-  source: "provider",
-  provider: "omp",
-  hostId: "primary",
-  providerSessionId: "019fe435-99fc-7001-bdc1-4996f75b3981",
-  bbThreadId: null,
-  title: "Omp session",
-  cwd: null,
-  projectId: null,
-  model: "deepseek-v4-flash",
-  origin: "omp",
-  status: "completed",
-  startedAt: 1,
-  updatedAt: 1,
-  durationMs: null,
-  messageCount: 0,
-  turnCount: 0,
-  toolCalls: 0,
-  toolErrors: 0,
-  inputTokens: null,
-  cachedInputTokens: null,
-  cachedWriteTokens: null,
-  outputTokens: null,
-  reasoningTokens: null,
-  totalTokens: null,
-  contextPeak: null,
-  costUsd: null,
-  costEstimated: false,
-  compactionCount: 0,
-  failureCount: 0,
-  delegatedCount: 0,
-  archived: false,
-  coverage: {
-    metadata: "complete",
-    turns: "unavailable",
-    tools: "unavailable",
-    tokens: "unavailable",
-    context: "unavailable",
-    errors: "unavailable",
-    latency: "unavailable",
-    models: "complete",
-  },
-  storeLabel: "~/.omp/agent/sessions",
-  sourcePath: null,
-  fingerprint: "fp",
-  linkState: "none",
-  findingCount: 0,
-};
-
 function hasInputAfter(
   inputs: unknown[],
   start: number,
@@ -151,7 +100,6 @@ describe("Telemetry dashboard RPC flow", () => {
 
     const app = await loadPluginApp(() => import("./app"));
     expect(app.navPanels.map((panel) => panel.id)).toContain("telemetry");
-    expect(app.threadPanelActions.map((action) => action.id)).toContain("analyze-thread");
 
     const panel = app.navPanels.find((candidate) => candidate.id === "telemetry");
     if (!panel) throw new Error("telemetry nav panel was not registered");
@@ -224,54 +172,6 @@ describe("Telemetry dashboard RPC flow", () => {
       expect(reindexInputs).toContainEqual({ full: false, providers: ["codex"] });
     });
 
-    slot.lifecycle.unmount();
-  });
-
-  it("decodes the session id from the panel subPath exactly once", async () => {
-    const app = await loadPluginApp(() => import("./app"));
-    const panel = app.navPanels.find((candidate) => candidate.id === "telemetry");
-    if (!panel) throw new Error("telemetry nav panel was not registered");
-
-    // bb encodes each subPath segment when building the panel URL and passes
-    // the splat back raw (matchPath does not decode), so the panel sees the
-    // id encoded exactly once. It must decode before calling sessionDetail.
-    const slot = renderSlot(
-      panel,
-      { subPath: `session/${encodeURIComponent(sessionId)}` },
-      {
-        rpc: {
-          sessionDetail: () => null,
-        },
-      },
-    );
-
-    await waitFor(() => {
-      expect(slot.inspection.rpcCalls).toContainEqual({ method: "sessionDetail", input: { sourceRecordId: sessionId } });
-    });
-    slot.lifecycle.unmount();
-  });
-
-  it("navigates to session detail with an unencoded subPath", async () => {
-    const app = await loadPluginApp(() => import("./app"));
-    const panel = app.navPanels.find((candidate) => candidate.id === "telemetry");
-    if (!panel) throw new Error("telemetry nav panel was not registered");
-
-    const slot = renderSlot(
-      panel,
-      { subPath: "" },
-      {
-        rpc: {
-          dashboard: () => ({ ...dashboardFixture, sessions: [sessionFixture] }),
-          status: () => statusFixture,
-        },
-      },
-    );
-
-    await slot.findByText("Omp session");
-    fireEvent.click(slot.getByRole("button", { name: /Omp session/ }));
-    await waitFor(() => {
-      expect(slot.inspection.navigateCalls).toContainEqual({ method: "toPluginPanel", path: "telemetry", options: { subPath: `session/${sessionId}` } });
-    });
     slot.lifecycle.unmount();
   });
 
