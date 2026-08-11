@@ -1,87 +1,92 @@
 # bb-plugin-sessions
 
-Search the coding-agent sessions already stored on this machine from a BB
-sidebar panel, and rehydrate any of them into a BB thread so you can keep
-working in BB.
+Observability is the single local surface for understanding, inspecting,
+searching, and rehydrating coding-agent traces. It owns one SQLite index and
+one incremental background scanner. Overview metrics, provider aggregates,
+and trace inspection are views over the same rows, not separate pipelines.
 
-## Auto-discovery, not hard-coded providers
+## Canonical providers
 
-The provider set is **discovered**, not hard-coded. Each registered source
-knows where its session store may live on disk; at status/index time the
-plugin probes those locations and only indexes the providers actually present
-on the machine. It also cross-checks BB's own provider registry so a source is
-only offered for rehydration when BB can actually run it.
+The canonical provider families are deliberately separate:
 
-Currently registered sources:
-
-| Source | Store | Format |
+| Provider | Store | BB provider |
 |---|---|---|
-| **Codex** | `~/.codex/sessions/**/*.jsonl` | rollout event streams |
-| **Claude Code** | `~/.claude/projects/**/*.jsonl` | per-project session JSONL |
-| **Pi / prime-agent** | `~/.prime/agent/sessions/**/*.jsonl` **and** `~/.hermes/state.db` | JSONL + SQLite |
-| **opencode** | `~/.local/share/opencode/opencode.db` | SQLite (session/message/part) |
-| **omp** | `~/.omp/agent/sessions/<cwd>/*.jsonl` | event streams |
+| **Pi** | `~/.pi/agent/sessions/**/*.jsonl` | `pi` |
+| **Prime Agent** | `~/.prime/agent/sessions/**/*.jsonl` | `acp-prime-agent` |
+| **Oh My Pi** | `~/.omp/agent/sessions/**/*.jsonl` | `acp-omp` |
+| **Hermes** | `~/.hermes/state.db` (`sessions` + `messages`) | `acp-hermes-agent` |
+| **Codex** | `~/.codex/sessions/**/*.jsonl` + `~/.codex/archived_sessions/**/*.jsonl` | `codex` |
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | `claude-code` |
 
-To add a provider, register a source in `src/sources.ts` (store locations,
-parser dispatch, BB provider mapping) — it is then auto-discovered, indexed,
-searchable, and rehydratable.
+Pi and Prime Agent use the same historical Pi-format JSONL, but their normal
+installations use separate roots. If an explicit configuration points both at
+one directory, those files do not carry reliable harness provenance; the
+shared path is therefore attributed to Pi. Hermes is never attributed to Pi.
 
-## What it does
+The old opencode SQLite adapter remains readable as a legacy compatibility
+source. When it has indexed history, the observability views show it with a
+historical/unavailable label rather than presenting it as an active harness.
 
-- **Indexes** discovered provider session stores into the plugin's SQLite
-  database (with FTS5 full-text search).
-- **Main page = recent feed**: opening the panel shows the latest ~30
-  sessions across *all* discovered providers, newest first. Type to run a
-  full-text search over titles, transcripts, and working directories (with
-  a match count); provider filters are built from discovery, and a ✕ clears
-  the search back to the recent feed.
-- **Rehydrates**: creates a new BB thread whose first message contains the
-  full (or condensed) conversation transcript plus session metadata, spawned
-  in the project that matches the session's `cwd` (or the project you pick),
-  at the original working directory when it still exists. You can choose the
-  BB provider (defaults to the source's provider mapping, e.g. Codex →
-  `codex`, Claude → `claude-code`, Pi → `pi`, opencode → `acp-opencode`,
-  omp → `acp-omp`).
+## Features
 
-A background service keeps the index fresh (incremental — only new/changed
-files are re-parsed) and publishes progress over realtime.
+- Streaming JSONL ingestion using the proven Telemetry parser. There is no
+  old 24 MiB file cutoff.
+- Full user/assistant conversation text stored locally in the Sessions DB and
+  indexed with SQLite FTS5 Porter/Unicode tokenization and BM25 ranking.
+  Tool calls, usage, errors, context, compactions, and costs are projected as
+  structured telemetry from the same scan.
+- An Overview view with range filters, source health, totals, findings, and
+  recent activity.
+- A Provider aggregates view with reliability, tool-error, usage, and cost
+  comparisons across harnesses.
+- A Traces view with full-text search, provider filters, and a trace inspector
+  that lets users select user, assistant, and tool entries individually.
+- The SQLite store keeps the full searchable transcript plus a bounded
+  `trace_json` event projection keyed to each session. The inspector reads
+  that canonical projection; old redundant trace-table data is ignored.
+- Agent-facing `sessions_search`, `sessions_get`, and `sessions_telemetry`
+  tools so provider-backed agents can search the local corpus themselves.
+  `sessions_get` returns event-level tool evidence only when `includeTrace` is
+  requested.
+- A 60-second incremental background scan. Unchanged JSONL files are skipped
+  by path/size/mtime fingerprints; the search index is updated transactionally.
+- CodexBar Claude probe sessions are ignored by default. Their source files
+  remain on disk, but synthetic probe conversations do not pollute Sessions.
 
 ## Install
 
 ```sh
 bb plugin install /Users/patrick/workingdir/bb-plugins/packages/bb-plugin-sessions --yes
-bb plugin reload sessions   # if it was already installed
+bb plugin reload sessions
 ```
 
-The panel appears in the sidebar as **Session Search** (icon: History).
+The sidebar entry is **Observability** (icon: History). Overview, Providers,
+and Traces are views inside that panel.
 
 ## CLI
 
 ```sh
 bb sessions status
-bb sessions reindex [--full] [codex|claude|prime|opencode|omp]
+bb sessions reindex [--full] [pi|prime|omp|hermes|codex|claude]
 bb sessions search "neon pilot" [--provider codex] [--limit 20]
 bb sessions get <session-id>
 bb sessions rehydrate <session-id> [--project <id>] [--provider <id>] [--condensed|--full]
+bb sessions telemetry [--range 24h|7d|30d|lifetime] [--provider <id>]
 ```
 
-Session ids are provider-qualified (`codex:<id>`, `claude:<id>`, `prime:<id>`);
-`bb sessions search --json` prints them.
+Session ids are provider-qualified (`codex:<id>`, `claude:<id>`,
+`pi:<id>`, `hermes:<id>`). Use `--json` on the read commands for structured
+output.
 
 ## Settings
 
 `bb plugin config sessions set <key> <value>`:
 
-- `codexEnabled` / `claudeEnabled` / `primeEnabled` — enable each source
-- `codexPath`, `claudePath`, `primePath` — custom session directories
-- `primeDbPath` — hermes `state.db` path (empty disables it)
+- `<provider>Enabled` toggles `pi`, `prime`, `omp`, `hermes`, `codex`,
+  `claude`, or the legacy `opencode` source.
+- `<provider>Path` overrides a provider store path.
+- `hermesPath` overrides Hermes' SQLite database path.
 
-## Notes
-
-- Rehydration uses `bb.sdk.threads.spawn`: BB has no history-injection API,
-  so the transcript becomes the new thread's first prompt. The thread opens
-  in the project matched from the session's `cwd` (deepest matching project
-  source), using an unmanaged workspace at that `cwd` when it still exists,
-  falling back to the project's default environment.
-- Transcripts are capped at ~300 KB for storage; the rehydrate prompt is
-  capped at ~120 KB (full mode) so large sessions stay inside context.
+Transcripts are stored in full for local search. UI previews, trace projections,
+agent responses, and rehydration prompts are bounded separately so a single
+enormous conversation cannot make a BB response unusable.

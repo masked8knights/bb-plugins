@@ -3,22 +3,31 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import assert from "node:assert/strict";
 import { createIndexer, migrateDb } from "../src/indexer.ts";
+import { isIgnoredSessionPath } from "../src/sources.ts";
+import { buildRichTelemetryDashboard, buildTelemetryDashboard } from "../src/telemetry.ts";
 import type { IndexSettings } from "../src/types.ts";
 
 const settings: IndexSettings = {
+  piEnabled: true,
+  piPath: "~/.pi/agent/sessions",
+  primeEnabled: true,
+  primePath: "~/.prime/agent/sessions",
+  ompEnabled: true,
+  ompPath: "~/.omp/agent/sessions",
+  hermesEnabled: true,
+  hermesPath: "~/.hermes/state.db",
   codexEnabled: true,
   codexPath: "~/.codex/sessions",
   claudeEnabled: true,
   claudePath: "~/.claude/projects",
-  primeEnabled: true,
-  primePath: "~/.prime/agent/sessions",
-  primeDbPath: "~/.hermes/state.db",
   opencodeEnabled: true,
   opencodePath: "~/.local/share/opencode/opencode.db",
-  ompEnabled: true,
-  ompPath: "~/.omp/agent/sessions",
 };
+
+assert.equal(isIgnoredSessionPath("claude", "/tmp/CodexBar-ClaudeProbe/session.jsonl"), true);
+assert.equal(isIgnoredSessionPath("claude", "/Users/patrick/workingdir/neon-pilot/session.jsonl"), false);
 
 // node:sqlite does not implement better-sqlite3's API identically; the indexer
 // uses db.prepare().run/.get/.all — close enough for a smoke test.
@@ -50,6 +59,34 @@ console.log("last event:", JSON.stringify(events[events.length - 1]));
 const status = indexer.status(settings, Date.now());
 console.log("STATUS:", JSON.stringify(status, null, 1));
 
+const indexedProviders = new Set(status.providers.filter((p) => p.count > 0).map((p) => p.id));
+for (const expected of ["pi", "prime", "omp", "hermes", "codex", "claude"] as const) {
+  assert.equal(indexedProviders.has(expected), true, `expected indexed provider ${expected}`);
+}
+assert.equal(status.providers.find((p) => p.id === "pi")?.detected, true, "Pi store should be detected");
+assert.equal(status.providers.find((p) => p.id === "prime")?.detected, true, "Prime Agent store should be detected");
+assert.equal(indexer.search("", ["prime"], 10).length > 0, true, "Prime Agent sessions should stay attributed to Prime Agent");
+const hermesRows = indexer.search("", ["hermes"], 1_000);
+assert.equal(hermesRows.length > 0, true, "Hermes sessions should be indexed");
+assert.equal(hermesRows.every((row) => row.id.startsWith("hermes:") && row.filePath?.startsWith("hermes-db:")), true, "Hermes ids must stay distinct from Pi");
+const dashboard = buildTelemetryDashboard(fake, "lifetime");
+assert.equal(dashboard.totals.sessions, status.totalSessions, "telemetry and search must share one session count");
+assert.equal(dashboard.providers.some((row) => row.provider === "hermes"), true, "telemetry must retain Hermes as its own provider");
+const richDashboard = buildRichTelemetryDashboard(
+  fake as never,
+  { view: "provider", range: "7d" },
+  [],
+);
+assert.equal(richDashboard.range, "7d", "rich telemetry should preserve the selected range");
+assert.equal(richDashboard.totals.sessions <= status.totalSessions, true, "rich telemetry should apply the range filter");
+assert.equal(richDashboard.daily.length > 0, true, "rich telemetry should expose daily series data");
+assert.equal(Array.isArray(richDashboard.models), true, "rich telemetry should expose model breakdown data");
+const piDashboard = buildRichTelemetryDashboard(
+  fake as never,
+  { view: "provider", range: "lifetime", providers: ["pi"] },
+  [],
+);
+assert.equal(piDashboard.totals.sessions, status.providers.find((p) => p.id === "pi")?.count, "provider filters should constrain rich telemetry to the selected source");
 for (const q of ["neon", "sidebar", "ds4", "protocol probe"]) {
   const rows = indexer.search(q, undefined, 5);
   console.log(`\nSEARCH "${q}": ${rows.length} hits`);
@@ -81,6 +118,7 @@ console.log("\nPASS3:", JSON.stringify(res3.byProvider), "elapsed:", Date.now() 
 const codexRows = indexer.search("", ["codex"], 3);
 if (codexRows.length) {
   const c = indexer.get(codexRows[0].id);
+  assert.equal(c.truncated, 0, "stored transcripts should not use the old 300 KB cap");
   console.log("\nCODEX SAMPLE:", c.id, "|", c.title);
   console.log(c.transcript.slice(0, 900));
 }
