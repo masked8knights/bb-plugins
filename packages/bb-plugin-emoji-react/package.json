@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Emoji React",
-    "description": "Emoji reactions in the assistant-message text-selection menu. Select text, pick a reaction from the menu, and it drafts a reply — the reaction list is configurable in settings.",
+    "description": "Emoji reactions in the assistant-message text-selection menu and per-message action bar. Select text, pick a reaction from the menu (or use the action-bar buttons), and it drafts a reply — the reaction list is configurable in settings.",
     "branding": {
       "icon": "./assets/icon.svg"
     },

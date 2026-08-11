@@ -1,7 +1,8 @@
 # bb-plugin-emoji-react
 
-Emoji reactions in the assistant-message text-selection menu — a port of
-NeonPilot's `system-reply-actions` extension to bb.
+Emoji reactions in the assistant-message text-selection menu **and the
+per-message action bar** — a port of NeonPilot's `system-reply-actions`
+extension to bb.
 
 Select any text in an agent response, and the floating selection menu (next
 to "Add to chat") shows one emoji button per configured reaction. Clicking
@@ -15,10 +16,11 @@ one drafts a reply:
 
 and focuses the composer. Each reaction is a user-configurable emoji + label
 pair, editable in **Tools → Extensions → Emoji React → Emoji reactions**.
-The menu buttons show the emoji only (the host's selection menu is a single
-horizontal row, and its buttons always render the plugin's compact icon, so a
-content script strips that icon from the floating menu), while the drafted
-reply uses the full `emoji label` text.
+The reaction buttons show the emoji only (the host renders plugin actions
+with the plugin's compact icon — identical for every reaction — so a content
+script swaps that icon for the emoji glyph in the per-message action bar and
+strips it from the floating selection menu), while the drafted reply uses
+the full `emoji label` text.
 
 ## Settings
 
@@ -63,10 +65,12 @@ re-interpretation.
 - The settings section on the plugin detail page is a live editor (rows of
   emoji + label inputs) persisting through the standard plugin settings
   endpoint.
-- A content script strips the plugin's compact icon from the floating
-  selection-menu buttons (host chrome always renders it, and plugin CSS is
-  scoped to plugin roots) — it relies on the menu's `data-bb-portaled-overlay`
-  marker and the icon span's `data-plugin-icon-asset` URL, so if a future bb
+- A content script replaces the plugin's compact icon with the reaction
+  glyph: the per-message action bar renders plugin actions as icon-only
+  buttons (the title lives in `aria-label`), so the script swaps the icon
+  span for the emoji text; the floating selection-menu buttons already carry
+  the emoji as their label, so there the icon span is simply stripped. It
+  relies on the icon span's `data-plugin-icon-asset` URL, so if a future bb
   changes those internals the script degrades to leaving the icon in place.
 
 ## Development

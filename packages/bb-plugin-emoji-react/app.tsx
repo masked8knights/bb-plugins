@@ -2,10 +2,12 @@
 //
 // Port of NeonPilot's system-reply-actions extension for bb:
 //
-// 1. Selection menu — one `messageAction` per configured emoji item appears
-//    in the assistant-message text-selection menu (next to "Add to chat").
-//    Clicking one drafts a reply: the highlighted text quoted first, the
-//    reaction text (e.g. "👍 Agree") below it.
+// 1. Reactions — one `messageAction` per configured emoji item, shown in the
+//    assistant-message text-selection menu (next to "Add to chat") and as an
+//    icon button in the per-message action bar. Clicking one drafts a reply:
+//    the highlighted text quoted first, the reaction text (e.g. "👍 Agree")
+//    below it. Both surfaces render the emoji itself, not the plugin icon —
+//    see the content script at the bottom.
 //
 // 2. Settings — a settingsSection editor with emoji + label rows (like
 //    NeonPilot's `emoji-label-list` control). Saving persists via the
@@ -379,20 +381,24 @@ export default definePluginApp((app) => {
     id: "emoji-reactions-editor",
     title: "Emoji reactions",
     description:
-      "Reactions shown in the assistant-message text-selection menu.",
+      "Reactions shown in the assistant-message text-selection menu and per-message action bar.",
     component: EmojiReactionsSettings,
   });
 
-  // Strip the plugin's compact icon from the emoji-only selection-menu
-  // buttons. The menu is host-rendered chrome: it always renders the
-  // plugin's icon next to the action label (PluginIcon has no icon-less
-  // path), and plugin stylesheets are @scope-confined to plugin roots, so
-  // this full-trust script removes the icon span inside portaled overlays.
-  // The icon stays everywhere else (hover action bar, plugin list, …) —
-  // only the floating menu loses it, because only that surface shows the
-  // icon next to an emoji that already says everything.
+  // Emoji-only surfaces need the plugin's compact icon replaced by the
+  // reaction glyph itself, because the host renders plugin messageActions
+  // with PluginIcon (no icon-less path) and plugin stylesheets are
+  // @scope-confined to plugin roots. Two surfaces, two treatments:
+  //
+  // - Selection menu (portaled overlay): the action title is rendered as
+  //   button text next to the icon, so the icon is redundant — strip it.
+  // - Per-message action bar: plugin actions render as icon-only buttons
+  //   (the title lives in `aria-label`), so every reaction would show the
+  //   same plugin icon. Swap the icon span for the reaction glyph.
+  // The icon stays everywhere else (plugin list, hover action bar button,
+  // …) — only surfaces where the emoji already says everything lose it.
   app.contentScripts.register({
-    id: "selection-menu-icons",
+    id: "emoji-glyph-actions",
     mount({ signal }) {
       // The icon span is `<span data-plugin-icon-asset="/api/v1/plugins/
       // emoji-react/assets/icon?h=…">` — unique to this plugin, so other
@@ -401,12 +407,25 @@ export default definePluginApp((app) => {
         'span[data-plugin-icon-asset*="plugins/emoji-react/assets/icon"]';
 
       const sweep = () => {
-        for (const overlay of Array.from(
-          document.querySelectorAll("[data-bb-portaled-overlay]"),
-        )) {
-          for (const icon of Array.from(overlay.querySelectorAll(ICON_SELECTOR))) {
+        for (const icon of Array.from(document.querySelectorAll(ICON_SELECTOR))) {
+          const button = icon.closest("button");
+          // Selection menu: the button already carries the emoji as text
+          // next to the icon — drop the redundant icon.
+          if (button === null || (button.textContent ?? "").trim().length > 0) {
             icon.remove();
+            continue;
           }
+          // Per-message action bar: the button is icon-only; its accessible
+          // name (the emoji) becomes the visible glyph.
+          const label = button.getAttribute("aria-label");
+          if (label === null || label.trim().length === 0) {
+            icon.remove();
+            continue;
+          }
+          const glyph = document.createElement("span");
+          glyph.setAttribute("aria-hidden", "true");
+          glyph.textContent = label.trim();
+          icon.replaceWith(glyph);
         }
       };
 
