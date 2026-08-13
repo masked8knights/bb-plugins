@@ -1,0 +1,28 @@
+{
+  "name": "bb-plugin-cobalt2",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.35",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "bb": {
+    "name": "Cobalt2",
+    "description": "A Cobalt2-inspired color palette for bb.",
+    "branding": {
+      "icon": "Palette"
+    },
+    "server": "./server.ts",
+    "themes": [
+      {
+        "id": "cobalt2",
+        "name": "Cobalt2",
+        "description": "A Cobalt2-inspired palette for bb.",
+        "css": "./themes/cobalt2.css"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "bb plugin build ."
+  }
+}

@@ -12,6 +12,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-plannotator`](packages/bb-plugin-plannotator/) — embed the upstream
   Plannotator plan-review app in BB's right panel and bridge its decisions back
   to agents.
+- [`bb-plugin-cobalt2`](packages/bb-plugin-cobalt2/) — contribute the Cobalt2
+  color palette to bb.
 - [`bb-plugin-auto-new-tab`](packages/bb-plugin-auto-new-tab/) — open the
   New Tab page automatically when the workspace panel has no tabs, instead
   of the default Info page.

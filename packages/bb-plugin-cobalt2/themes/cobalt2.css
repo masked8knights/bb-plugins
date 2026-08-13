@@ -1,0 +1,91 @@
+/*
+ * Cobalt2 for bb
+ *
+ * Inspired by Wes Bos' Cobalt2 VS Code theme:
+ * https://github.com/wesbos/cobalt2-vscode
+ *
+ * The dark palette stays close to the original editor theme. The light
+ * palette is a high-contrast adaptation for bb's light mode.
+ */
+
+:root, .light {
+  --canvas: #eef7ff;
+  --ink: #122738;
+
+  --primary: #0050a4;
+  --primary-foreground: #ffffff;
+  --muted-foreground: color-mix(in oklch, var(--ink) 70%, var(--canvas));
+  --subtle-foreground: color-mix(in oklch, var(--ink) 58%, var(--canvas));
+  --readback-foreground: color-mix(in oklch, var(--ink) 64%, var(--canvas));
+
+  --destructive: #d63b68;
+  --destructive-foreground: #ffffff;
+  --destructive-text: #a7284e;
+  --warning: #ffc600;
+  --warning-text: #805600;
+  --attention: #b86f00;
+  --success: #2c8f00;
+  --diff-added: #2c8f00;
+  --diff-removed: #c53560;
+  --pr-merged: #a83eb5;
+  --file-accent: #007a9e;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "Courier New", monospace;
+  --font-serif: Georgia, serif;
+  --radius: 0.35rem;
+
+  /* Cobalt2 terminal palette. */
+  --ansi-0: #000000;
+  --ansi-1: #ff628c;
+  --ansi-2: #3ad900;
+  --ansi-3: #ffc600;
+  --ansi-4: #0088ff;
+  --ansi-5: #fb94ff;
+  --ansi-6: #80fcff;
+  --ansi-7: #ffffff;
+  --ansi-8: #0050a4;
+  --ansi-9: #ff628c;
+  --ansi-10: #3ad900;
+  --ansi-11: #ffc600;
+  --ansi-12: #0088ff;
+  --ansi-13: #fb94ff;
+  --ansi-14: #80fcff;
+  --ansi-15: #ffffff;
+
+  --ansi-bg-fg-0: #ffffff;
+  --ansi-bg-fg-1: #000000;
+  --ansi-bg-fg-2: #000000;
+  --ansi-bg-fg-3: #000000;
+  --ansi-bg-fg-4: #000000;
+  --ansi-bg-fg-5: #000000;
+  --ansi-bg-fg-6: #000000;
+  --ansi-bg-fg-7: #000000;
+  --ansi-bg-fg-8: #ffffff;
+  --ansi-bg-fg-9: #000000;
+  --ansi-bg-fg-10: #000000;
+  --ansi-bg-fg-11: #000000;
+  --ansi-bg-fg-12: #000000;
+  --ansi-bg-fg-13: #000000;
+  --ansi-bg-fg-14: #000000;
+  --ansi-bg-fg-15: #000000;
+}
+
+.dark {
+  --canvas: #193549;
+  --ink: #ffffff;
+
+  --primary: #0088ff;
+  --primary-foreground: #ffffff;
+  --destructive: #ff628c;
+  --destructive-foreground: #193549;
+  --destructive-text: #ff628c;
+  --warning: #ffc600;
+  --warning-text: #ffc600;
+  --attention: #ffc600;
+  --success: #3ad900;
+  --diff-added: #3ad900;
+  --diff-removed: #ff628c;
+  --pr-merged: #fb94ff;
+  --file-accent: #9effff;
+}
