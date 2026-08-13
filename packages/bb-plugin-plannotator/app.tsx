@@ -11,6 +11,7 @@ import {
   normalizeEmbeddedSessionUrl,
   upstreamOnboardingCookie,
 } from "./src/embedded";
+import { formatReviewCountdown, remainingReviewMs } from "./src/countdown";
 
 type PlannotatorPayload = {
   kind: "plannotator";
@@ -151,6 +152,19 @@ function PendingPlannotatorReview({
   const navigate = useBbNavigate();
   const openedSession = useRef<string | null>(null);
   const payload = parsePayload(interaction.payload);
+  const [remainingMs, setRemainingMs] = useState(() =>
+    remainingReviewMs(interaction.expiresAt),
+  );
+
+  useEffect(() => {
+    const update = () => {
+      setRemainingMs(remainingReviewMs(interaction.expiresAt));
+    };
+    update();
+    if (interaction.expiresAt === null) return;
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [interaction.expiresAt]);
 
   useEffect(() => {
     if (!payload || openedSession.current === payload.sessionId) return;
@@ -184,6 +198,19 @@ function PendingPlannotatorReview({
         Approve or annotate the plan in the upstream review surface. BB will
         return its decision to the agent when you finish.
       </div>
+      {remainingMs !== null ? (
+        <div
+          className="mt-3 flex items-center justify-between gap-3 rounded border border-border bg-background px-2 py-1.5 text-xs"
+          role="timer"
+          aria-live="polite"
+          aria-label={`Review expires in ${formatReviewCountdown(remainingMs)}`}
+        >
+          <span className="text-muted-foreground">Review expires in</span>
+          <span className="font-medium tabular-nums text-foreground">
+            {formatReviewCountdown(remainingMs)}
+          </span>
+        </div>
+      ) : null}
       <div className="mt-3 flex gap-2">
         <button
           type="button"
