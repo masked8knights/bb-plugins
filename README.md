@@ -9,6 +9,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
   telemetry and evidence-backed findings.
 - [`bb-plugin-grove`](packages/bb-plugin-grove/) — bind Markdown documents to
   visible owner agents, queue dictation, and shape it with SHA-protected edits.
+- [`bb-plugin-plannotator`](packages/bb-plugin-plannotator/) — embed the upstream
+  Plannotator plan-review app in BB's right panel and bridge its decisions back
+  to agents.
 - [`bb-plugin-auto-new-tab`](packages/bb-plugin-auto-new-tab/) — open the
   New Tab page automatically when the workspace panel has no tabs, instead
   of the default Info page.
