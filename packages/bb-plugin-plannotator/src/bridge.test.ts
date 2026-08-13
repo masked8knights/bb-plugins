@@ -12,7 +12,9 @@ import {
   missingBinaryMessage,
   parseReadyMetadata,
   parseUpstreamDecision,
+  rehostUpstreamUrl,
   resolvePlannotatorBinary,
+  startUpstreamPlanReview,
 } from "./bridge";
 
 const temporaryDirectories: string[] = [];
@@ -57,11 +59,112 @@ describe("upstream Plannotator bridge", () => {
     );
   });
 
-  it("builds the exact structured input expected by opencode-plan", () => {
-    expect(JSON.parse(buildUpstreamInput("# Plan\n\n- Verify", 3600))).toEqual({
-      plan: "# Plan\n\n- Verify",
-      timeoutSeconds: 3600,
+  it("builds the official generic plan-review hook input", () => {
+    expect(JSON.parse(buildUpstreamInput("# Plan\n\n- Verify"))).toEqual({
+      hook_event_name: "PermissionRequest",
+      permission_mode: "default",
+      tool_input: { plan: "# Plan\n\n- Verify" },
     });
+  });
+
+  it("parses the official hook decision envelope", () => {
+    expect(
+      parseUpstreamDecision(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PermissionRequest",
+            decision: { behavior: "allow" },
+          },
+        }),
+      ),
+    ).toEqual({ approved: true });
+    expect(
+      parseUpstreamDecision(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PermissionRequest",
+            decision: { behavior: "deny", message: "Please split this step." },
+          },
+        }),
+      ),
+    ).toEqual({ approved: false, feedback: "Please split this step." });
+  });
+
+  it("normalizes the embedded URL host without changing the upstream port", () => {
+    expect(rehostUpstreamUrl("http://localhost:43210", "127.0.0.1")).toBe(
+      "http://127.0.0.1:43210",
+    );
+    expect(rehostUpstreamUrl("http://localhost:43210", undefined)).toBe(
+      "http://localhost:43210",
+    );
+  });
+
+  it("passes the BB-selected origin and persistent data directory to upstream", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bb-plannotator-env-test-"));
+    temporaryDirectories.push(directory);
+    const binary = join(directory, "plannotator");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env node
+const ready = process.env.PLANNOTATOR_READY_FILE;
+const fs = require("node:fs");
+fs.appendFileSync(ready, JSON.stringify({ url: "http://127.0.0.1:43210", isRemote: false, port: 43210 }) + "\\n");
+setTimeout(() => process.stdout.write(JSON.stringify({
+  approved: true,
+  feedback: JSON.stringify({ origin: process.env.PLANNOTATOR_ORIGIN, dataDir: process.env.PLANNOTATOR_DATA_DIR }),
+}) + "\\n"), 20);
+process.stdin.resume();
+`,
+      "utf8",
+    );
+    await chmod(binary, 0o755);
+
+    const controller = new AbortController();
+    const running = await startUpstreamPlanReview({
+      binaryPath: binary,
+      planMarkdown: "# Plan",
+      timeoutSeconds: 3600,
+      signal: controller.signal,
+      origin: "codex",
+      dataDir: join(directory, "state"),
+    });
+    const decision = await running.result;
+    expect(decision).toEqual({
+      approved: true,
+      feedback: JSON.stringify({
+        origin: "codex",
+        dataDir: join(directory, "state"),
+      }),
+    });
+    await running.stop();
+  });
+
+  it("returns a terminal decision when the upstream review times out", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bb-plannotator-timeout-test-"));
+    temporaryDirectories.push(directory);
+    const binary = join(directory, "plannotator");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.PLANNOTATOR_READY_FILE, JSON.stringify({ url: "http://127.0.0.1:43211", isRemote: false, port: 43211 }) + "\\n");
+setInterval(() => {}, 1000);
+`,
+      "utf8",
+    );
+    await chmod(binary, 0o755);
+
+    const running = await startUpstreamPlanReview({
+      binaryPath: binary,
+      planMarkdown: "# Plan",
+      timeoutSeconds: 0.01,
+      signal: new AbortController().signal,
+    });
+    await expect(running.result).resolves.toEqual({
+      approved: false,
+      feedback: expect.stringContaining("No response within 0.01 seconds"),
+    });
+    await running.stop();
   });
 
   it("selects only the official supported platform targets", () => {

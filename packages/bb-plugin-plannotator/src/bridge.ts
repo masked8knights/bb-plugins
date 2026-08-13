@@ -102,11 +102,26 @@ export type UpstreamDecision = {
   agentSwitch?: string;
 };
 
+/** Agent identity understood by Plannotator's upstream result screen. */
+export type UpstreamOrigin =
+  | "claude-code"
+  | "opencode"
+  | "codex"
+  | "copilot-cli"
+  | "gemini-cli"
+  | "pi";
+
 type BridgeOptions = {
   binaryPath: string;
   planMarkdown: string;
   timeoutSeconds: number | null;
   signal: AbortSignal;
+  /** Do not let the child infer an agent from unrelated host environment. */
+  origin?: UpstreamOrigin;
+  /** Persistent upstream state, including plan history and configuration. */
+  dataDir?: string;
+  /** Host used by BB's loopback server, so embedded cookies share one host. */
+  embedHost?: string;
   cwd?: string;
   readyTimeoutMs?: number;
 };
@@ -411,6 +426,27 @@ export function parseUpstreamDecision(stdout: string, stderr = ""): UpstreamDeci
     return decision;
   }
 
+  // The official generic hook entrypoint returns the host's native hook
+  // envelope rather than the OpenCode bridge's `{ approved }` record. BB uses
+  // this entrypoint so PLANNOTATOR_ORIGIN remains authoritative instead of
+  // inheriting the OpenCode-only label from `opencode-plan`.
+  for (const record of records) {
+    if (typeof record !== "object" || record === null || Array.isArray(record)) continue;
+    const hookOutput = (record as Record<string, unknown>).hookSpecificOutput;
+    if (typeof hookOutput !== "object" || hookOutput === null || Array.isArray(hookOutput)) continue;
+    const decision = (hookOutput as Record<string, unknown>).decision;
+    if (typeof decision !== "object" || decision === null || Array.isArray(decision)) continue;
+    const behavior = (decision as Record<string, unknown>).behavior;
+    if (behavior === "allow") return { approved: true };
+    if (behavior === "deny") {
+      const message = (decision as Record<string, unknown>).message;
+      return {
+        approved: false,
+        ...(typeof message === "string" && message.trim() ? { feedback: message } : {}),
+      };
+    }
+  }
+
   const diagnostic = stderr.trim().split(/\r?\n/u).filter(Boolean).slice(-4).join(" ");
   throw new Error(
     diagnostic
@@ -419,14 +455,21 @@ export function parseUpstreamDecision(stdout: string, stderr = ""): UpstreamDeci
   );
 }
 
-export function buildUpstreamInput(
-  planMarkdown: string,
-  timeoutSeconds: number | null,
-): string {
+export function buildUpstreamInput(planMarkdown: string): string {
+  // Feed the official generic plan-review hook. Unlike the OpenCode-specific
+  // bridge, this path uses PLANNOTATOR_ORIGIN when constructing /api/plan.
   return JSON.stringify({
-    plan: planMarkdown,
-    timeoutSeconds,
+    hook_event_name: "PermissionRequest",
+    permission_mode: "default",
+    tool_input: { plan: planMarkdown },
   });
+}
+
+export function rehostUpstreamUrl(url: string, host: string | undefined): string {
+  if (!host) return url;
+  const parsed = new URL(url);
+  parsed.hostname = host;
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function wait(ms: number): Promise<void> {
@@ -492,13 +535,15 @@ export async function startUpstreamPlanReview(
 
   let child: ChildProcess;
   try {
-    child = spawn(options.binaryPath, ["opencode-plan"], {
+    child = spawn(options.binaryPath, [], {
       cwd: options.cwd ?? process.cwd(),
       env: {
         ...process.env,
         PLANNOTATOR_REMOTE: "0",
         PLANNOTATOR_SKIP_BROWSER_OPEN: "1",
         PLANNOTATOR_READY_FILE: readyFile,
+        ...(options.origin ? { PLANNOTATOR_ORIGIN: options.origin } : {}),
+        ...(options.dataDir ? { PLANNOTATOR_DATA_DIR: options.dataDir } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -530,7 +575,7 @@ export async function startUpstreamPlanReview(
   options.signal.addEventListener("abort", onAbort, { once: true });
 
   try {
-    child.stdin?.end(buildUpstreamInput(options.planMarkdown, options.timeoutSeconds));
+    child.stdin?.end(buildUpstreamInput(options.planMarkdown));
     const ready = await waitForReady(
       readyFile,
       child,
@@ -538,7 +583,7 @@ export async function startUpstreamPlanReview(
       options.signal,
     );
 
-    const result = exited.then(() => {
+    const decision = exited.then(() => {
       if (spawnError) throw spawnError;
       if (child.exitCode !== 0) {
         throw new Error(
@@ -548,8 +593,43 @@ export async function startUpstreamPlanReview(
       return parseUpstreamDecision(stdout, stderr);
     });
 
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const timeoutMs =
+      options.timeoutSeconds !== null &&
+      Number.isFinite(options.timeoutSeconds) &&
+      options.timeoutSeconds > 0
+        ? options.timeoutSeconds * 1000
+        : null;
+    const result =
+      timeoutMs === null
+        ? decision
+        : new Promise<UpstreamDecision>((resolveResult, rejectResult) => {
+            timeoutHandle = setTimeout(() => {
+              timedOut = true;
+              void terminateChild(child, exited).then(
+                () =>
+                  resolveResult({
+                    approved: false,
+                    feedback: `[Plannotator] No response within ${options.timeoutSeconds} seconds. Port released automatically. Please call plannotator_review_plan again.`,
+                  }),
+                rejectResult,
+              );
+            }, timeoutMs);
+            void decision.then(
+              (value) => {
+                if (!timedOut) resolveResult(value);
+              },
+              (error) => {
+                if (!timedOut) rejectResult(error);
+              },
+            );
+          }).finally(() => {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+          });
+
     return {
-      url: ready.url,
+      url: rehostUpstreamUrl(ready.url, options.embedHost),
       result,
       async stop() {
         options.signal.removeEventListener("abort", onAbort);

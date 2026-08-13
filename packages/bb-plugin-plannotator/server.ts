@@ -16,6 +16,7 @@ import {
   startUpstreamPlanReview,
   type RunningUpstreamReview,
   type UpstreamDecision,
+  type UpstreamOrigin,
 } from "./src/bridge";
 import { PANEL_ACTION_ID, RENDERER_ID } from "./src/constants";
 
@@ -82,6 +83,123 @@ type ActiveReview = {
   sessionId: string;
   review: RunningUpstreamReview;
 };
+
+/**
+ * Map BB's provider ids to the identities the upstream UI knows how to name.
+ * The child must not infer this from ambient OPENCODE/CODEX_* environment
+ * variables: BB is the owner of the waiting tool call.
+ */
+export function upstreamOriginForProvider(
+  providerId: string | null | undefined,
+): UpstreamOrigin {
+  const normalized = providerId?.trim().toLowerCase() ?? "";
+  if (normalized === "opencode" || normalized.includes("open-code")) {
+    return "opencode";
+  }
+  if (normalized === "claude" || normalized.includes("claude-code")) {
+    return "claude-code";
+  }
+  if (normalized === "copilot" || normalized.includes("copilot-cli")) {
+    return "copilot-cli";
+  }
+  if (normalized === "gemini" || normalized.includes("gemini-cli")) {
+    return "gemini-cli";
+  }
+  if (
+    normalized === "pi" ||
+    normalized === "omp" ||
+    normalized.includes("oh-my-pi")
+  ) {
+    return "pi";
+  }
+  return "codex";
+}
+
+async function resolveUpstreamOrigin(
+  bb: BbPluginApi,
+  threadId: string,
+  signal: AbortSignal,
+): Promise<UpstreamOrigin> {
+  try {
+    const thread = await bb.sdk.threads.get({ threadId, signal });
+    return upstreamOriginForProvider(thread.providerId);
+  } catch {
+    // The provider identity is presentation-only. A failed metadata lookup
+    // must not prevent the review gate from opening.
+    return "codex";
+  }
+}
+
+async function resolveUpstreamDataDir(
+  bb: BbPluginApi,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const systemConfig = await bb.sdk.system.config({ signal });
+    return join(systemConfig.dataDir, "plugins", bb.pluginId, "plannotator");
+  } catch {
+    // External runtimes remain usable if an older host does not expose the
+    // system data directory. The bundled runtime already needs this lookup.
+    return undefined;
+  }
+}
+
+function resolveEmbedHost(bb: BbPluginApi): string | undefined {
+  try {
+    return new URL(bb.server.loopbackBaseUrl).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function panelSessionId(paramsJson: string | null): string | null {
+  if (!paramsJson) return null;
+  try {
+    const value = JSON.parse(paramsJson) as unknown;
+    return isRecord(value) && typeof value.sessionId === "string"
+      ? value.sessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove only this review's persisted right-panel tab, retrying CAS races. */
+async function closeReviewPanel(
+  bb: BbPluginApi,
+  threadId: string,
+  sessionId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const current = await bb.sdk.threads.tabs.get({ threadId });
+      const remaining = current.tabs.filter((tab) => {
+        if (tab.kind !== "plugin-panel") return true;
+        return !(
+          tab.pluginId === bb.pluginId &&
+          tab.actionId === PANEL_ACTION_ID &&
+          panelSessionId(tab.paramsJson) === sessionId
+        );
+      });
+      if (remaining.length === current.tabs.length) return;
+
+      await bb.sdk.threads.tabs.update({
+        threadId,
+        expectedRevision: current.revision,
+        tabs: remaining,
+      });
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        bb.log.warn(
+          `Could not close Plannotator tab for ${threadId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -326,11 +444,18 @@ export default async function plugin(bb: BbPluginApi) {
       let upstream: RunningUpstreamReview;
       try {
         const timeoutValue = Number.parseInt(String((await settings.get()).timeoutSeconds), 10);
+        const [origin, dataDir] = await Promise.all([
+          resolveUpstreamOrigin(bb, context.threadId, context.signal),
+          resolveUpstreamDataDir(bb, context.signal),
+        ]);
         upstream = await startUpstreamPlanReview({
           binaryPath,
           planMarkdown: params.planMarkdown,
           timeoutSeconds: Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 3600,
           signal: context.signal,
+          origin,
+          dataDir,
+          embedHost: resolveEmbedHost(bb),
         });
       } catch (error) {
         return errorResponse(error instanceof Error ? error.message : String(error));
@@ -422,6 +547,7 @@ export default async function plugin(bb: BbPluginApi) {
         return toolResponse(submitted.decision);
       } finally {
         activeReviews.delete(context.threadId);
+        await closeReviewPanel(bb, context.threadId, sessionId);
         await upstream.stop();
         // Both branches attach rejection handlers through Promise.race, so a
         // late child exit cannot become an unhandled process rejection.
@@ -438,11 +564,23 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.events.on("thread.deleted", ({ thread }) => {
     const active = activeReviews.get(thread.id);
-    if (active) void active.review.stop();
+    if (active) {
+      void Promise.all([
+        closeReviewPanel(bb, thread.id, active.sessionId),
+        active.review.stop(),
+      ]);
+    }
   });
 
   bb.onDispose(async () => {
-    await Promise.all([...activeReviews.values()].map(({ review }) => review.stop()));
+    await Promise.all(
+      [...activeReviews.entries()].map(([threadId, { sessionId, review }]) =>
+        Promise.all([
+          closeReviewPanel(bb, threadId, sessionId),
+          review.stop(),
+        ]),
+      ),
+    );
     activeReviews.clear();
   });
 

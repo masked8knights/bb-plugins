@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakePluginHost, type FakePluginHost } from "@bb/plugin-sdk/testing";
-import plugin from "../server";
+import plugin, { upstreamOriginForProvider } from "../server";
 
 const hosts: FakePluginHost[] = [];
 const temporaryDirectories: string[] = [];
@@ -47,32 +47,89 @@ async function pendingInteraction(host: FakePluginHost) {
   throw new Error("Expected a pending Plannotator interaction");
 }
 
-function wireInteractionSdk(host: FakePluginHost) {
+function wireInteractionSdk(
+  host: FakePluginHost,
+  options: { conflictOnce?: boolean } = {},
+): { seedReviewTab(): void } {
+  let revision = 1;
+  let tabs: Array<Record<string, unknown>> = [];
+  let conflictPending = options.conflictOnce === true;
+
+  const ensureReviewTab = () => {
+    const pending = host.harness.inspection.pendingInteractions[0];
+    if (pending && tabs.length === 0) {
+      tabs = [
+        {
+          kind: "plugin-panel",
+          id: "plugin-panel:plannotator-review",
+          actionId: "plannotator-review",
+          pluginId: "plannotator",
+          title: pending.title,
+          paramsJson: JSON.stringify(pending.payload),
+        },
+      ];
+    }
+  };
+
   host.harness.sdk.stub("threads.interactions.list", () =>
-    host.harness.inspection.pendingInteractions.map((pending) => ({
-      id: pending.id,
-      threadId: pending.threadId,
-      status: "pending",
-      origin: {
-        kind: "plugin",
-        pluginId: "plannotator",
-        rendererId: pending.rendererId,
-      },
-      payload: {
-        kind: "plugin",
-        title: pending.title,
-        data: pending.payload,
-      },
-    })),
+    (() => {
+      ensureReviewTab();
+      return host.harness.inspection.pendingInteractions.map((interaction) => ({
+        id: interaction.id,
+        threadId: interaction.threadId,
+        status: "pending",
+        origin: {
+          kind: "plugin",
+          pluginId: "plannotator",
+          rendererId: interaction.rendererId,
+        },
+        payload: {
+          kind: "plugin",
+          title: interaction.title,
+          data: interaction.payload,
+        },
+      }));
+    })(),
   );
   host.harness.sdk.stub("threads.interactions.respond", (args) => {
     const input = args as unknown as { interactionId: string; value: unknown };
     host.harness.behavior.submitInteraction(input.interactionId, input.value as never);
     return { id: input.interactionId, status: "resolved" };
   });
+  host.harness.sdk.stub("threads.tabs.get", () => {
+    ensureReviewTab();
+    return { revision, tabs };
+  });
+  host.harness.sdk.stub("threads.tabs.update", (args) => {
+    const input = args as unknown as {
+      expectedRevision: number;
+      tabs: Array<Record<string, unknown>>;
+    };
+    if (input.expectedRevision !== revision) {
+      throw new Error("tabs revision conflict");
+    }
+    if (conflictPending) {
+      conflictPending = false;
+      revision += 1;
+      throw new Error("tabs revision conflict");
+    }
+    tabs = input.tabs;
+    revision += 1;
+    return { revision, tabs };
+  });
+
+  return { seedReviewTab: ensureReviewTab };
 }
 
 describe("BB upstream Plannotator bridge", () => {
+  it("maps BB provider ids to upstream display identities", () => {
+    expect(upstreamOriginForProvider("codex")).toBe("codex");
+    expect(upstreamOriginForProvider("opencode")).toBe("opencode");
+    expect(upstreamOriginForProvider("acp-claude-code")).toBe("claude-code");
+    expect(upstreamOriginForProvider("omp")).toBe("pi");
+    expect(upstreamOriginForProvider("unknown-provider")).toBe("codex");
+  });
+
   it("registers only the thin control plane and selects its skill", async () => {
     const binary = await fakePlannotatorBinary();
     const host = createFakePluginHost({
@@ -124,7 +181,7 @@ describe("BB upstream Plannotator bridge", () => {
     });
     hosts.push(host);
     await plugin(host.bb);
-    wireInteractionSdk(host);
+    wireInteractionSdk(host, { conflictOnce: true });
 
     const toolCall = host.harness.behavior.callAgentTool(
       "plannotator_review_plan",
@@ -143,6 +200,15 @@ describe("BB upstream Plannotator bridge", () => {
     expect(result).toBe(JSON.stringify({ decision: "approved", source: "plannotator" }));
     expect(host.harness.inspection.pendingInteractions).toHaveLength(0);
     expect(host.harness.sdk.callsTo("threads.interactions.respond")).toHaveLength(1);
+    expect(host.harness.sdk.callsTo("threads.tabs.update")).toHaveLength(2);
+    const finalTabUpdateCall = [...host.harness.sdk.calls]
+      .reverse()
+      .find((call) => call.path === "threads.tabs.update");
+    expect(finalTabUpdateCall?.args[0]).toMatchObject({
+      threadId: "thread-1",
+      expectedRevision: 2,
+      tabs: [],
+    });
   });
 
   it("cancels the upstream process when the BB pending interaction is cancelled", async () => {
@@ -153,7 +219,7 @@ describe("BB upstream Plannotator bridge", () => {
     });
     hosts.push(host);
     await plugin(host.bb);
-    wireInteractionSdk(host);
+    const sdk = wireInteractionSdk(host);
 
     const toolCall = host.harness.behavior.callAgentTool(
       "plannotator_review_plan",
@@ -161,10 +227,12 @@ describe("BB upstream Plannotator bridge", () => {
       { threadId: "thread-1", projectId: "project-1" },
     );
     const pending = await pendingInteraction(host);
+    sdk.seedReviewTab();
     host.harness.behavior.cancelInteraction(pending.id);
 
     const result = await toolCall;
     expect(result).toMatchObject({ isError: true });
+    expect(host.harness.sdk.callsTo("threads.tabs.update")).toHaveLength(1);
   });
 
   it("returns an actionable error when the official binary is missing", async () => {
