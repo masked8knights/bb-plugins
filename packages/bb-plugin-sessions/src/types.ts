@@ -31,6 +31,23 @@ export type SessionTraceStatus =
   | "interrupted"
   | "unknown";
 
+/** Provider timing and usage facts attached to one bounded trace event. */
+export interface SessionTraceMetrics {
+  durationMs?: number | null;
+  turnId?: string | null;
+  eventType?: string | null;
+  errorCategory?: string | null;
+  inputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  cachedWriteTokens?: number | null;
+  outputTokens?: number | null;
+  reasoningTokens?: number | null;
+  totalTokens?: number | null;
+  contextUsed?: number | null;
+  contextLimit?: number | null;
+  usageScope?: "event" | "turn";
+}
+
 /**
  * A small, display-oriented projection of a provider transcript. The raw
  * provider records stay on disk; this is intentionally bounded so opening a
@@ -45,6 +62,10 @@ export interface SessionTraceEntry {
   status: SessionTraceStatus;
   toolName: string | null;
   sourceSequence: number;
+  /** Source records folded into this bounded display event, when applicable. */
+  sourceSequences?: number[];
+  /** Optional normalized telemetry; absent on older stored projections. */
+  metrics?: SessionTraceMetrics;
 }
 
 export type SessionStatus = "active" | "completed" | "failed" | "unknown";

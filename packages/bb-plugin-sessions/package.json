@@ -16,7 +16,7 @@
     "app": "./app.tsx"
   },
   "scripts": {
-    "test": "tsx test/trace.mts && tsx test/hardening.mts && vitest run test/merge.test.mts",
+    "test": "tsx test/trace.mts && tsx test/trace-view-model.test.mts && tsx test/hardening.mts && vitest run test/merge.test.mts",
     "smoke": "tsx test/smoke.mts",
     "typecheck": "tsc --noEmit",
     "build": "bb plugin build ."

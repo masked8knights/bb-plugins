@@ -1,5 +1,6 @@
 import type {
   SessionTraceEntry,
+  SessionTraceMetrics,
   SessionTraceKind,
   SessionTraceStatus,
   TranscriptMessage,
@@ -103,10 +104,48 @@ function numberValue(value: unknown, fallback: number | null): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function normalizeMetrics(value: unknown): SessionTraceMetrics | undefined {
+  if (!isRecord(value)) return undefined;
+  const metrics: SessionTraceMetrics = {};
+  const durationMs = numberValue(value.durationMs, null);
+  if (durationMs !== null) metrics.durationMs = Math.max(0, durationMs);
+  for (const key of [
+    "inputTokens",
+    "cachedInputTokens",
+    "cachedWriteTokens",
+    "outputTokens",
+    "reasoningTokens",
+    "totalTokens",
+    "contextUsed",
+    "contextLimit",
+  ] as const) {
+    const number = numberValue(value[key], null);
+    if (number !== null) metrics[key] = number;
+  }
+  for (const key of ["turnId", "eventType", "errorCategory"] as const) {
+    const string = value[key];
+    if (typeof string === "string" && string.trim()) metrics[key] = string.trim();
+  }
+  if (value.usageScope === "event" || value.usageScope === "turn") {
+    metrics.usageScope = value.usageScope;
+  }
+  return Object.keys(metrics).length > 0 ? metrics : undefined;
+}
+
 function normalizeEntry(value: unknown, index: number): SessionTraceEntry | null {
   if (!isRecord(value)) return null;
   const kind = stringValue(value.kind, "system") as SessionTraceKind;
   const status = stringValue(value.status, "unknown") as SessionTraceStatus;
+  const metrics = normalizeMetrics(value.metrics);
+  const sourceSequence = numberValue(value.sourceSequence, index + 1) ?? index + 1;
+  const sourceSequences = Array.isArray(value.sourceSequences)
+    ? [...new Set([
+        sourceSequence,
+        ...value.sourceSequences.filter((candidate): candidate is number =>
+          typeof candidate === "number" && Number.isFinite(candidate),
+        ),
+      ])].sort((left, right) => left - right).slice(-64)
+    : undefined;
   return {
     id: stringValue(value.id, `entry-${index + 1}`),
     kind: TRACE_KINDS.has(kind) ? kind : "system",
@@ -115,7 +154,9 @@ function normalizeEntry(value: unknown, index: number): SessionTraceEntry | null
     timestamp: numberValue(value.timestamp, null),
     status: TRACE_STATUSES.has(status) ? status : "unknown",
     toolName: typeof value.toolName === "string" && value.toolName.trim() ? value.toolName.trim() : null,
-    sourceSequence: numberValue(value.sourceSequence, index + 1) ?? index + 1,
+    sourceSequence,
+    ...(sourceSequences === undefined ? {} : { sourceSequences }),
+    ...(metrics === undefined ? {} : { metrics }),
   };
 }
 

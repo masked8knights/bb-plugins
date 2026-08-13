@@ -39,6 +39,123 @@ import type {
 type JsonRecord = Record<string, any>;
 type JsonlProvider = Exclude<ProviderId, "hermes" | "opencode">;
 
+function mergeTraceStatus(
+  current: SessionTraceStatus,
+  telemetry: SessionTraceStatus | undefined,
+): SessionTraceStatus {
+  if (telemetry === undefined || telemetry === "unknown") return current;
+  const rank: Record<SessionTraceStatus, number> = {
+    unknown: 0,
+    running: 1,
+    completed: 2,
+    interrupted: 3,
+    failed: 4,
+  };
+  return rank[telemetry] >= rank[current] ? telemetry : current;
+}
+
+export function enrichTraceWithTelemetry(
+  entries: SessionTraceEntry[],
+  telemetry: ParsedProviderSession | null,
+): SessionTraceEntry[] {
+  if (!telemetry || entries.length === 0) return entries;
+
+  const itemsBySequence = new Map(
+    telemetry.items.map((item) => [item.sourceSequence, item] as const),
+  );
+  const turns = telemetry.turns
+    .filter((turn) => turn.sourceSequenceStart !== null || turn.sourceSequenceEnd !== null)
+    .sort((left, right) => (left.sourceSequenceStart ?? 0) - (right.sourceSequenceStart ?? 0));
+  const usageBySequence = new Map<number, ParsedProviderSession["usage"][number]>();
+  const usageByTurn = new Map<string, ParsedProviderSession["usage"][number]>();
+  for (const snapshot of telemetry.usage) {
+    const sequencePrevious = usageBySequence.get(snapshot.sourceSequence);
+    if (sequencePrevious === undefined || (snapshot.at ?? 0) >= (sequencePrevious.at ?? 0)) {
+      usageBySequence.set(snapshot.sourceSequence, snapshot);
+    }
+    if (snapshot.turnId === null) continue;
+    const previous = usageByTurn.get(snapshot.turnId);
+    if (previous === undefined || (snapshot.at ?? 0) >= (previous.at ?? 0)) {
+      usageByTurn.set(snapshot.turnId, snapshot);
+    }
+  }
+
+  const matches = entries.map((entry) => {
+    const sourceSequences = entry.sourceSequences?.length
+      ? entry.sourceSequences
+      : [entry.sourceSequence];
+    // Normalized tool items retain the final/result source sequence. Prefer
+    // the latest folded source record so multi-record calls inherit the final
+    // status, duration, and error classification.
+    const item = [...sourceSequences]
+      .sort((left, right) => right - left)
+      .map((sequence) => itemsBySequence.get(sequence))
+      .find((candidate): candidate is ParsedProviderSession["items"][number] => candidate !== undefined);
+    const turn = turns.find((candidate) => {
+      const start = candidate.sourceSequenceStart ?? Number.MIN_SAFE_INTEGER;
+      const end = candidate.sourceSequenceEnd ?? Number.MAX_SAFE_INTEGER;
+      return sourceSequences.some((sequence) => sequence >= start && sequence <= end);
+    });
+    const turnId = item?.turnId ?? turn?.id ?? null;
+    const directUsage = [...sourceSequences]
+      .sort((left, right) => right - left)
+      .map((sequence) => usageBySequence.get(sequence))
+      .find((candidate): candidate is ParsedProviderSession["usage"][number] => candidate !== undefined);
+    return { item, turnId, directUsage };
+  });
+  const lastEntryIndexByTurn = new Map<string, number>();
+  for (const [index, match] of matches.entries()) {
+    if (match.turnId !== null) lastEntryIndexByTurn.set(match.turnId, index);
+  }
+
+  return entries.map((entry, index) => {
+    const { item, turnId, directUsage } = matches[index]!;
+    const turnUsage = turnId !== null && lastEntryIndexByTurn.get(turnId) === index
+      ? usageByTurn.get(turnId)
+      : undefined;
+    const usage = directUsage ?? turnUsage;
+    const usageScope = directUsage !== undefined ? "event" : turnUsage !== undefined ? "turn" : undefined;
+    const metrics = {
+      ...(item?.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
+      ...(turnId !== null ? { turnId } : {}),
+      ...(item?.kind !== undefined ? { eventType: item.kind } : {}),
+      ...(item?.errorCategory !== undefined ? { errorCategory: item.errorCategory } : {}),
+      ...(usage?.inputTokens !== null && usage?.inputTokens !== undefined
+        ? { inputTokens: usage.inputTokens }
+        : {}),
+      ...(usage?.cachedInputTokens !== null && usage?.cachedInputTokens !== undefined
+        ? { cachedInputTokens: usage.cachedInputTokens }
+        : {}),
+      ...(usage?.cachedWriteTokens !== null && usage?.cachedWriteTokens !== undefined
+        ? { cachedWriteTokens: usage.cachedWriteTokens }
+        : {}),
+      ...(usage?.outputTokens !== null && usage?.outputTokens !== undefined
+        ? { outputTokens: usage.outputTokens }
+        : {}),
+      ...(usage?.reasoningTokens !== null && usage?.reasoningTokens !== undefined
+        ? { reasoningTokens: usage.reasoningTokens }
+        : {}),
+      ...(usage?.totalTokens !== null && usage?.totalTokens !== undefined
+        ? { totalTokens: usage.totalTokens }
+        : {}),
+      ...(usage?.contextUsed !== null && usage?.contextUsed !== undefined
+        ? { contextUsed: usage.contextUsed }
+        : {}),
+      ...(usage?.contextLimit !== null && usage?.contextLimit !== undefined
+        ? { contextLimit: usage.contextLimit }
+        : {}),
+      ...(usageScope !== undefined ? { usageScope } : {}),
+    } satisfies NonNullable<SessionTraceEntry["metrics"]>;
+    const hasMetrics = Object.keys(metrics).length > 0;
+    const status = mergeTraceStatus(entry.status, item?.status);
+    return {
+      ...entry,
+      status,
+      ...(hasMetrics ? { metrics } : {}),
+    };
+  });
+}
+
 export interface StreamingParseResult {
   meta: SessionMeta | null;
   telemetry: ParsedProviderSession | null;
@@ -156,6 +273,9 @@ export function mergeSessionMetas(metas: SessionMeta[]): SessionMeta {
       ...entry,
       id: `${metaIndex}:${entry.id}`,
       sourceSequence: entry.sourceSequence + metaIndex * 1_000_000,
+      ...(entry.sourceSequences === undefined
+        ? {}
+        : { sourceSequences: entry.sourceSequences.map((sequence) => sequence + metaIndex * 1_000_000) }),
     })),
   );
   return {
@@ -443,6 +563,9 @@ function addToolTrace(
   const status = traceStatus(type, record, blocks);
   const existing = toolIds.get(toolId);
   if (existing) {
+    const sourceSequences = new Set(existing.sourceSequences ?? [existing.sourceSequence]);
+    sourceSequences.add(sequence);
+    existing.sourceSequences = [...sourceSequences].sort((left, right) => left - right).slice(-64);
     if (text && !existing.text.includes(text)) {
       existing.text = limitTraceText(`${existing.text}\n\n${text}`);
     }
@@ -450,8 +573,8 @@ function addToolTrace(
       existing.toolName = name;
       existing.title = name;
     }
-    if (status !== "unknown") existing.status = status;
-    if (timestamp !== null) existing.timestamp = timestamp;
+    existing.status = mergeTraceStatus(existing.status, status);
+    if (existing.timestamp === null && timestamp !== null) existing.timestamp = timestamp;
     return;
   }
   if (entries.length >= MAX_TRACE_ENTRIES) return;
@@ -464,6 +587,7 @@ function addToolTrace(
     status,
     toolName: name,
     sourceSequence: sequence,
+    sourceSequences: [sequence],
   };
   entries.push(entry);
   toolIds.set(toolId, entry);
@@ -798,7 +922,7 @@ export async function parseJsonlStreaming(
     truncated: transcriptBudget.truncated,
     sizeBytes,
     mtimeMs,
-    trace: traceEntries.slice(0, MAX_TRACE_ENTRIES),
+    trace: enrichTraceWithTelemetry(traceEntries.slice(0, MAX_TRACE_ENTRIES), telemetry),
     traceTruncated: transcriptBudget.truncated || messages.length + toolIds.size > MAX_TRACE_ENTRIES,
     analytics: analyticsFrom(telemetry),
   };

@@ -20,6 +20,7 @@ import TelemetryDashboardPage from "./src/telemetry-page";
 import ProviderAggregatesPage from "./src/provider-page";
 import { PANEL_CONTENT_CLASS, PANEL_GUTTER_CLASS } from "./src/panel-layout";
 import { providerLabel } from "./src/provider-labels";
+import { TraceExplorer } from "./src/trace-view";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -366,219 +367,6 @@ function RehydrateBar({
 
 // ---------------------------------------------------------------------------
 
-type TraceEntry = SessionDetail["trace"][number];
-
-function traceEntryMeta(entry: TraceEntry): {
-  icon: "UserRound" | "AiContentGenerator01" | "Terminal" | "Workflow";
-  label: string;
-  tone: string;
-} {
-  if (entry.kind === "user") {
-    return {
-      icon: "UserRound",
-      label: "User",
-      tone: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
-    };
-  }
-  if (entry.kind === "assistant") {
-    return {
-      icon: "AiContentGenerator01",
-      label: "Assistant",
-      tone: "bg-violet-500/10 text-violet-700 dark:text-violet-300",
-    };
-  }
-  if (entry.kind === "tool") {
-    return {
-      icon: "Terminal",
-      label: (entry.toolName ?? entry.title) || "Tool call",
-      tone: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
-    };
-  }
-  return {
-    icon: "Workflow",
-    label: entry.title || "Event",
-    tone: "bg-muted text-muted-foreground",
-  };
-}
-
-function traceRoleLabel(entry: TraceEntry): string {
-  if (entry.kind === "user") return "User";
-  if (entry.kind === "assistant") return "Assistant";
-  if (entry.kind === "tool") return "Tool";
-  return "System";
-}
-
-function traceTime(ts: number | null): string {
-  if (ts === null) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(ts));
-}
-
-function tracePreview(text: string): string {
-  const line = text.replace(/\s+/gu, " ").trim();
-  return line.length > 82 ? `${line.slice(0, 82)}…` : line;
-}
-
-function traceStatusLabel(status: TraceEntry["status"]): string {
-  if (status === "running") return "Running";
-  if (status === "completed") return "Completed";
-  if (status === "failed") return "Failed";
-  if (status === "interrupted") return "Interrupted";
-  return "Unclassified";
-}
-
-function TraceGlyph({ entry }: { entry: TraceEntry }) {
-  const meta = traceEntryMeta(entry);
-  return (
-    <span className={`flex size-7 shrink-0 items-center justify-center rounded-md ${meta.tone}`}>
-      <Icon name={meta.icon} aria-hidden="true" className="size-4" />
-    </span>
-  );
-}
-
-function TraceRail({
-  entries,
-  selectedId,
-  onSelect,
-  truncated,
-}: {
-  entries: TraceEntry[];
-  selectedId: string;
-  onSelect: (id: string) => void;
-  truncated: boolean;
-}) {
-  return (
-    <aside className="flex min-h-0 flex-col border-b border-border bg-muted/20 md:border-b-0 md:border-r">
-      <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
-        <div>
-          <h3 className="text-xs font-semibold text-foreground">Trace</h3>
-          <p className="text-[11px] text-muted-foreground">Select an entry to inspect it</p>
-        </div>
-        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
-          {entries.length}
-        </span>
-      </div>
-      <nav aria-label="Trace entries" className="min-h-0 max-h-[38vh] overflow-y-auto p-2 md:max-h-none md:flex-1">
-        <ul className="space-y-0.5">
-          {entries.map((entry) => {
-            const meta = traceEntryMeta(entry);
-            const roleLabel = traceRoleLabel(entry);
-            const selected = entry.id === selectedId;
-            return (
-              <li key={entry.id}>
-                <button
-                  type="button"
-                  aria-current={selected ? "true" : undefined}
-                  aria-label={`${roleLabel}${meta.label !== roleLabel ? `: ${meta.label}` : ""}. ${traceStatusLabel(entry.status)}`}
-                  title={meta.label !== roleLabel ? meta.label : undefined}
-                  onClick={() => onSelect(entry.id)}
-                  className={`group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${
-                    selected
-                      ? "bg-accent text-foreground"
-                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                  }`}
-                >
-                  <TraceGlyph entry={entry} />
-                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{roleLabel}</span>
-                  <span className="sr-only">{traceStatusLabel(entry.status)}</span>
-                  {entry.status === "failed" && (
-                    <>
-                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-destructive" aria-hidden="true" />
-                    </>
-                  )}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        {truncated && (
-          <p className="px-2 py-2 text-[11px] leading-relaxed text-muted-foreground">
-            The trace rail is capped for large sessions. The raw transcript below remains available.
-          </p>
-        )}
-      </nav>
-    </aside>
-  );
-}
-
-function traceContentSections(text: string): Array<{ label: string; text: string }> {
-  const parts = text.split(/\n\n(?=(?:Input|Output|Error)\n)/u);
-  return parts.map((part) => {
-    const match = /^(Input|Output|Error)\n([\s\S]*)$/u.exec(part);
-    return {
-      label: match?.[1] ?? "Details",
-      text: match?.[2] ?? part,
-    };
-  });
-}
-
-function TraceEntryContent({ entry }: { entry: TraceEntry }) {
-  if (entry.kind !== "tool") {
-    return (
-      <div className="max-w-3xl rounded-lg border border-border/70 bg-muted/20 px-4 py-4 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
-        {entry.text || "No content captured for this entry."}
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-3xl space-y-3">
-      {traceContentSections(entry.text || "No content captured for this entry.").map((section, index) => (
-        <div key={`${section.label}-${index}`} className={`overflow-hidden rounded-lg border ${section.label === "Error" ? "border-destructive/50 bg-destructive/5" : "border-border bg-muted/20"}`}>
-          <div className="border-b border-border/70 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            {section.label}
-          </div>
-          <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words bg-background/40 px-3 py-3 font-mono text-xs leading-6 text-foreground">
-            {section.text || "No content captured for this section."}
-          </pre>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function TraceEntryInspector({ entry }: { entry: TraceEntry }) {
-  const meta = traceEntryMeta(entry);
-  const roleLabel = traceRoleLabel(entry);
-  const statusClass =
-    entry.status === "failed"
-      ? "text-destructive"
-      : entry.status === "running"
-        ? "text-amber-600 dark:text-amber-400"
-        : "text-muted-foreground";
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <span className="sr-only" aria-live="polite">
-        {meta.label} event {entry.sourceSequence} selected. {traceStatusLabel(entry.status)}. {tracePreview(entry.text) || "No content"}.
-      </span>
-      <div className="border-b border-border px-4 py-4 md:px-6">
-        <div className="flex items-start gap-3">
-          <TraceGlyph entry={entry} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h3 className="truncate text-sm font-semibold text-foreground">{meta.label}</h3>
-              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                {roleLabel}
-              </span>
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-              <span className={statusClass}>{traceStatusLabel(entry.status)}</span>
-              {entry.timestamp !== null && <span className="text-muted-foreground">{traceTime(entry.timestamp)}</span>}
-              <span className="font-mono text-muted-foreground">event {entry.sourceSequence}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 md:px-6">
-        <TraceEntryContent entry={entry} />
-      </div>
-    </div>
-  );
-}
-
 function SessionDetailView({
   detail,
   projectId,
@@ -611,13 +399,6 @@ function SessionDetailView({
         }],
     [detail.trace, detail.transcript],
   );
-  const [selectedId, setSelectedId] = useState(entries[0]?.id ?? "transcript");
-  useEffect(() => {
-    if (!entries.some((entry) => entry.id === selectedId)) {
-      setSelectedId(entries[0]?.id ?? "transcript");
-    }
-  }, [entries, selectedId]);
-  const selectedEntry = entries.find((entry) => entry.id === selectedId) ?? entries[0]!;
 
   return (
     <div className="space-y-4">
@@ -642,16 +423,8 @@ function SessionDetailView({
 
       <RehydrateBar detail={detail} projectId={projectId} historical={historical} onDone={onDone} />
 
-      <section className="overflow-hidden rounded-lg border border-border bg-card" aria-label="Trace inspector">
-        <div className="grid min-h-[540px] md:grid-cols-[260px_minmax(0,1fr)]">
-          <TraceRail
-            entries={entries}
-            selectedId={selectedEntry.id}
-            onSelect={setSelectedId}
-            truncated={detail.traceTruncated}
-          />
-          <TraceEntryInspector entry={selectedEntry} />
-        </div>
+      <TraceExplorer entries={entries} truncated={detail.traceTruncated} />
+      <section className="overflow-hidden rounded-lg border border-border bg-card" aria-label="Raw transcript">
         <details className="border-t border-border">
           <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring md:px-6">
             Raw transcript

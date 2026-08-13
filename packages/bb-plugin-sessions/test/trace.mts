@@ -191,7 +191,29 @@ const omp = await parseJsonlStreaming("omp", ompFile, Date.now(), 1, "fixture");
 assert.ok(omp.meta, "OMP fixture should produce a session");
 assert.equal(omp.meta.analytics?.toolCalls, 1, "OMP start/result events should merge by data.toolCallId");
 assert.equal(omp.meta.trace?.filter((entry) => entry.kind === "tool").length, 1, "merged OMP tool events should produce one trace entry");
-assert.equal(omp.meta.trace?.find((entry) => entry.kind === "tool")?.status, "completed");
+const ompTool = omp.meta.trace?.find((entry) => entry.kind === "tool");
+assert.equal(ompTool?.status, "completed");
+assert.equal(ompTool?.timestamp, Date.parse("2026-08-10T12:01:01.000Z"), "merged tool timing should retain its first timestamp");
+
+const terminalOmpFile = join(dir, "omp-terminal-trace.jsonl");
+const terminalOmpRecords = [
+  ompRecords[0],
+  { ...ompRecords[1], data: { ...ompRecords[1].data, toolCallId: "omp-call-terminal" } },
+  ompRecords[2],
+  {
+    type: "custom:tool_execution_end",
+    timestamp: "2026-08-10T12:02:03.000Z",
+    data: { toolCallId: "omp-call-terminal", toolName: "shell", status: "interrupted", output: "stopped" },
+  },
+  {
+    type: "custom:tool_execution_end",
+    timestamp: "2026-08-10T12:02:04.000Z",
+    data: { toolCallId: "omp-call-terminal", toolName: "shell", status: "completed", output: "late result" },
+  },
+];
+writeFileSync(terminalOmpFile, terminalOmpRecords.map((record) => JSON.stringify(record)).join("\n") + "\n");
+const terminalOmp = await parseJsonlStreaming("omp", terminalOmpFile, Date.now(), 1, "fixture");
+assert.equal(terminalOmp.meta?.trace?.find((entry) => entry.kind === "tool")?.status, "interrupted", "terminal tool status should not be downgraded by a later record");
 
 const malformedFile = join(dir, "malformed.jsonl");
 writeFileSync(malformedFile, `${JSON.stringify(ompRecords[0])}\n{not-json}\n${JSON.stringify(ompRecords[2])}\n`);
