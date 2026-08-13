@@ -1,0 +1,556 @@
+<style>
+  #pet-demo {
+    --ink: #2f302c;
+    --muted: #6f7067;
+    --line: #d8cfbf;
+    --paper: #f4efe5;
+    --stage: #d9e0ca;
+    --stage-deep: #b9c8a8;
+    --button: #394b3f;
+    --button-ink: #fbf8f0;
+    width: 100%;
+    max-width: 920px;
+    margin: 0 auto;
+    color: var(--ink);
+    font: 15px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  #pet-demo * {
+    box-sizing: border-box;
+  }
+
+  #pet-demo .pet-shell {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: var(--paper);
+    box-shadow: 0 20px 60px rgba(63, 61, 48, 0.13);
+  }
+
+  #pet-demo .pet-header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 22px 24px 18px;
+  }
+
+  #pet-demo .pet-kicker {
+    margin: 0 0 5px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  #pet-demo h1 {
+    margin: 0;
+    font-size: clamp(24px, 4vw, 34px);
+    font-weight: 500;
+    letter-spacing: -0.035em;
+  }
+
+  #pet-demo .pet-mood {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  #pet-demo .pet-mood-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #d39455;
+    box-shadow: 0 0 0 4px rgba(211, 148, 85, 0.16);
+  }
+
+  #pet-demo .pet-stage {
+    position: relative;
+    height: 520px;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 34%, rgba(255, 252, 235, 0.78), transparent 37%),
+      linear-gradient(155deg, var(--stage) 0%, #cbd7bd 58%, var(--stage-deep) 100%);
+  }
+
+  #pet-demo .pet-stage::after {
+    position: absolute;
+    right: 6%;
+    bottom: 7%;
+    left: 6%;
+    height: 17%;
+    border-radius: 50%;
+    background: rgba(67, 76, 56, 0.14);
+    content: "";
+    filter: blur(22px);
+    pointer-events: none;
+  }
+
+  #pet-demo canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  #pet-demo .pet-nameplate {
+    position: absolute;
+    top: 18px;
+    left: 20px;
+    z-index: 2;
+    padding: 7px 10px;
+    border: 1px solid rgba(47, 48, 44, 0.15);
+    border-radius: 999px;
+    background: rgba(250, 247, 238, 0.67);
+    color: #4b5147;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+  }
+
+  #pet-demo .pet-bubble {
+    position: absolute;
+    right: 20px;
+    bottom: 26px;
+    z-index: 2;
+    max-width: min(320px, calc(100% - 40px));
+    padding: 11px 14px;
+    border: 1px solid rgba(47, 48, 44, 0.14);
+    border-radius: 14px 14px 4px 14px;
+    background: rgba(250, 247, 238, 0.82);
+    color: #464941;
+    box-shadow: 0 9px 24px rgba(67, 76, 56, 0.1);
+    font-size: 13px;
+    backdrop-filter: blur(10px);
+  }
+
+  #pet-demo .pet-controls {
+    display: grid;
+    grid-template-columns: auto minmax(180px, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 20px;
+    border-top: 1px solid rgba(216, 207, 191, 0.9);
+  }
+
+  #pet-demo button,
+  #pet-demo input {
+    min-height: 38px;
+    border-radius: 9px;
+    font: inherit;
+  }
+
+  #pet-demo button {
+    padding: 0 14px;
+    border: 1px solid transparent;
+    background: var(--button);
+    color: var(--button-ink);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: transform 160ms ease, filter 160ms ease;
+  }
+
+  #pet-demo button:hover {
+    filter: brightness(1.08);
+    transform: translateY(-1px);
+  }
+
+  #pet-demo button:focus-visible,
+  #pet-demo input:focus-visible {
+    outline: 3px solid rgba(95, 126, 102, 0.42);
+    outline-offset: 2px;
+  }
+
+  #pet-demo input {
+    width: 100%;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    background: rgba(255, 252, 244, 0.8);
+    color: var(--ink);
+  }
+
+  #pet-demo .pet-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 20px 17px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  #pet-demo .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  @media (max-width: 620px) {
+    #pet-demo .pet-header {
+      padding: 18px;
+    }
+
+    #pet-demo .pet-stage {
+      height: 410px;
+    }
+
+    #pet-demo .pet-controls {
+      grid-template-columns: 1fr 1fr;
+      padding: 14px 16px;
+    }
+
+    #pet-demo .pet-controls input {
+      grid-column: 1 / -1;
+      grid-row: 1;
+    }
+
+    #pet-demo .pet-controls button {
+      grid-row: 2;
+    }
+
+    #pet-demo .pet-footer {
+      align-items: start;
+      flex-direction: column;
+      gap: 4px;
+      padding: 0 16px 15px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #pet-demo button {
+      transition: none;
+    }
+  }
+</style>
+
+<div id="pet-demo" role="region" aria-label="Interactive 3D capybara model">
+  <div class="pet-shell">
+    <header class="pet-header">
+      <div>
+        <p class="pet-kicker">Three.js model preview</p>
+        <h1>Momo the capybara</h1>
+      </div>
+      <div class="pet-mood" aria-live="polite">
+        <span class="pet-mood-dot" aria-hidden="true"></span>
+        <span id="mood-label">calm and curious</span>
+      </div>
+    </header>
+
+    <div class="pet-stage" id="pet-stage">
+      <span class="pet-nameplate">shared companion · capybara</span>
+      <canvas id="pet-canvas" aria-label="A softly lit, animated 3D capybara"></canvas>
+      <div class="pet-bubble" id="pet-bubble" aria-live="polite">I am here. Take your time.</div>
+      <p class="sr-only" id="webgl-fallback">This preview needs WebGL to render the 3D pet.</p>
+    </div>
+
+    <div class="pet-controls">
+      <button id="feed-button" type="button">Feed Momo</button>
+      <label class="sr-only" for="talk-input">Say something to Momo</label>
+      <input id="talk-input" type="text" maxlength="140" placeholder="Say something to Momo" />
+      <button id="talk-button" type="button">Talk to Momo</button>
+    </div>
+
+    <div class="pet-footer">
+      <span id="event-label">Idle animation · breathing, blinking, looking around</span>
+      <span>Try feeding or talking to see a response.</span>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js";
+
+  const root = document.getElementById("pet-demo");
+  const stage = document.getElementById("pet-stage");
+  const canvas = document.getElementById("pet-canvas");
+  const fallback = document.getElementById("webgl-fallback");
+  const bubble = document.getElementById("pet-bubble");
+  const eventLabel = document.getElementById("event-label");
+  const moodLabel = document.getElementById("mood-label");
+  const talkInput = document.getElementById("talk-input");
+  const feedButton = document.getElementById("feed-button");
+  const talkButton = document.getElementById("talk-button");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const colors = {
+    fur: 0xb9794f,
+    furLight: 0xd59868,
+    muzzle: 0xe0ad7d,
+    nose: 0x553a2c,
+    eye: 0x201b17,
+    eyeLight: 0xfff7db,
+    ground: 0xbac9a6,
+  };
+
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: true,
+      powerPreference: "low-power",
+    });
+  } catch (error) {
+    fallback.classList.remove("sr-only");
+    fallback.textContent = "WebGL is unavailable in this browser, so the 3D preview cannot render.";
+    feedButton.disabled = true;
+    talkButton.disabled = true;
+  }
+
+  if (renderer) {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(27, 1, 0.1, 100);
+    camera.position.set(0, 1.55, 6.4);
+    camera.lookAt(0, 1.15, 0);
+
+    scene.add(new THREE.HemisphereLight(0xfff8e8, 0x68705a, 2.2));
+
+    const keyLight = new THREE.DirectionalLight(0xfff4d9, 3.9);
+    keyLight.position.set(-3.5, 6, 4.5);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(1024, 1024);
+    keyLight.shadow.camera.left = -3;
+    keyLight.shadow.camera.right = 3;
+    keyLight.shadow.camera.top = 3;
+    keyLight.shadow.camera.bottom = -3;
+    scene.add(keyLight);
+
+    const fillLight = new THREE.DirectionalLight(0xc8d9bb, 1.35);
+    fillLight.position.set(3, 2.5, 1);
+    scene.add(fillLight);
+
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(3.1, 64),
+      new THREE.MeshStandardMaterial({ color: colors.ground, roughness: 1 }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = 0.03;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const model = new THREE.Group();
+    model.position.y = 0.16;
+    scene.add(model);
+
+    const parts = {};
+    const fur = new THREE.MeshStandardMaterial({ color: colors.fur, roughness: 0.92 });
+    const furLight = new THREE.MeshStandardMaterial({ color: colors.furLight, roughness: 0.9 });
+    const muzzleMaterial = new THREE.MeshStandardMaterial({ color: colors.muzzle, roughness: 0.88 });
+    const noseMaterial = new THREE.MeshStandardMaterial({ color: colors.nose, roughness: 0.8 });
+    const eyeMaterial = new THREE.MeshStandardMaterial({ color: colors.eye, roughness: 0.22, metalness: 0.05 });
+    const eyeLightMaterial = new THREE.MeshBasicMaterial({ color: colors.eyeLight });
+
+    function mesh(geometry, material, name) {
+      const object = new THREE.Mesh(geometry, material);
+      object.name = name;
+      object.castShadow = true;
+      object.receiveShadow = true;
+      model.add(object);
+      parts[name] = object;
+      return object;
+    }
+
+    parts.body = mesh(new THREE.SphereGeometry(1, 32, 20), fur, "body");
+    parts.body.position.set(0, 1.1, 0);
+    parts.body.scale.set(1.28, 0.95, 0.95);
+
+    parts.chest = mesh(new THREE.SphereGeometry(0.66, 28, 18), furLight, "chest");
+    parts.chest.position.set(0, 1.13, 0.68);
+    parts.chest.scale.set(0.82, 0.92, 0.33);
+
+    parts.head = mesh(new THREE.SphereGeometry(0.9, 32, 22), furLight, "head");
+    parts.head.position.set(0, 1.83, 0.08);
+    parts.head.scale.set(0.94, 0.92, 0.88);
+
+    parts.muzzleLeft = mesh(new THREE.SphereGeometry(0.38, 24, 16), muzzleMaterial, "muzzleLeft");
+    parts.muzzleLeft.position.set(-0.2, 1.61, 0.83);
+    parts.muzzleLeft.scale.set(1.0, 0.85, 0.68);
+
+    parts.muzzleRight = mesh(new THREE.SphereGeometry(0.38, 24, 16), muzzleMaterial, "muzzleRight");
+    parts.muzzleRight.position.set(0.2, 1.61, 0.83);
+    parts.muzzleRight.scale.set(1.0, 0.85, 0.68);
+
+    parts.nose = mesh(new THREE.SphereGeometry(0.21, 24, 16), noseMaterial, "nose");
+    parts.nose.position.set(0, 1.78, 1.06);
+    parts.nose.scale.set(1.18, 0.72, 0.7);
+
+    parts.leftEye = mesh(new THREE.SphereGeometry(0.105, 24, 16), eyeMaterial, "leftEye");
+    parts.leftEye.position.set(-0.33, 1.98, 0.78);
+    parts.rightEye = mesh(new THREE.SphereGeometry(0.105, 24, 16), eyeMaterial, "rightEye");
+    parts.rightEye.position.set(0.33, 1.98, 0.78);
+
+    parts.leftHighlight = mesh(new THREE.SphereGeometry(0.034, 12, 8), eyeLightMaterial, "leftHighlight");
+    parts.leftHighlight.position.set(-0.36, 2.02, 0.87);
+    parts.rightHighlight = mesh(new THREE.SphereGeometry(0.034, 12, 8), eyeLightMaterial, "rightHighlight");
+    parts.rightHighlight.position.set(0.3, 2.02, 0.87);
+
+    parts.leftEar = mesh(new THREE.SphereGeometry(0.21, 24, 16), fur, "leftEar");
+    parts.leftEar.position.set(-0.57, 2.38, 0.02);
+    parts.leftEar.scale.set(0.82, 1.18, 0.55);
+    parts.rightEar = mesh(new THREE.SphereGeometry(0.21, 24, 16), fur, "rightEar");
+    parts.rightEar.position.set(0.57, 2.38, 0.02);
+    parts.rightEar.scale.set(0.82, 1.18, 0.55);
+
+    const legPositions = [
+      [-0.5, 0.58, 0.29],
+      [0.5, 0.58, 0.29],
+      [-0.48, 0.58, -0.32],
+      [0.48, 0.58, -0.32],
+    ];
+    legPositions.forEach(([x, y, z], index) => {
+      const leg = mesh(new THREE.CylinderGeometry(0.19, 0.24, 0.7, 18), fur, `leg${index}`);
+      leg.position.set(x, y, z);
+      const foot = mesh(new THREE.SphereGeometry(0.25, 20, 12), fur, `foot${index}`);
+      foot.position.set(x, 0.29, z + 0.08);
+      foot.scale.set(0.9, 0.48, 1.18);
+    });
+
+    parts.tail = mesh(new THREE.SphereGeometry(0.13, 18, 12), fur, "tail");
+    parts.tail.position.set(0, 1.08, -0.93);
+    parts.tail.scale.set(0.82, 0.82, 0.7);
+
+    const headGroup = new THREE.Group();
+    headGroup.name = "headGroup";
+    model.add(headGroup);
+    [
+      parts.head,
+      parts.muzzleLeft,
+      parts.muzzleRight,
+      parts.nose,
+      parts.leftEye,
+      parts.rightEye,
+      parts.leftHighlight,
+      parts.rightHighlight,
+      parts.leftEar,
+      parts.rightEar,
+    ].forEach((part) => {
+      model.remove(part);
+      headGroup.add(part);
+    });
+    parts.headGroup = headGroup;
+
+    const clock = new THREE.Clock();
+    let motion = "idle";
+    let motionUntil = 0;
+    let nextBlink = 2.6;
+    let blinkUntil = 0;
+    let nextLook = 0;
+    let lookTarget = 0;
+    let lookValue = 0;
+
+    function setMessage(message, label, mood = "calm and curious") {
+      bubble.textContent = message;
+      eventLabel.textContent = label;
+      moodLabel.textContent = mood;
+    }
+
+    function triggerMotion(nextMotion, message, label, mood) {
+      motion = nextMotion;
+      motionUntil = clock.elapsedTime + (reducedMotion ? 0.5 : 2.4);
+      setMessage(message, label, mood);
+    }
+
+    function resize() {
+      const bounds = stage.getBoundingClientRect();
+      const width = Math.max(1, bounds.width);
+      const height = Math.max(1, bounds.height);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    }
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(stage);
+    resize();
+
+    function animate() {
+      const elapsed = clock.getElapsedTime();
+      const delta = clock.getDelta();
+
+      if (!reducedMotion) {
+        const breath = 1 + Math.sin(elapsed * 2.1) * 0.022;
+        parts.body.scale.y = 0.95 * breath;
+        parts.chest.scale.y = 0.92 * breath;
+        model.position.y = 0.16 + Math.sin(elapsed * 1.25) * 0.025;
+        model.rotation.y += (lookValue - model.rotation.y) * Math.min(1, delta * 2.8);
+
+        if (elapsed > nextLook) {
+          lookTarget = (Math.random() - 0.5) * 0.18;
+          nextLook = elapsed + 3 + Math.random() * 3;
+        }
+        lookValue = lookTarget;
+      }
+
+      if (elapsed > nextBlink) {
+        blinkUntil = elapsed + 0.13;
+        nextBlink = elapsed + 2.5 + Math.random() * 4;
+      }
+      const blinking = elapsed < blinkUntil;
+      parts.leftEye.scale.y = blinking ? 0.14 : 1;
+      parts.rightEye.scale.y = blinking ? 0.14 : 1;
+      parts.leftHighlight.visible = !blinking;
+      parts.rightHighlight.visible = !blinking;
+
+      if (motion === "feed" && elapsed < motionUntil) {
+        parts.headGroup.rotation.x = Math.sin(elapsed * 8) * 0.08;
+        parts.nose.position.z = 1.06 + Math.sin(elapsed * 8) * 0.025;
+        parts.leftEar.rotation.z = Math.sin(elapsed * 8) * 0.1;
+        parts.rightEar.rotation.z = -Math.sin(elapsed * 8) * 0.1;
+      } else if (motion === "talk" && elapsed < motionUntil) {
+        parts.headGroup.rotation.z = Math.sin(elapsed * 3.2) * 0.07;
+        parts.leftEar.rotation.z = -0.12 + Math.sin(elapsed * 3.2) * 0.06;
+        parts.rightEar.rotation.z = 0.12 + Math.sin(elapsed * 3.2) * 0.06;
+      } else {
+        parts.headGroup.rotation.x *= 0.9;
+        parts.headGroup.rotation.z *= 0.9;
+        parts.nose.position.z += (1.06 - parts.nose.position.z) * 0.1;
+        parts.leftEar.rotation.z *= 0.9;
+        parts.rightEar.rotation.z *= 0.9;
+        if (motion !== "idle") motion = "idle";
+      }
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+
+    feedButton.addEventListener("click", () => {
+      triggerMotion("feed", "Mmm. A peaceful little snack.", "Feed animation · chewing and happy ears", "content and pleased");
+    });
+
+    function talk() {
+      const message = talkInput.value.trim();
+      const responses = [
+        "I hear you. The water is warm and the day is gentle.",
+        "Mmm-hm. I will think about that very calmly.",
+        "That sounds important. I am staying right here with you.",
+      ];
+      const reply = responses[message.length % responses.length];
+      triggerMotion("talk", reply, message ? "Talk animation · listening closely" : "Talk animation · a quiet hello", "calm and attentive");
+      talkInput.value = "";
+    }
+
+    talkButton.addEventListener("click", talk);
+    talkInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") talk();
+    });
+
+    animate();
+    root.dataset.ready = "true";
+  }
+</script>
