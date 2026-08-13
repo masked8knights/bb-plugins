@@ -627,6 +627,10 @@ export function createProviderJsonlParser(
     if (role === "user" || role === "assistant" || type.includes("/user_message") || type.includes("/agent_message")) session.messageCount += 1;
 
     const isTurnEvent = type.includes("turn") || type.includes("run") || type.includes("response") || type.includes("generation") || type.includes("task_started") || type.includes("task_complete")
+      // Claude Code emits one assistant record for each model response rather
+      // than a separate turn lifecycle event. Count those records as turns;
+      // tool_result user records are deliberately not turns.
+      || (provider === "claude" && type === "assistant")
       // Pi/omp sessions are plain message logs: each assistant message is a step.
       || ((provider === "pi" || provider === "prime" || provider === "omp") && type === "message" && role === "assistant");
     const currentTurnId = turnId(record, "") ?? (isTurnEvent ? `line-${index + 1}` : null);

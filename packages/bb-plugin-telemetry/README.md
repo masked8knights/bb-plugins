@@ -1,4 +1,8 @@
-# bb-plugin-telemetry
+# bb-plugin-telemetry (legacy)
+
+> Telemetry is now folded into `bb-plugin-sessions`. Install and use the
+> Sessions plugin; this package remains in the repository as a compatibility
+> source while existing installations migrate.
 
 Telemetry compares provider sessions with native bb thread telemetry.
 The default view keeps Codex, Claude Code, Pi, Prime Agent, opencode, and omp

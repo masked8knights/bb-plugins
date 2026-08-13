@@ -5,6 +5,7 @@ import {
   useRealtimeConnectionState,
   useRpc,
 } from "@bb/plugin-sdk/app";
+import { compactReindexInput } from "./rpc-input";
 import type {
   DashboardInput,
   DashboardResult,
@@ -924,7 +925,7 @@ function Dashboard() {
   const refresh = async () => {
     setBusy(true);
     try {
-      await rpc.call("reindex", { providers: input.providers });
+      await rpc.call("reindex", compactReindexInput(input));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {

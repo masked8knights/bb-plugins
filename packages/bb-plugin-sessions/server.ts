@@ -1302,7 +1302,7 @@ export default async function plugin(bb: BbPluginApi) {
           stale: status.indexing.active || status.error !== null || status.providerDiscoveryError !== null || sources.some((source) => source.lastWarning !== null || source.lastError !== null || sourceIsStale(source)),
         },
         sources,
-        uncovered: status.uncovered,
+        uncovered: status.uncovered.map(({ id, displayName }) => ({ id, displayName })),
         indexing: status.indexing,
         lastIndexAt: status.lastIndexAt,
         error: status.error,

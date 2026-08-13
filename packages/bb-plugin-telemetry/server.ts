@@ -484,11 +484,9 @@ export default async function plugin(bb: BbPluginApi) {
         store.upsertSource(sourceStatus);
         const seen = new Set<string>();
         for (const parsed of result.records) {
-          // Pi and Prime Agent share `~/.prime/agent/sessions`; identical
-          // files must not be indexed under both providers. Prime yields to
-          // Pi (the store's canonical owner): a file already indexed under
-          // Pi is skipped here, and the Pi scan never defers, so ownership
-          // converges to Pi on the next full sync.
+          // If an explicit configuration points Pi and Prime Agent at the
+          // same historical JSONL store, identical files must not be indexed
+          // under both providers. Prime yields to Pi (the canonical owner).
           if (parsed.session.provider === "prime" && parsed.session.fingerprint) {
             const claimed = store.getSessionByFingerprint(parsed.session.fingerprint, "prime");
             if (claimed) continue;

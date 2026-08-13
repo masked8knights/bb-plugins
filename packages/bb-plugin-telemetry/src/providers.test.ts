@@ -91,6 +91,50 @@ describe("provider record normalization", () => {
     expect(parsed.session.coverage.tokens).toBe("complete");
   });
 
+  it("counts Claude assistant responses as turns and pairs tool results with tool uses", () => {
+    const parsed = parseProviderJsonl(
+      "claude",
+      "primary",
+      "/tmp/claude-tools.jsonl",
+      [
+        JSON.stringify({
+          type: "user", sessionId: "claude-tools", timestamp: "2026-07-01T10:00:00Z",
+          message: { role: "user", content: [{ type: "text", text: "inspect the project" }] },
+        }),
+        JSON.stringify({
+          type: "assistant", sessionId: "claude-tools", timestamp: "2026-07-01T10:00:01Z",
+          message: {
+            role: "assistant", model: "claude-sonnet-4-5",
+            content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "pwd" } }],
+            usage: { input_tokens: 100, output_tokens: 20 },
+          },
+        }),
+        JSON.stringify({
+          type: "user", sessionId: "claude-tools", timestamp: "2026-07-01T10:00:02Z",
+          message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+        }),
+        JSON.stringify({
+          type: "assistant", sessionId: "claude-tools", timestamp: "2026-07-01T10:00:03Z",
+          message: {
+            role: "assistant", model: "claude-sonnet-4-5",
+            content: [{ type: "text", text: "The project is ready." }],
+            usage: { input_tokens: 120, output_tokens: 12 },
+          },
+        }),
+      ].join("\n"),
+      "fingerprint",
+    );
+    if (!parsed) throw new Error("expected parsed record");
+
+    expect(parsed.session.turnCount).toBe(2);
+    expect(parsed.session.toolCalls).toBe(1);
+    expect(parsed.session.toolErrors).toBe(0);
+    expect(parsed.items[0]?.toolName).toBe("Bash");
+    expect(parsed.items[0]?.status).toBe("completed");
+    expect(parsed.session.inputTokens).toBe(220);
+    expect(parsed.session.outputTokens).toBe(32);
+  });
+
   it("extracts Pi toolCall blocks, cache reads, and reported cost from message.usage", () => {
     const parsed = parseProviderJsonl(
       "pi",

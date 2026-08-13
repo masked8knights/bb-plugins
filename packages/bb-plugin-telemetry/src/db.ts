@@ -580,9 +580,9 @@ export class AnalyticsStore {
 
   /**
    * Find a provider-store session with the same content fingerprint under a
-   * different provider. Pi and Prime Agent share `~/.prime/agent/sessions`,
-   * so identical files must not be indexed twice (once per provider); the
-   * first scan to claim a file keeps it.
+   * different provider. Pi and Prime Agent normally use separate roots, but
+   * an explicit configuration can point them at the same historical JSONL
+   * store, so identical files must not be indexed twice in that case.
    */
   getSessionByFingerprint(fingerprint: string, excludeProvider: string): ProviderSessionRecord | null {
     const row = this.db
