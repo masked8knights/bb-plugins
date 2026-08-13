@@ -3,11 +3,14 @@
 // annotations, history, and feedback formatting. BB only supplies the agent
 // tool, embeds the upstream session, and keeps the provider interaction alive.
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi, type JsonValue } from "@bb/plugin-sdk";
 import { z } from "zod";
 import {
+  BUNDLED_BINARY,
   DEFAULT_BINARY,
   INTERACTION_SETTLE_TIMEOUT_MS,
+  ensureBundledPlannotatorBinary,
   missingBinaryMessage,
   resolvePlannotatorBinary,
   startUpstreamPlanReview,
@@ -220,7 +223,47 @@ function parseInteractionValue(value: unknown):
 
 async function getConfiguredPath(settings: { get(): Promise<{ binaryPath: string }> }): Promise<string> {
   const configured = await settings.get();
-  return configured.binaryPath.trim() || DEFAULT_BINARY;
+  return configured.binaryPath.trim() || BUNDLED_BINARY;
+}
+
+async function resolveRuntimeBinary(
+  bb: BbPluginApi,
+  configuredPath: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const environmentOverride = process.env.PLANNOTATOR_BIN?.trim();
+  if (environmentOverride) {
+    const external = resolvePlannotatorBinary(environmentOverride);
+    if (!external) throw new Error(missingBinaryMessage(environmentOverride));
+    return external;
+  }
+
+  // Preserve compatibility with the first adapter release, where the
+  // default was the standalone `plannotator` command. Explicit paths remain
+  // strict; only the old command name falls back to the bundled runtime.
+  if (configuredPath !== BUNDLED_BINARY) {
+    const external = resolvePlannotatorBinary(configuredPath, {
+      ...process.env,
+      PLANNOTATOR_BIN: "",
+    });
+    if (external) return external;
+    if (configuredPath !== DEFAULT_BINARY && configuredPath !== "auto") {
+      throw new Error(missingBinaryMessage(configuredPath));
+    }
+  }
+
+  const systemConfig = await bb.sdk.system.config({ signal });
+  try {
+    return await ensureBundledPlannotatorBinary({
+      runtimeDir: join(systemConfig.dataDir, "plugins", bb.pluginId, "runtime"),
+      signal,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${missingBinaryMessage(BUNDLED_BINARY)} ${detail}`, {
+      cause: error,
+    });
+  }
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -229,8 +272,8 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Plannotator binary",
       description:
-        "Path or command for the official Plannotator binary. The default searches PATH and ~/.local/bin.",
-      default: DEFAULT_BINARY,
+        `Use the bundled official runtime by default, or enter a path/command to override it. Set to \"${BUNDLED_BINARY}\" to restore the default.`,
+      default: BUNDLED_BINARY,
     },
     timeoutSeconds: {
       type: "string",
@@ -247,7 +290,10 @@ export default async function plugin(bb: BbPluginApi) {
       const configuredPath = await getConfiguredPath(settings);
       return {
         configuredPath,
-        binary: resolvePlannotatorBinary(configuredPath),
+        binary:
+          configuredPath === BUNDLED_BINARY
+            ? null
+            : resolvePlannotatorBinary(configuredPath),
       };
     },
   });
@@ -269,8 +315,12 @@ export default async function plugin(bb: BbPluginApi) {
       }
 
       const configuredPath = await getConfiguredPath(settings);
-      const binaryPath = resolvePlannotatorBinary(configuredPath);
-      if (!binaryPath) return errorResponse(missingBinaryMessage(configuredPath));
+      let binaryPath: string;
+      try {
+        binaryPath = await resolveRuntimeBinary(bb, configuredPath, context.signal);
+      } catch (error) {
+        return errorResponse(error instanceof Error ? error.message : String(error));
+      }
 
       const sessionId = randomUUID();
       let upstream: RunningUpstreamReview;

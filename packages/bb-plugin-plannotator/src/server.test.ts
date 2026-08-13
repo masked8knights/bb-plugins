@@ -181,6 +181,6 @@ describe("BB upstream Plannotator bridge", () => {
       { threadId: "thread-1", projectId: "project-1" },
     );
     expect(result).toMatchObject({ isError: true });
-    expect(JSON.stringify(result)).toContain("github.com/backnotprop/plannotator");
+    expect(JSON.stringify(result)).toContain("bundled");
   });
 });

@@ -1,13 +1,93 @@
-import { accessSync, constants } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  accessSync,
+  constants,
+  createReadStream,
+  createWriteStream,
+} from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 export const UPSTREAM_REPOSITORY = "https://github.com/backnotprop/plannotator";
 export const DEFAULT_BINARY = "plannotator";
+export const BUNDLED_BINARY = "bundled";
+export const BUNDLED_RELEASE_VERSION = "0.27.1";
+export const BUNDLED_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 export const READY_TIMEOUT_MS = 15_000;
 export const INTERACTION_SETTLE_TIMEOUT_MS = 10_000;
+
+const BUNDLED_RELEASE_BASE_URL = `${UPSTREAM_REPOSITORY}/releases/download/v${BUNDLED_RELEASE_VERSION}`;
+
+export type BundledTarget =
+  | "darwin-arm64"
+  | "darwin-x64"
+  | "linux-arm64"
+  | "linux-x64"
+  | "win32-arm64"
+  | "win32-x64";
+
+export type BundledAsset = {
+  target: BundledTarget;
+  name: string;
+  sha256: string;
+  sizeBytes: number;
+};
+
+/** Pinned official release assets; update this table with each plugin release. */
+export const BUNDLED_ASSETS: Record<BundledTarget, BundledAsset> = {
+  "darwin-arm64": {
+    target: "darwin-arm64",
+    name: "plannotator-darwin-arm64",
+    sha256: "5d08f591e6ee34d070913b36fa133494047b1565adeaf8192d366840192815d8",
+    sizeBytes: 119_388_770,
+  },
+  "darwin-x64": {
+    target: "darwin-x64",
+    name: "plannotator-darwin-x64",
+    sha256: "ac2f55494c4bf18f1d963b61a543323b2dacb92d13d067875eecb412defc2d67",
+    sizeBytes: 124_682_320,
+  },
+  "linux-arm64": {
+    target: "linux-arm64",
+    name: "plannotator-linux-arm64",
+    sha256: "e10e6e73bd5f087380c1ba0c8eed22a86578be49687059ba224afed78d4429b3",
+    sizeBytes: 149_203_088,
+  },
+  "linux-x64": {
+    target: "linux-x64",
+    name: "plannotator-linux-x64",
+    sha256: "e7a3cec5676cc7f842a8fb74b71ccb98f1014fe9c3633c3cffec28d0b1815451",
+    sizeBytes: 150_096_000,
+  },
+  "win32-arm64": {
+    target: "win32-arm64",
+    name: "plannotator-win32-arm64.exe",
+    sha256: "9dbb76a01ea50d3d2282adf5475df03a8478fc232f2ed661c822dc36b4c4b778",
+    sizeBytes: 150_089_216,
+  },
+  "win32-x64": {
+    target: "win32-x64",
+    name: "plannotator-win32-x64.exe",
+    sha256: "83417fe66b8ebb4b19256921ea530216d81d733a6f90f61439c6d327eeb54eab",
+    sizeBytes: 153_985_536,
+  },
+};
+
+type FetchLike = typeof fetch;
+const bundledDownloadLocks = new Map<string, Promise<string>>();
 
 export type UpstreamReadyMetadata = {
   url: string;
@@ -44,6 +124,206 @@ function isExecutable(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function bundledTargetFor(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): BundledTarget | null {
+  if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
+    return null;
+  }
+  if (arch !== "arm64" && arch !== "x64") return null;
+  return `${platform}-${arch}` as BundledTarget;
+}
+
+export function bundledAssetFor(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): BundledAsset | null {
+  const target = bundledTargetFor(platform, arch);
+  return target ? BUNDLED_ASSETS[target] : null;
+}
+
+function bundledBinaryPath(runtimeDir: string, asset: BundledAsset): string {
+  return join(runtimeDir, `v${BUNDLED_RELEASE_VERSION}`, asset.name);
+}
+
+function bundledMetadataPath(binaryPath: string): string {
+  return `${binaryPath}.json`;
+}
+
+function isMatchingBundledMetadata(value: unknown, asset: BundledAsset): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.version === BUNDLED_RELEASE_VERSION &&
+    record.name === asset.name &&
+    record.sha256 === asset.sha256 &&
+    record.sizeBytes === asset.sizeBytes
+  );
+}
+
+async function findCachedBundledBinary(
+  binaryPath: string,
+  asset: BundledAsset,
+): Promise<string | null> {
+  try {
+    const [metadata, binary] = await Promise.all([
+      readFile(bundledMetadataPath(binaryPath), "utf8"),
+      stat(binaryPath),
+    ]);
+    if (!binary.isFile() || binary.size !== asset.sizeBytes) return null;
+    if (!isMatchingBundledMetadata(JSON.parse(metadata) as unknown, asset)) return null;
+    const digest = createHash("sha256");
+    for await (const chunk of createReadStream(binaryPath)) digest.update(chunk);
+    if (digest.digest("hex") !== asset.sha256) return null;
+    if (!isExecutable(binaryPath)) await chmod(binaryPath, 0o700);
+    return isExecutable(binaryPath) ? binaryPath : null;
+  } catch {
+    return null;
+  }
+}
+
+async function downloadBundledBinary(
+  binaryPath: string,
+  asset: BundledAsset,
+  signal: AbortSignal | undefined,
+  fetchImpl: FetchLike,
+): Promise<string> {
+  const metadataPath = bundledMetadataPath(binaryPath);
+  const temporaryPath = `${binaryPath}.${randomUUID()}.download`;
+  await mkdir(dirname(binaryPath), { recursive: true });
+
+  const downloadController = new AbortController();
+  let timedOut = false;
+  const forwardAbort = () => downloadController.abort();
+  if (signal?.aborted) {
+    downloadController.abort();
+  } else {
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+  }
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    downloadController.abort();
+  }, BUNDLED_DOWNLOAD_TIMEOUT_MS);
+  timeout.unref?.();
+
+  try {
+    const response = await fetchImpl(
+      `${BUNDLED_RELEASE_BASE_URL}/${asset.name}`,
+      { signal: downloadController.signal },
+    );
+    if (!response.ok) {
+      throw new Error(
+        `Bundled Plannotator download failed with HTTP ${response.status}.`,
+      );
+    }
+    if (!response.body) throw new Error("Bundled Plannotator download returned no body.");
+
+    const digest = createHash("sha256");
+    let sizeBytes = 0;
+    const hashingTransform = new Transform({
+      transform(chunk, _encoding, callback) {
+        digest.update(chunk);
+        sizeBytes += chunk.byteLength;
+        callback(null, chunk);
+      },
+    });
+
+    await pipeline(
+      Readable.fromWeb(response.body as never),
+      hashingTransform,
+      createWriteStream(temporaryPath, { mode: 0o700 }),
+    );
+
+    const sha256 = digest.digest("hex");
+    if (sizeBytes !== asset.sizeBytes || sha256 !== asset.sha256) {
+      throw new Error(
+        `Bundled Plannotator checksum mismatch (expected ${asset.sha256}, got ${sha256}).`,
+      );
+    }
+
+    await chmod(temporaryPath, 0o700);
+    // fs.rename replaces the destination on POSIX but fails when the
+    // destination exists on Windows. The cache is disposable, so remove an
+    // invalid/stale copy before the atomic replacement.
+    await rm(binaryPath, { force: true });
+    await rename(temporaryPath, binaryPath);
+    await writeFile(
+      metadataPath,
+      JSON.stringify({
+        version: BUNDLED_RELEASE_VERSION,
+        name: asset.name,
+        sha256: asset.sha256,
+        sizeBytes: asset.sizeBytes,
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    return binaryPath;
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(
+        `Bundled Plannotator download timed out after ${BUNDLED_DOWNLOAD_TIMEOUT_MS / 1000} seconds.`,
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", forwardAbort);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function provisionBundledBinary(
+  runtimeDir: string,
+  asset: BundledAsset,
+  signal: AbortSignal | undefined,
+  fetchImpl: FetchLike,
+): Promise<string> {
+  const binaryPath = bundledBinaryPath(runtimeDir, asset);
+  const cached = await findCachedBundledBinary(binaryPath, asset);
+  if (cached) return cached;
+
+  return downloadBundledBinary(binaryPath, asset, signal, fetchImpl);
+}
+
+/**
+ * Provision the pinned official release into BB's writable plugin data area.
+ * The repository does not carry six 120–154 MB Bun executables; the first
+ * review downloads exactly the host target and verifies its release digest.
+ */
+export async function ensureBundledPlannotatorBinary(options: {
+  runtimeDir: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  asset?: BundledAsset;
+  signal?: AbortSignal;
+  fetchImpl?: FetchLike;
+}): Promise<string> {
+  const asset = options.asset ?? bundledAssetFor(options.platform, options.arch);
+  if (!asset) {
+    throw new Error(
+      `Bundled Plannotator does not support ${options.platform ?? process.platform}/${options.arch ?? process.arch}. Set PLANNOTATOR_BIN to a compatible executable.`,
+    );
+  }
+
+  const runtimeDir = resolve(options.runtimeDir);
+  const key = `${runtimeDir}:${asset.name}`;
+  const existing = bundledDownloadLocks.get(key);
+  if (existing) return existing;
+
+  const pending = provisionBundledBinary(
+    runtimeDir,
+    asset,
+    options.signal,
+    options.fetchImpl ?? fetch,
+  ).finally(() => {
+    bundledDownloadLocks.delete(key);
+  });
+  bundledDownloadLocks.set(key, pending);
+  return pending;
 }
 
 /**
@@ -286,9 +566,15 @@ export async function startUpstreamPlanReview(
 }
 
 export function missingBinaryMessage(configuredPath: string): string {
+  if (configuredPath === BUNDLED_BINARY) {
+    return [
+      `The bundled Plannotator runtime could not be prepared for ${process.platform}/${process.arch}.`,
+      "The plugin downloads the official release on first use and verifies its SHA-256 checksum.",
+      `Set PLANNOTATOR_BIN to a compatible executable or see ${UPSTREAM_REPOSITORY} for supported targets.`,
+    ].join(" ");
+  }
   return [
     `Could not find the Plannotator binary (${configuredPath || DEFAULT_BINARY}).`,
-    `Install the official standalone binary, then retry: ${UPSTREAM_REPOSITORY}#install`,
-    "You can also set the Plannotator binary path in BB → Extensions → Plannotator.",
+    `Use the bundled runtime by setting the binary option to \"${BUNDLED_BINARY}\", or set PLANNOTATOR_BIN to a compatible executable.`,
   ].join(" ");
 }
