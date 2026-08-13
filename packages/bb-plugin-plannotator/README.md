@@ -15,7 +15,7 @@ For development, offline use, or an independently updated upstream build, set **
 
 Start a new agent session after installing or reloading. When the agent calls `plannotator_review_plan`, the upstream UI opens in the right panel. Approve or annotate there; BB closes that review tab, stops the upstream session, and bridges the decision back to the waiting tool call so the provider can resume. The child receives the current BB provider identity explicitly, rather than inferring it from unrelated host environment variables.
 
-Plannotator's plan history and configuration are stored under the plugin's BB data directory. The embedded URL is normalized to BB's loopback hostname so Plannotator's one-time setup cookies persist across its random review ports. The first-run announcement is still owned by Plannotator; dismiss it with **Got it** once. **Open externally** is available as a fallback, but external browser tabs may have a separate cookie jar from the BB panel.
+Plannotator's plan history and configuration are stored under the plugin's BB data directory. The embedded URL is normalized to the browser-facing loopback hostname, and BB acknowledges the current upstream look-and-feel announcement before mounting the iframe, so the standalone setup wizard does not interrupt each review. The upstream plan UI remains otherwise unmodified. **Open externally** is available as a fallback, but external browser tabs may have a separate cookie jar from the BB panel.
 
 ## Boundary
 

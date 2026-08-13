@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@bb/plugin-sdk/testing/app";
+import { UPSTREAM_LOOK_AND_FEEL_COOKIE, UPSTREAM_LOOK_AND_FEEL_VERSION } from "./embedded";
 
 const app = await loadPluginApp(() => import("../app"));
 
@@ -33,8 +34,13 @@ describe("Plannotator BB shell", () => {
     );
 
     const iframe = await slot.findByTitle("Plannotator review");
-    expect(iframe.getAttribute("src")).toBe(payload.sessionUrl);
+    expect(iframe.getAttribute("src")).toBe(
+      `http://${window.location.hostname}:43210`,
+    );
     expect(iframe.getAttribute("allow")).toBe("clipboard-read; clipboard-write");
+    expect(document.cookie).toContain(
+      `${UPSTREAM_LOOK_AND_FEEL_COOKIE}=${UPSTREAM_LOOK_AND_FEEL_VERSION}`,
+    );
   });
 
   it("opens the right panel from the pending interaction and exposes cancellation", async () => {

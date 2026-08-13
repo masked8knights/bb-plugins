@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   useBbNavigate,
@@ -7,6 +7,10 @@ import {
   type PluginThreadPanelProps,
 } from "@bb/plugin-sdk/app";
 import { PANEL_ACTION_ID, RENDERER_ID } from "./src/constants";
+import {
+  normalizeEmbeddedSessionUrl,
+  upstreamOnboardingCookie,
+} from "./src/embedded";
 
 type PlannotatorPayload = {
   kind: "plannotator";
@@ -59,17 +63,43 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
   const payload = parsePayload(params);
   const [reloadKey, setReloadKey] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [embeddedUrl, setEmbeddedUrl] = useState<string | null>(null);
 
   useEffect(() => {
     setLoaded(false);
+  }, [embeddedUrl]);
+
+  // The upstream runtime stores its one-time announcement dismissal in a
+  // cookie. Prime that cookie from BB before mounting the iframe, and rewrite
+  // loopback URLs to the browser-facing hostname so the cookie belongs to the
+  // same host as the child UI. This keeps the real upstream UI while removing
+  // standalone-browser onboarding from the embedded workflow.
+  useLayoutEffect(() => {
+    if (!payload) {
+      setEmbeddedUrl(null);
+      return;
+    }
+
+    document.cookie = upstreamOnboardingCookie();
+    setEmbeddedUrl(
+      normalizeEmbeddedSessionUrl(payload.sessionUrl, window.location.hostname),
+    );
   }, [payload?.sessionUrl]);
 
   if (!payload) return <EmptyPanel />;
 
+  if (!embeddedUrl) {
+    return (
+      <div className="flex h-full min-h-0 items-center justify-center bg-background text-xs text-muted-foreground">
+        Loading Plannotator…
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2 text-xs">
-        <div className="min-w-0 truncate text-muted-foreground" title={payload.sessionUrl}>
+        <div className="min-w-0 truncate text-muted-foreground" title={embeddedUrl}>
           {payload.title}
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -85,7 +115,7 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
           </button>
           <a
             className="rounded border border-border px-2 py-1 text-muted-foreground hover:bg-state-hover hover:text-foreground"
-            href={payload.sessionUrl}
+            href={embeddedUrl}
             target="_blank"
             rel="noreferrer"
           >
@@ -102,7 +132,7 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
         <iframe
           key={reloadKey}
           title="Plannotator review"
-          src={payload.sessionUrl}
+          src={embeddedUrl}
           className="h-full w-full border-0"
           referrerPolicy="no-referrer"
           allow="clipboard-read; clipboard-write"
