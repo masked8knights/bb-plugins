@@ -2,8 +2,16 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFakePluginHost, type FakePluginHost } from "@bb/plugin-sdk/testing";
-import plugin, { upstreamOriginForProvider } from "../server";
+import {
+  createFakePluginHost,
+  type FakePluginHost,
+} from "@bb/plugin-sdk/testing";
+import type { PluginInteractionRequest, PluginInteractionResult } from "@bb/plugin-sdk";
+import plugin, {
+  shouldUseRemotePlannotatorMode,
+  waitForReviewInteraction,
+  upstreamOriginForProvider,
+} from "../server";
 
 const hosts: FakePluginHost[] = [];
 const temporaryDirectories: string[] = [];
@@ -122,12 +130,112 @@ function wireInteractionSdk(
 }
 
 describe("BB upstream Plannotator bridge", () => {
+  it("enables remote Plannotator mode only for remotely reachable BB configurations", () => {
+    expect(shouldUseRemotePlannotatorMode("http://127.0.0.1:38886")).toBe(false);
+    expect(shouldUseRemotePlannotatorMode("https://machine.example.ts.net")).toBe(true);
+    expect(
+      shouldUseRemotePlannotatorMode(undefined, { BB_SERVER_BIND_HOST: "0.0.0.0" }),
+    ).toBe(true);
+    expect(
+      shouldUseRemotePlannotatorMode("http://127.0.0.1:38886", {
+        BB_APP_URL: "https://machine.example.ts.net",
+        BB_SERVER_BIND_HOST: "127.0.0.1",
+      }),
+    ).toBe(true);
+  });
+
   it("maps BB provider ids to upstream display identities", () => {
     expect(upstreamOriginForProvider("codex")).toBe("codex");
     expect(upstreamOriginForProvider("opencode")).toBe("opencode");
     expect(upstreamOriginForProvider("acp-claude-code")).toBe("claude-code");
     expect(upstreamOriginForProvider("omp")).toBe("pi");
     expect(upstreamOriginForProvider("unknown-provider")).toBe("codex");
+  });
+
+  it("re-arms the host interaction after its safety window expires", async () => {
+    const calls: PluginInteractionRequest[] = [];
+    const requestInput = async (
+      request: PluginInteractionRequest,
+    ): Promise<PluginInteractionResult> => {
+      calls.push(request);
+      if (calls.length === 1) {
+        return { outcome: "cancelled", reason: "timeout" };
+      }
+      return {
+        outcome: "submitted",
+        value: {
+          kind: "upstream_result",
+          decision: { approved: true },
+        },
+      };
+    };
+    const request: PluginInteractionRequest = {
+      threadId: "thread-1",
+      rendererId: "plannotator-upstream-review",
+      title: "Upstream review",
+      payload: {
+        kind: "plannotator",
+        sessionId: "session-1",
+        threadId: "thread-1",
+        sessionUrl: "http://127.0.0.1:43210",
+        title: "Upstream review",
+      },
+      timeoutMs: 60 * 60 * 1000,
+    };
+
+    await expect(waitForReviewInteraction(requestInput, request)).resolves.toEqual({
+      outcome: "submitted",
+      value: {
+        kind: "upstream_result",
+        decision: { approved: true },
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(request);
+  });
+
+  it("does not re-arm an explicit cancellation", async () => {
+    let calls = 0;
+    const requestInput = async (): Promise<PluginInteractionResult> => {
+      calls += 1;
+      return { outcome: "cancelled", reason: "user" };
+    };
+
+    await expect(
+      waitForReviewInteraction(requestInput, {
+        threadId: "thread-1",
+        rendererId: "plannotator-upstream-review",
+        title: "Upstream review",
+        payload: { kind: "plannotator" },
+        timeoutMs: 60 * 60 * 1000,
+      }),
+    ).resolves.toEqual({ outcome: "cancelled", reason: "user" });
+    expect(calls).toBe(1);
+  });
+
+  it("does not create a replacement interaction after an abort races with expiry", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const requestInput = async (): Promise<PluginInteractionResult> => {
+      calls += 1;
+      controller.abort();
+      return { outcome: "cancelled", reason: "timeout" };
+    };
+
+    await expect(
+      waitForReviewInteraction(
+        requestInput,
+        {
+          threadId: "thread-1",
+          rendererId: "plannotator-upstream-review",
+          title: "Upstream review",
+          payload: { kind: "plannotator" },
+          timeoutMs: 60 * 60 * 1000,
+        },
+        controller.signal,
+      ),
+    ).resolves.toEqual({ outcome: "cancelled", reason: "request-aborted" });
+    expect(calls).toBe(1);
   });
 
   it("registers only the thin control plane and selects its skill", async () => {

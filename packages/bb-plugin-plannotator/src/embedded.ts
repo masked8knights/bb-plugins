@@ -10,9 +10,20 @@ export const UPSTREAM_LOOK_AND_FEEL_COOKIE =
 export const UPSTREAM_LOOK_AND_FEEL_VERSION = "2";
 
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const LOCAL_BIND_HOSTNAMES = new Set([
+  ...LOOPBACK_HOSTNAMES,
+  "0.0.0.0",
+  "::",
+  "[::]",
+]);
 
 export function isLoopbackHostname(hostname: string): boolean {
-  return LOOPBACK_HOSTNAMES.has(hostname.toLowerCase());
+  return LOOPBACK_HOSTNAMES.has(hostname.trim().toLowerCase());
+}
+
+/** Hostnames an upstream server may report for a listener local to BB. */
+export function isLocalBindHostname(hostname: string): boolean {
+  return LOCAL_BIND_HOSTNAMES.has(hostname.trim().toLowerCase());
 }
 
 /**
@@ -20,19 +31,22 @@ export function isLoopbackHostname(hostname: string): boolean {
  *
  * The server-side loopback address is not necessarily the browser-facing
  * address: BB can serve its UI from localhost while its backend advertises
- * 127.0.0.1. Restrict the rewrite to loopback addresses so remote/tunneled
- * sessions keep the URL supplied by the upstream runtime.
+ * 127.0.0.1. Remote-mode Plannotator can also report a wildcard bind address
+ * such as 0.0.0.0. Those values are server-local transport details, not
+ * browser destinations, so rewrite them to the host visible to the browser.
+ * Already-public upstream URLs are left alone.
  */
 export function normalizeEmbeddedSessionUrl(
   url: string,
   browserHostname: string,
 ): string {
-  if (!isLoopbackHostname(browserHostname)) return url;
+  const targetHostname = browserHostname.trim();
+  if (!targetHostname) return url;
 
   try {
     const parsed = new URL(url);
-    if (!isLoopbackHostname(parsed.hostname)) return url;
-    parsed.hostname = browserHostname;
+    if (!isLocalBindHostname(parsed.hostname)) return url;
+    parsed.hostname = targetHostname;
     return parsed.toString().replace(/\/$/u, "");
   } catch {
     return url;

@@ -14,13 +14,22 @@ describe("embedded Plannotator host seams", () => {
     ).toBe("http://127.0.0.1:43210");
   });
 
-  it("does not rewrite remote sessions", () => {
+  it("does not rewrite already-public sessions", () => {
     expect(
       normalizeEmbeddedSessionUrl("https://review.example.test:43210", "localhost"),
     ).toBe("https://review.example.test:43210");
+  });
+
+  it("rewrites local and wildcard upstream binds for remote browsers", () => {
     expect(
       normalizeEmbeddedSessionUrl("http://127.0.0.1:43210", "review.example.test"),
-    ).toBe("http://127.0.0.1:43210");
+    ).toBe("http://review.example.test:43210");
+    expect(
+      normalizeEmbeddedSessionUrl("http://0.0.0.0:43210", "review.example.test"),
+    ).toBe("http://review.example.test:43210");
+    expect(
+      normalizeEmbeddedSessionUrl("http://[::]:43210", "review.example.test"),
+    ).toBe("http://review.example.test:43210");
   });
 
   it("pins the current upstream look-and-feel announcement as seen", () => {

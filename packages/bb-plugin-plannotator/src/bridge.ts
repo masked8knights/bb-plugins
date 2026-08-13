@@ -28,6 +28,8 @@ export const BUNDLED_RELEASE_VERSION = "0.27.1";
 export const BUNDLED_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 export const READY_TIMEOUT_MS = 15_000;
 export const INTERACTION_SETTLE_TIMEOUT_MS = 10_000;
+/** Remote mode accepts a range so multiple simultaneous reviews can coexist. */
+export const REMOTE_PORT_RANGE = "19432-19441";
 
 const BUNDLED_RELEASE_BASE_URL = `${UPSTREAM_REPOSITORY}/releases/download/v${BUNDLED_RELEASE_VERSION}`;
 
@@ -122,6 +124,8 @@ type BridgeOptions = {
   dataDir?: string;
   /** Host used by BB's loopback server, so embedded cookies share one host. */
   embedHost?: string;
+  /** Bind beyond loopback when BB itself is configured for remote access. */
+  remote?: boolean;
   cwd?: string;
   readyTimeoutMs?: number;
 };
@@ -539,9 +543,10 @@ export async function startUpstreamPlanReview(
       cwd: options.cwd ?? process.cwd(),
       env: {
         ...process.env,
-        PLANNOTATOR_REMOTE: "0",
+        PLANNOTATOR_REMOTE: options.remote ? "1" : "0",
         PLANNOTATOR_SKIP_BROWSER_OPEN: "1",
         PLANNOTATOR_READY_FILE: readyFile,
+        ...(options.remote ? { PLANNOTATOR_PORT: REMOTE_PORT_RANGE } : {}),
         ...(options.origin ? { PLANNOTATOR_ORIGIN: options.origin } : {}),
         ...(options.dataDir ? { PLANNOTATOR_DATA_DIR: options.dataDir } : {}),
       },

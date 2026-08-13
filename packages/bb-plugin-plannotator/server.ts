@@ -4,7 +4,13 @@
 // tool, embeds the upstream session, and keeps the provider interaction alive.
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { defineRpcContract, type BbPluginApi, type JsonValue } from "@bb/plugin-sdk";
+import {
+  defineRpcContract,
+  type BbPluginApi,
+  type JsonValue,
+  type PluginInteractionRequest,
+  type PluginInteractionResult,
+} from "@bb/plugin-sdk";
 import { z } from "zod";
 import {
   BUNDLED_BINARY,
@@ -19,6 +25,7 @@ import {
   type UpstreamOrigin,
 } from "./src/bridge";
 import { PANEL_ACTION_ID, RENDERER_ID } from "./src/constants";
+import { isLocalBindHostname } from "./src/embedded";
 
 const reviewToolParametersSchema = z
   .object({
@@ -84,6 +91,37 @@ type ActiveReview = {
   review: RunningUpstreamReview;
 };
 
+// BB currently caps plugin interaction lifetimes at one hour. The review
+// itself must not inherit that product-level safety limit: a user may leave a
+// plan open while away from the desk. waitForReviewInteraction silently
+// re-arms the host interaction when that cap is reached.
+export const REVIEW_INTERACTION_TIMEOUT_MS = 60 * 60 * 1000;
+
+type RequestInput = (
+  request: PluginInteractionRequest,
+  options?: { signal?: AbortSignal },
+) => Promise<PluginInteractionResult>;
+
+export async function waitForReviewInteraction(
+  requestInput: RequestInput,
+  request: PluginInteractionRequest,
+  signal?: AbortSignal,
+): Promise<PluginInteractionResult> {
+  while (true) {
+    const result = await requestInput(request, signal ? { signal } : undefined);
+    if (result.outcome !== "cancelled" || result.reason !== "timeout") {
+      return result;
+    }
+
+    // The host's one-hour interaction timer is an implementation safety
+    // window, not a review deadline. If cancellation raced with the expiry,
+    // do not create another pending interaction for an already-aborted tool.
+    if (signal?.aborted) {
+      return { outcome: "cancelled", reason: "request-aborted" };
+    }
+  }
+}
+
 /**
  * Map BB's provider ids to the identities the upstream UI knows how to name.
  * The child must not infer this from ambient OPENCODE/CODEX_* environment
@@ -130,17 +168,37 @@ async function resolveUpstreamOrigin(
   }
 }
 
-async function resolveUpstreamDataDir(
+export function shouldUseRemotePlannotatorMode(
+  serverUrl: string | undefined,
+  env: Partial<Pick<NodeJS.ProcessEnv, "BB_APP_URL" | "BB_SERVER_BIND_HOST">> = process.env,
+): boolean {
+  const configuredUrl = env.BB_APP_URL?.trim() || serverUrl?.trim();
+  if (configuredUrl) {
+    try {
+      if (!isLocalBindHostname(new URL(configuredUrl).hostname)) return true;
+    } catch {
+      // Fall through to the explicit bind-host signal below.
+    }
+  }
+  return env.BB_SERVER_BIND_HOST?.trim() === "0.0.0.0";
+}
+
+async function resolveUpstreamRuntimeConfig(
   bb: BbPluginApi,
   signal: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ dataDir?: string; remote: boolean }> {
   try {
     const systemConfig = await bb.sdk.system.config({ signal });
-    return join(systemConfig.dataDir, "plugins", bb.pluginId, "plannotator");
+    return {
+      dataDir: join(systemConfig.dataDir, "plugins", bb.pluginId, "plannotator"),
+      remote: shouldUseRemotePlannotatorMode(systemConfig.serverUrl),
+    };
   } catch {
     // External runtimes remain usable if an older host does not expose the
     // system data directory. The bundled runtime already needs this lookup.
-    return undefined;
+    return {
+      remote: shouldUseRemotePlannotatorMode(undefined),
+    };
   }
 }
 
@@ -393,12 +451,6 @@ export default async function plugin(bb: BbPluginApi) {
         `Use the bundled official runtime by default, or enter a path/command to override it. Set to \"${BUNDLED_BINARY}\" to restore the default.`,
       default: BUNDLED_BINARY,
     },
-    timeoutSeconds: {
-      type: "string",
-      label: "Review timeout (seconds)",
-      description: "How long an unattended upstream review may wait before it is dismissed.",
-      default: "3600",
-    },
   });
 
   const activeReviews = new Map<string, ActiveReview>();
@@ -443,18 +495,18 @@ export default async function plugin(bb: BbPluginApi) {
       const sessionId = randomUUID();
       let upstream: RunningUpstreamReview;
       try {
-        const timeoutValue = Number.parseInt(String((await settings.get()).timeoutSeconds), 10);
-        const [origin, dataDir] = await Promise.all([
+        const [origin, runtimeConfig] = await Promise.all([
           resolveUpstreamOrigin(bb, context.threadId, context.signal),
-          resolveUpstreamDataDir(bb, context.signal),
+          resolveUpstreamRuntimeConfig(bb, context.signal),
         ]);
         upstream = await startUpstreamPlanReview({
           binaryPath,
           planMarkdown: params.planMarkdown,
-          timeoutSeconds: Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 3600,
+          timeoutSeconds: null,
           signal: context.signal,
           origin,
-          dataDir,
+          dataDir: runtimeConfig.dataDir,
+          remote: runtimeConfig.remote,
           embedHost: resolveEmbedHost(bb),
         });
       } catch (error) {
@@ -471,17 +523,17 @@ export default async function plugin(bb: BbPluginApi) {
         title,
       });
 
-      const interactionPromise = bb.ui
-        .requestInput(
-          {
-            threadId: context.threadId,
-            rendererId: RENDERER_ID,
-            title: title.slice(0, 80),
-            payload,
-            timeoutMs: 60 * 60 * 1000,
-          },
-          { signal: context.signal },
-        )
+      const interactionPromise = waitForReviewInteraction(
+        (request, options) => bb.ui.requestInput(request, options),
+        {
+          threadId: context.threadId,
+          rendererId: RENDERER_ID,
+          title: title.slice(0, 80),
+          payload,
+          timeoutMs: REVIEW_INTERACTION_TIMEOUT_MS,
+        },
+        context.signal,
+      )
         .then(
           (interaction) => ({ kind: "interaction" as const, interaction }),
           (error) => ({ kind: "interaction_error" as const, error }),

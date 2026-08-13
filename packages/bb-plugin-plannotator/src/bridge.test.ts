@@ -13,6 +13,7 @@ import {
   parseReadyMetadata,
   parseUpstreamDecision,
   rehostUpstreamUrl,
+  REMOTE_PORT_RANGE,
   resolvePlannotatorBinary,
   startUpstreamPlanReview,
 } from "./bridge";
@@ -99,7 +100,7 @@ describe("upstream Plannotator bridge", () => {
     );
   });
 
-  it("passes the BB-selected origin and persistent data directory to upstream", async () => {
+  it("passes remote transport settings, origin, and persistent state without a deadline", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-plannotator-env-test-"));
     temporaryDirectories.push(directory);
     const binary = join(directory, "plannotator");
@@ -111,7 +112,7 @@ const fs = require("node:fs");
 fs.appendFileSync(ready, JSON.stringify({ url: "http://127.0.0.1:43210", isRemote: false, port: 43210 }) + "\\n");
 setTimeout(() => process.stdout.write(JSON.stringify({
   approved: true,
-  feedback: JSON.stringify({ origin: process.env.PLANNOTATOR_ORIGIN, dataDir: process.env.PLANNOTATOR_DATA_DIR }),
+  feedback: JSON.stringify({ origin: process.env.PLANNOTATOR_ORIGIN, dataDir: process.env.PLANNOTATOR_DATA_DIR, remote: process.env.PLANNOTATOR_REMOTE, port: process.env.PLANNOTATOR_PORT }),
 }) + "\\n"), 20);
 process.stdin.resume();
 `,
@@ -123,10 +124,11 @@ process.stdin.resume();
     const running = await startUpstreamPlanReview({
       binaryPath: binary,
       planMarkdown: "# Plan",
-      timeoutSeconds: 3600,
+      timeoutSeconds: null,
       signal: controller.signal,
       origin: "codex",
       dataDir: join(directory, "state"),
+      remote: true,
     });
     const decision = await running.result;
     expect(decision).toEqual({
@@ -134,6 +136,8 @@ process.stdin.resume();
       feedback: JSON.stringify({
         origin: "codex",
         dataDir: join(directory, "state"),
+        remote: "1",
+        port: REMOTE_PORT_RANGE,
       }),
     });
     await running.stop();

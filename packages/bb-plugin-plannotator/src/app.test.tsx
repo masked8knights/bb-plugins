@@ -1,15 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@bb/plugin-sdk/testing/app";
 import { UPSTREAM_LOOK_AND_FEEL_COOKIE, UPSTREAM_LOOK_AND_FEEL_VERSION } from "./embedded";
 
 const app = await loadPluginApp(() => import("../app"));
 
-afterEach(() => {
-  cleanup();
-  vi.useRealTimers();
-});
+afterEach(() => cleanup());
 
 const payload = {
   kind: "plannotator" as const,
@@ -76,65 +73,10 @@ describe("Plannotator BB shell", () => {
         },
       });
     });
+    expect(slot.queryByRole("timer")).toBeNull();
+    expect(slot.getByText(/stays open until you approve/u)).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "Cancel review" }));
     await waitFor(() => expect(cancelled).toBe(true));
   });
 
-  it("shows and updates the pending review timeout", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    const slot = renderSlot(
-      app.pendingInteractions[0]!,
-      {
-        interaction: {
-          id: "interaction-timeout",
-          threadId: "thread-1",
-          title: payload.title,
-          payload,
-          createdAt: 1,
-          expiresAt: 66_000,
-        },
-        submit: async () => undefined,
-        cancel: async () => undefined,
-      },
-    );
-
-    const timer = slot.getByRole("timer");
-    expect(timer.getAttribute("aria-live")).toBe("polite");
-    expect(timer.getAttribute("aria-label")).toBe("Review expires in 1m 05s");
-    expect(timer.textContent).toContain("1m 05s");
-    act(() => vi.advanceTimersByTime(1_000));
-    expect(timer.getAttribute("aria-label")).toBe("Review expires in 1m 04s");
-    expect(timer.textContent).toContain("1m 04s");
-  });
-
-  it("shows an expired review as zero seconds and omits the timer without an expiry", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(10_000);
-    const renderPending = (expiresAt: number | null) =>
-      renderSlot(
-        app.pendingInteractions[0]!,
-        {
-          interaction: {
-            id: `interaction-${expiresAt ?? "none"}`,
-            threadId: "thread-1",
-            title: payload.title,
-            payload,
-            createdAt: 1,
-            expiresAt,
-          },
-          submit: async () => undefined,
-          cancel: async () => undefined,
-        },
-      );
-
-    const expired = renderPending(9_999);
-    const timer = expired.getByRole("timer");
-    expect(timer.getAttribute("aria-label")).toBe("Review expires in 0s");
-    expect(timer.textContent).toContain("0s");
-    expired.lifecycle.unmount();
-
-    const withoutExpiry = renderPending(null);
-    expect(withoutExpiry.queryByRole("timer")).toBeNull();
-  });
 });
