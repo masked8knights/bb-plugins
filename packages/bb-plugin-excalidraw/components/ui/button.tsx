@@ -8,8 +8,10 @@ export type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 
 const variants: Record<NonNullable<ButtonProps["variant"]>, string> = {
   default: "bg-foreground text-background hover:bg-foreground/90",
-  outline: "border border-input bg-transparent hover:bg-state-hover",
-  ghost: "hover:bg-state-hover hover:text-foreground",
+  outline:
+    "border border-input bg-transparent hover:bg-state-hover hover:text-foreground",
+  ghost:
+    "hover:bg-state-hover hover:text-foreground aria-pressed:bg-state-active aria-pressed:text-foreground data-[state=open]:bg-state-active data-[state=open]:text-foreground",
   destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
 };
 

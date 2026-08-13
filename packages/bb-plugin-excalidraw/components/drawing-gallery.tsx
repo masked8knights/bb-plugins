@@ -10,6 +10,7 @@ import { blobToBase64, parseScene, renderSceneToPng } from "../lib/scene";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icon";
+import { PanelContent } from "@/components/ui/panel-content";
 import { DrawingPreview } from "./drawing-preview";
 
 export type DrawingMeta = {
@@ -110,87 +111,116 @@ export function DrawingGallery({
   }
 
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-4 p-4 md:p-5">
-      <Button onClick={() => void createDrawing()} disabled={creating}>
-        {creating ? (
-          <Icon name="Loading" aria-hidden="true" />
-        ) : (
-          <Icon name="Plus" aria-hidden="true" />
-        )}
-        New drawing
-      </Button>
+    <div className="h-full min-h-0 overflow-y-auto bg-background">
+      <PanelContent className="flex flex-col gap-4">
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <h1 className="text-sm font-semibold text-foreground">Drawings</h1>
+            <p className="text-xs text-muted-foreground">
+              Sketch diagrams and attach them to conversations when they are ready.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            className="shrink-0"
+            onClick={() => void createDrawing()}
+            disabled={creating}
+          >
+            {creating ? (
+              <Icon name="Loading" aria-hidden="true" />
+            ) : (
+              <Icon name="Plus" aria-hidden="true" />
+            )}
+            New drawing
+          </Button>
+        </header>
 
-      {drawings === null ? (
-        <p className="text-sm text-muted-foreground">Loading drawings…</p>
-      ) : drawings.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No drawings yet — click “New drawing” to start sketching.
-        </p>
-      ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {drawings.map((drawing) => (
-            <Card
-              key={drawing.id}
-              className="group overflow-hidden transition-colors hover:bg-accent/40"
-            >
-              <button
-                className="block w-full"
-                onClick={() => onOpen(drawing.id)}
-                aria-label="Open drawing"
-                title="Open drawing"
+        {drawings === null ? (
+          <div
+            role="status"
+            className="flex min-h-24 items-center justify-center gap-2 text-xs text-muted-foreground"
+          >
+            <Icon name="Loading" aria-hidden="true" className="size-4" />
+            Loading drawings…
+          </div>
+        ) : drawings.length === 0 ? (
+          <Card className="border-dashed bg-muted/20">
+            <CardContent className="flex items-center gap-3 px-3 py-3">
+              <Icon name="File" aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <h2 className="text-xs font-medium text-foreground">No drawings yet</h2>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  Start with a blank canvas and sketch your first diagram.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {drawings.map((drawing) => (
+              <Card
+                key={drawing.id}
+                className="group overflow-hidden border-border/90 transition-colors hover:border-foreground/25 hover:bg-accent/30"
               >
-                <DrawingPreview
-                  drawingId={drawing.id}
-                  updatedAt={drawing.updatedAt}
-                  className="aspect-[4/3] w-full"
-                />
-              </button>
-              <CardContent className="flex items-center justify-end gap-0.5 p-1.5">
-                {threadId ? (
-                  <span title="Attach to the conversation" className="inline-flex">
+                <button
+                  className="block w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                  onClick={() => onOpen(drawing.id)}
+                  aria-label={`Open ${drawing.name}`}
+                  title={`Open ${drawing.name}`}
+                >
+                  <DrawingPreview
+                    drawingId={drawing.id}
+                    updatedAt={drawing.updatedAt}
+                    className="aspect-[4/3] w-full bg-muted/40 transition-colors group-hover:bg-muted/60"
+                  />
+                </button>
+                <CardContent className="flex items-center justify-end gap-0.5 border-t border-border/70 p-1.5">
+                  {threadId ? (
+                    <span title="Attach to the conversation" className="inline-flex">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        aria-label="Attach to the conversation"
+                        disabled={attachingId === drawing.id}
+                        onClick={() => void attachImage(drawing.id)}
+                      >
+                        <Icon
+                          name={attachingId === drawing.id ? "Loading" : "Paperclip"}
+                          aria-hidden="true"
+                        />
+                      </Button>
+                    </span>
+                  ) : (
+                    <span title="Add to the draft" className="inline-flex">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7"
+                        aria-label="Add to the draft"
+                        onClick={() => addToDraft(drawing)}
+                      >
+                        <Icon name="MessageCirclePlus" aria-hidden="true" />
+                      </Button>
+                    </span>
+                  )}
+                  <span title="Delete drawing" className="inline-flex">
                     <Button
                       size="icon"
                       variant="ghost"
-                      className="h-7 w-7"
-                      aria-label="Attach to the conversation"
-                      disabled={attachingId === drawing.id}
-                      onClick={() => void attachImage(drawing.id)}
+                      className="h-7 w-7 hover:text-destructive"
+                      aria-label={`Delete ${drawing.name}`}
+                      onClick={() => void deleteDrawing(drawing.id)}
                     >
-                      <Icon
-                        name={attachingId === drawing.id ? "Loading" : "Paperclip"}
-                        aria-hidden="true"
-                      />
+                      <Icon name="Trash2" aria-hidden="true" />
                     </Button>
                   </span>
-                ) : (
-                  <span title="Add to the draft" className="inline-flex">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-7 w-7"
-                      aria-label="Add to the draft"
-                      onClick={() => addToDraft(drawing)}
-                    >
-                      <Icon name="MessageCirclePlus" aria-hidden="true" />
-                    </Button>
-                  </span>
-                )}
-                <span title="Delete drawing" className="inline-flex">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-7 w-7 hover:text-destructive"
-                    aria-label="Delete drawing"
-                    onClick={() => void deleteDrawing(drawing.id)}
-                  >
-                    <Icon name="Trash2" aria-hidden="true" />
-                  </Button>
-                </span>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </PanelContent>
     </div>
   );
 }

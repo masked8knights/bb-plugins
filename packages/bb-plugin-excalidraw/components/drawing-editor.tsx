@@ -319,20 +319,25 @@ export function DrawingEditor({
 
   if (loading) {
     return (
-      <div className="flex h-full min-h-[300px] items-center justify-center text-sm text-muted-foreground">
+      <div
+        role="status"
+        className="flex h-full min-h-[300px] items-center justify-center gap-2 bg-background text-sm text-muted-foreground"
+      >
+        <Icon name="Loading" aria-hidden="true" className="h-4 w-4" />
         Loading drawing…
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-1.5 border-b p-2">
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-background px-2.5 py-2 md:px-3">
         {onBack && (
-          <span title="Back to drawings" className="inline-flex">
+          <span title="Back to drawings" className="mr-1 inline-flex">
             <Button
               size="icon"
               variant="ghost"
+              className="h-8 w-8"
               aria-label="Back to drawings"
               onClick={onBack}
             >
@@ -346,7 +351,9 @@ export function DrawingEditor({
               ? "Live — agent edits appear here automatically"
               : "Reconnecting to live sync…"
           }
-          className="inline-flex items-center gap-1.5 px-1 text-xs text-muted-foreground"
+          role="status"
+          aria-live="polite"
+          className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs text-muted-foreground"
         >
           <span
             className={
@@ -358,68 +365,73 @@ export function DrawingEditor({
           />
           {saving ? "Saving…" : syncedAt ? "Synced" : "Saved"}
         </span>
-        <div className="flex-1" />
-        {threadId ? (
-          <span title="Attach to conversation" className="inline-flex">
+        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-border p-0.5">
+          {threadId ? (
+            <span title="Attach to conversation" className="inline-flex">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                aria-label="Attach to conversation"
+                disabled={sending}
+                onClick={() => void attachAsImage()}
+              >
+                <Icon
+                  name={sending ? "Loading" : "Paperclip"}
+                  aria-hidden="true"
+                />
+              </Button>
+            </span>
+          ) : (
+            <span title="Add to draft" className="inline-flex">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                aria-label="Add to draft"
+                onClick={addToDraft}
+              >
+                <Icon name="MessageCirclePlus" aria-hidden="true" />
+              </Button>
+            </span>
+          )}
+          <span title="Copy image to clipboard" className="inline-flex">
             <Button
               size="icon"
-              variant="outline"
-              aria-label="Attach to conversation"
-              disabled={sending}
-              onClick={() => void attachAsImage()}
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label="Copy image to clipboard"
+              onClick={() => void copyImage()}
             >
-              <Icon
-                name={sending ? "Loading" : "Paperclip"}
-                aria-hidden="true"
-              />
+              <Icon name="Copy" aria-hidden="true" />
             </Button>
           </span>
-        ) : (
-          <span title="Add to draft" className="inline-flex">
+          <span title="Download PNG" className="inline-flex">
             <Button
               size="icon"
-              variant="outline"
-              aria-label="Add to draft"
-              onClick={addToDraft}
+              variant="ghost"
+              className="h-8 w-8"
+              aria-label="Download PNG"
+              onClick={() => void downloadPng()}
             >
-              <Icon name="MessageCirclePlus" aria-hidden="true" />
+              <Icon name="Download" aria-hidden="true" />
             </Button>
           </span>
-        )}
-        <span title="Copy image to clipboard" className="inline-flex">
-          <Button
-            size="icon"
-            variant="outline"
-            aria-label="Copy image to clipboard"
-            onClick={() => void copyImage()}
-          >
-            <Icon name="Copy" aria-hidden="true" />
-          </Button>
-        </span>
-        <span title="Download PNG" className="inline-flex">
-          <Button
-            size="icon"
-            variant="outline"
-            aria-label="Download PNG"
-            onClick={() => void downloadPng()}
-          >
-            <Icon name="Download" aria-hidden="true" />
-          </Button>
-        </span>
-        <span title="Delete drawing" className="inline-flex">
-          <Button
-            size="icon"
-            variant="ghost"
-            className="hover:text-destructive"
-            aria-label="Delete drawing"
-            onClick={() => void deleteDrawing()}
-          >
-            <Icon name="Trash2" aria-hidden="true" />
-          </Button>
-        </span>
+          <span title="Delete drawing" className="inline-flex">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 hover:text-destructive"
+              aria-label="Delete drawing"
+              onClick={() => void deleteDrawing()}
+            >
+              <Icon name="Trash2" aria-hidden="true" />
+            </Button>
+          </span>
+        </div>
       </div>
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-hidden bg-background">
         <Excalidraw
           key={drawingId}
           initialData={initialData}
