@@ -16,6 +16,7 @@
     "app": "./app.tsx"
   },
   "scripts": {
+    "test": "vitest run --config vitest.config.mts",
     "typecheck": "tsc --noEmit",
     "build": "bb plugin build ."
   },
@@ -31,6 +32,7 @@
     "hono": "^4.11.9",
     "sonner": "^2.0.7",
     "typescript": "^5.7.0",
+    "vitest": "4.1.1",
     "zod": "^4.3.6"
   }
 }

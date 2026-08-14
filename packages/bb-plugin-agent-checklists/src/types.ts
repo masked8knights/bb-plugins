@@ -26,7 +26,6 @@ export interface ChecklistTemplate {
   name: string;
   description: string;
   defaultMode: ContinuationMode;
-  isBuiltIn: boolean;
   steps: TemplateStep[];
   createdAt: number;
   updatedAt: number;

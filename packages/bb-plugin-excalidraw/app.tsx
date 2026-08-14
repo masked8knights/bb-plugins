@@ -17,6 +17,7 @@ import {
 import { DrawingGallery } from "./components/drawing-gallery";
 import { DrawingEditor } from "./components/drawing-editor";
 import { ExcalidrawPicker } from "./components/excalidraw-picker";
+import { createExcalidrawComposerCustomization } from "./lib/composer-registration";
 import { blobToBase64, parseScene, renderSceneToPng } from "./lib/scene";
 import { callRpc } from "./lib/rpc";
 
@@ -81,19 +82,9 @@ export default definePluginApp((app) => {
     component: ExcalidrawPicker,
   });
 
-  app.composer.customize({
-    id: "excalidraw-attach",
-    scopes: ["thread"],
-    plusMenu: [
-      {
-        id: "excalidraw",
-        label: "Excalidraw drawing",
-        icon: "PenTool",
-        description: "Attach a drawing to this conversation as an image",
-        run: ({ view }) => {
-          void attachFromComposer(view.scope);
-        },
-      },
-    ],
-  });
+  app.composer.customize(
+    createExcalidrawComposerCustomization((scope) => {
+      void attachFromComposer(scope);
+    }),
+  );
 });

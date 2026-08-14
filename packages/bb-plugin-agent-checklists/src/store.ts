@@ -9,8 +9,15 @@ import type {
   ContinuationMode,
   UserSettableChecklistStatus,
 } from "./types";
+
+export const INTERRUPTED_CONTINUATION_ERROR =
+  "A continuation may have been delivered before restart; it was counted and paused for explicit review.";
 import { userSettableChecklistStatuses } from "./types";
-import { BUILT_IN_TEMPLATES } from "./templates";
+
+const RETIRED_TEMPLATE_IDS = [
+  "software-delivery",
+  "research-to-technical-document",
+] as const;
 
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS checklist_templates (
@@ -74,6 +81,7 @@ export const migrations = [
   `CREATE INDEX IF NOT EXISTS idx_checklist_steps_checklist ON checklist_steps(checklist_id, position)`,
   `CREATE INDEX IF NOT EXISTS idx_checklist_notes_checklist ON checklist_notes(checklist_id, created_at)`,
   `ALTER TABLE checklists ADD COLUMN continuation_claimed_at INTEGER`,
+  `ALTER TABLE checklist_templates ADD COLUMN deleted_at INTEGER`,
 ];
 
 type Row = Record<string, unknown>;
@@ -111,15 +119,12 @@ function toStatus(value: unknown): ChecklistStatus {
   }
 }
 
-const BUILT_IN_TEMPLATE_IDS = new Set(BUILT_IN_TEMPLATES.map((template) => template.id));
-
 function templateFromRows(templateRow: Row, stepRows: Row[]): ChecklistTemplate {
   return {
     id: text(templateRow.id),
     name: text(templateRow.name),
     description: text(templateRow.description),
     defaultMode: toMode(templateRow.default_mode),
-    isBuiltIn: BUILT_IN_TEMPLATE_IDS.has(text(templateRow.id)),
     steps: stepRows.map((row) => ({
       id: text(row.id),
       position: integer(row.position),
@@ -158,45 +163,20 @@ function noteFromRow(row: Row): ChecklistNote {
 export class ChecklistStore {
   constructor(private readonly db: Database.Database) {}
 
-  seedBuiltInTemplates(): void {
-    const insertTemplate = this.db.prepare(
-      `INSERT OR IGNORE INTO checklist_templates
-       (id, name, description, default_mode, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    );
-    const insertStep = this.db.prepare(
-      `INSERT OR IGNORE INTO checklist_template_steps
-       (id, template_id, position, title, description)
-       VALUES (?, ?, ?, ?, ?)`,
-    );
-
-    const seed = this.db.transaction(() => {
-      for (const template of BUILT_IN_TEMPLATES) {
-        insertTemplate.run(
-          template.id,
-          template.name,
-          template.description,
-          template.defaultMode,
-          template.createdAt,
-          template.updatedAt,
-        );
-        for (const step of template.steps) {
-          insertStep.run(
-            step.id,
-            template.id,
-            step.position,
-            step.title,
-            step.description,
-          );
-        }
-      }
-    });
-    seed();
+  retireBuiltInTemplates(): number {
+    const placeholders = RETIRED_TEMPLATE_IDS.map(() => "?").join(", ");
+    return this.db
+      .prepare(
+        `UPDATE checklist_templates
+         SET deleted_at = COALESCE(deleted_at, ?)
+         WHERE id IN (${placeholders})`,
+      )
+      .run(Date.now(), ...RETIRED_TEMPLATE_IDS).changes;
   }
 
   listTemplates(): ChecklistTemplate[] {
     const rows = this.db
-      .prepare("SELECT * FROM checklist_templates ORDER BY name")
+      .prepare("SELECT * FROM checklist_templates WHERE deleted_at IS NULL ORDER BY name")
       .all() as Row[];
     return rows.map((row) =>
       templateFromRows(
@@ -212,7 +192,7 @@ export class ChecklistStore {
 
   getTemplate(templateId: string): ChecklistTemplate | null {
     const row = this.db
-      .prepare("SELECT * FROM checklist_templates WHERE id = ?")
+      .prepare("SELECT * FROM checklist_templates WHERE id = ? AND deleted_at IS NULL")
       .get(templateId) as Row | undefined;
     if (!row) return null;
     const steps = this.db
@@ -225,27 +205,39 @@ export class ChecklistStore {
 
   saveTemplate(input: {
     templateId?: string | null;
+    expectedUpdatedAt?: number;
     name: string;
     description: string;
     defaultMode: ContinuationMode;
     steps: Array<{ title: string; description: string }>;
   }): ChecklistTemplate {
+    if (input.templateId !== undefined && input.templateId !== null && !input.templateId.trim()) {
+      throw new Error("Agent Checklist definition ID cannot be empty");
+    }
     const name = input.name.trim();
     const description = input.description.trim();
     const steps = input.steps.map((step) => ({
       title: step.title.trim(),
       description: step.description.trim(),
     }));
-    if (!name) throw new Error("Checklist name cannot be empty");
-    if (steps.length === 0) throw new Error("A checklist needs at least one step");
-    if (steps.some((step) => !step.title)) throw new Error("Every checklist step needs a title");
+    if (!name) throw new Error("Agent Checklist name cannot be empty");
+    if (steps.length === 0) throw new Error("An Agent Checklist needs at least one step");
+    if (steps.some((step) => !step.title)) throw new Error("Every Agent Checklist step needs a title");
 
-    const templateId = input.templateId?.trim() || `custom-${randomUUID()}`;
-    const existing = this.getTemplate(templateId);
-    if (existing?.isBuiltIn) throw new Error("Built-in checklists cannot be edited");
-    if (input.templateId && !existing) throw new Error("Checklist template not found");
+    const requestedTemplateId = input.templateId?.trim() || null;
+    const templateId = requestedTemplateId ?? `custom-${randomUUID()}`;
+    const existing = requestedTemplateId ? this.getTemplate(requestedTemplateId) : null;
+    if (requestedTemplateId && !existing) {
+      throw new Error("Agent Checklist definition not found");
+    }
+    if (existing && input.expectedUpdatedAt === undefined) {
+      throw new Error("Agent Checklist revision is required for edits");
+    }
+    if (existing && input.expectedUpdatedAt !== existing.updatedAt) {
+      throw new Error("Agent Checklist was changed elsewhere; reload before saving");
+    }
 
-    const now = Date.now();
+    const now = existing ? Math.max(Date.now(), existing.updatedAt + 1) : Date.now();
     const insertStep = this.db.prepare(
       `INSERT INTO checklist_template_steps
        (id, template_id, position, title, description)
@@ -253,13 +245,16 @@ export class ChecklistStore {
     );
     const save = this.db.transaction(() => {
       if (existing) {
-        this.db
+        const updated = this.db
           .prepare(
             `UPDATE checklist_templates
              SET name = ?, description = ?, default_mode = ?, updated_at = ?
-             WHERE id = ?`,
+             WHERE id = ? AND updated_at = ? AND deleted_at IS NULL`,
           )
-          .run(name, description, input.defaultMode, now, templateId);
+          .run(name, description, input.defaultMode, now, templateId, input.expectedUpdatedAt);
+        if (updated.changes !== 1) {
+          throw new Error("Agent Checklist was changed elsewhere; reload before saving");
+        }
         this.db
           .prepare("DELETE FROM checklist_template_steps WHERE template_id = ?")
           .run(templateId);
@@ -267,8 +262,8 @@ export class ChecklistStore {
         this.db
           .prepare(
             `INSERT INTO checklist_templates
-             (id, name, description, default_mode, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+             (id, name, description, default_mode, created_at, updated_at, deleted_at)
+             VALUES (?, ?, ?, ?, ?, ?, NULL)`,
           )
           .run(templateId, name, description, input.defaultMode, now, now);
       }
@@ -280,19 +275,26 @@ export class ChecklistStore {
     return this.getTemplate(templateId)!;
   }
 
-  deleteTemplate(templateId: string): void {
+  deleteTemplate(templateId: string, expectedUpdatedAt: number): void {
     const template = this.getTemplate(templateId);
-    if (!template) throw new Error("Checklist template not found");
-    if (template.isBuiltIn) throw new Error("Built-in checklists cannot be deleted");
-    const used = this.db
-      .prepare("SELECT 1 FROM checklists WHERE template_id = ? LIMIT 1")
-      .get(templateId);
-    if (used) throw new Error("A checklist attached to a thread cannot be deleted");
-    const remove = this.db.transaction(() => {
-      this.db.prepare("DELETE FROM checklist_template_steps WHERE template_id = ?").run(templateId);
-      this.db.prepare("DELETE FROM checklist_templates WHERE id = ?").run(templateId);
-    });
-    remove();
+    if (!template) throw new Error("Agent Checklist definition not found");
+    if (template.updatedAt !== expectedUpdatedAt) {
+      throw new Error("Agent Checklist was changed elsewhere; reload before deleting");
+    }
+    const deleted = this.db
+      .prepare(
+        "UPDATE checklist_templates SET deleted_at = ? WHERE id = ? AND updated_at = ? AND deleted_at IS NULL",
+      )
+      .run(Date.now(), templateId, expectedUpdatedAt);
+    if (deleted.changes !== 1) {
+      throw new Error("Agent Checklist was changed elsewhere; reload before deleting");
+    }
+  }
+
+  detachChecklist(checklistId: string): void {
+    const current = this.getChecklist(checklistId);
+    if (!current) throw new Error("Agent Checklist not found");
+    this.db.prepare("DELETE FROM checklists WHERE id = ?").run(checklistId);
   }
 
   private getChecklistRow(checklistId: string): Row | undefined {
@@ -356,7 +358,9 @@ export class ChecklistStore {
     maxContinuations: number,
   ): Checklist {
     const existing = this.getChecklistForThread(threadId);
-    if (existing) return existing;
+    if (existing) {
+      throw new Error("Detach the current Agent Checklist before attaching another");
+    }
     const template = this.getTemplate(templateId);
     if (!template) throw new Error("Checklist template not found");
     const now = Date.now();
@@ -427,32 +431,54 @@ export class ChecklistStore {
     input: { continuationMode?: ContinuationMode; status?: UserSettableChecklistStatus },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Checklist not found");
+    if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This checklist belongs to an unavailable thread");
+      throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
     if (
       input.status !== undefined &&
       !userSettableChecklistStatuses.includes(input.status)
     ) {
-      throw new Error("Invalid checklist status");
+      throw new Error("Invalid Agent Checklist status");
     }
     if (current.status === "completed" && input.status !== undefined) {
-      throw new Error("A completed checklist cannot change status until a step is unchecked");
+      throw new Error("A completed Agent Checklist cannot change status until a step is unchecked");
+    }
+    if (current.status === "limit_reached" && input.status !== undefined) {
+      throw new Error("Resume a limited Agent Checklist before changing its status");
     }
     const nextStatus =
       input.status ??
       (current.status === "awaiting_approval" && input.continuationMode !== "approval"
         ? "active"
         : current.status);
+    const retryInterrupted =
+      current.status === "paused" &&
+      current.lastError === INTERRUPTED_CONTINUATION_ERROR &&
+      input.status === "active";
+    const nextError =
+      current.lastError === INTERRUPTED_CONTINUATION_ERROR && !retryInterrupted
+        ? INTERRUPTED_CONTINUATION_ERROR
+        : null;
     const now = Date.now();
     this.db
       .prepare(
         `UPDATE checklists
-         SET continuation_mode = ?, status = ?, last_error = NULL, updated_at = ?
+         SET continuation_mode = ?, status = ?,
+             continuation_count = CASE WHEN ? = 1 THEN 0 ELSE continuation_count END,
+             last_reminder_at = CASE WHEN ? = 1 THEN NULL ELSE last_reminder_at END,
+             last_error = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(input.continuationMode ?? current.continuationMode, nextStatus, now, checklistId);
+      .run(
+        input.continuationMode ?? current.continuationMode,
+        nextStatus,
+        retryInterrupted ? 1 : 0,
+        retryInterrupted ? 1 : 0,
+        nextError,
+        now,
+        checklistId,
+      );
     return this.getChecklist(checklistId)!;
   }
 
@@ -462,44 +488,51 @@ export class ChecklistStore {
     input: { checked?: boolean; note?: string | null; evidence?: string | null },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Checklist not found");
+    if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This checklist belongs to an unavailable thread");
+      throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
     const step = this.db
       .prepare("SELECT * FROM checklist_steps WHERE id = ? AND checklist_id = ?")
       .get(stepId, checklistId) as Row | undefined;
-    if (!step) throw new Error("Checklist step not found");
+    if (!step) throw new Error("Agent Checklist step not found");
     const now = Date.now();
-    const checked = input.checked === undefined ? integer(step.checked) === 1 : input.checked;
+    const currentChecked = integer(step.checked) === 1;
+    const checked = input.checked === undefined ? currentChecked : input.checked;
     const note = input.note === undefined ? nullableText(step.note) : input.note?.trim() || null;
     const evidence =
       input.evidence === undefined ? nullableText(step.evidence) : input.evidence?.trim() || null;
+    const checkedAt =
+      input.checked === undefined
+        ? nullableInteger(step.checked_at)
+        : checked
+          ? now
+          : null;
     this.db
       .prepare(
         `UPDATE checklist_steps
          SET checked = ?, note = ?, evidence = ?, checked_at = ?, updated_at = ?
          WHERE id = ? AND checklist_id = ?`,
       )
-      .run(checked ? 1 : 0, note, evidence, checked ? now : null, now, stepId, checklistId);
+      .run(checked ? 1 : 0, note, evidence, checkedAt, now, stepId, checklistId);
     const checklist = this.getChecklist(checklistId);
-    if (!checklist) throw new Error("Checklist not found");
+    if (!checklist) throw new Error("Agent Checklist not found");
     return this.reconcileCompletion(checklist);
   }
 
   addNote(checklistId: string, stepId: string | null, content: string): Checklist {
     const trimmed = content.trim();
-    if (!trimmed) throw new Error("Note cannot be empty");
+    if (!trimmed) throw new Error("Agent Checklist note cannot be empty");
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Checklist not found");
+    if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This checklist belongs to an unavailable thread");
+      throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
     if (stepId) {
       const step = this.db
         .prepare("SELECT id FROM checklist_steps WHERE id = ? AND checklist_id = ?")
         .get(stepId, checklistId);
-      if (!step) throw new Error("Checklist step not found");
+      if (!step) throw new Error("Agent Checklist step not found");
     }
     this.db
       .prepare(
@@ -520,21 +553,24 @@ export class ChecklistStore {
     },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Checklist not found");
+    if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This checklist belongs to an unavailable thread");
+      throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
     if (
       input.status !== undefined &&
       !userSettableChecklistStatuses.includes(input.status)
     ) {
-      throw new Error("Invalid checklist status");
+      throw new Error("Invalid Agent Checklist status");
+    }
+    if (current.status === "limit_reached" && input.status !== undefined) {
+      throw new Error("Resume a limited Agent Checklist before changing its status");
     }
 
     const step = input.stepId
       ? current.steps.find((candidate) => candidate.id === input.stepId)
       : undefined;
-    if (input.stepId && !step) throw new Error("Checklist step not found");
+    if (input.stepId && !step) throw new Error("Agent Checklist step not found");
 
     let noteContent: string | null = null;
     if (!input.stepId && (input.note !== undefined || input.evidence !== undefined)) {
@@ -543,7 +579,7 @@ export class ChecklistStore {
       noteContent = [note, evidence ? `Evidence: ${evidence}` : null]
         .filter(Boolean)
         .join("\n\n");
-      if (!noteContent) throw new Error("Note cannot be empty");
+      if (!noteContent) throw new Error("Agent Checklist note cannot be empty");
     }
 
     const projectedSteps = step
@@ -564,7 +600,7 @@ export class ChecklistStore {
     const complete =
       projectedSteps.length > 0 && projectedSteps.every((candidate) => candidate.checked);
     if (complete && input.status !== undefined) {
-      throw new Error("A completed checklist cannot change status until a step is unchecked");
+      throw new Error("A completed Agent Checklist cannot change status until a step is unchecked");
     }
     const nextStatus = complete
       ? "completed"
@@ -576,6 +612,12 @@ export class ChecklistStore {
     const apply = this.db.transaction(() => {
       if (step) {
         const nextStep = projectedSteps.find((candidate) => candidate.id === step.id)!;
+        const checkedAt =
+          input.checked === undefined
+            ? nextStep.checkedAt
+            : nextStep.checked
+              ? now
+              : null;
         this.db
           .prepare(
             `UPDATE checklist_steps
@@ -586,7 +628,7 @@ export class ChecklistStore {
             nextStep.checked ? 1 : 0,
             nextStep.note,
             nextStep.evidence,
-            nextStep.checked ? now : null,
+            checkedAt,
             now,
             step.id,
             checklistId,
@@ -619,16 +661,28 @@ export class ChecklistStore {
     if (!checklist || checklist.status !== "active" || checklist.continuationMode !== "approval") {
       return checklist;
     }
+    const nextStatus =
+      checklist.continuationCount >= checklist.maxContinuations
+        ? "limit_reached"
+        : "awaiting_approval";
     const now = Date.now();
     this.db
-      .prepare("UPDATE checklists SET status = 'awaiting_approval', updated_at = ? WHERE id = ?")
-      .run(now, checklistId);
+      .prepare(
+        "UPDATE checklists SET status = ?, updated_at = ? WHERE id = ? AND continuation_claimed_at IS NULL",
+      )
+      .run(nextStatus, now, checklistId);
     return this.getChecklist(checklistId);
   }
 
   claimContinuation(checklistId: string, manual: boolean): Checklist | null {
     let checklist = this.getChecklist(checklistId);
     if (!checklist || !checklist.steps.some((step) => !step.checked)) return checklist;
+    const claim = this.db
+      .prepare("SELECT continuation_claimed_at FROM checklists WHERE id = ?")
+      .get(checklistId) as Row | undefined;
+    if (claim?.continuation_claimed_at !== null && claim?.continuation_claimed_at !== undefined) {
+      return null;
+    }
     if (manual) {
       if (checklist.status !== "awaiting_approval" || checklist.continuationMode !== "approval") {
         return null;
@@ -639,7 +693,9 @@ export class ChecklistStore {
     if (checklist.continuationCount >= checklist.maxContinuations) {
       const now = Date.now();
       this.db
-        .prepare("UPDATE checklists SET status = 'limit_reached', updated_at = ? WHERE id = ?")
+        .prepare(
+          "UPDATE checklists SET status = 'limit_reached', updated_at = ? WHERE id = ? AND continuation_claimed_at IS NULL",
+        )
         .run(now, checklistId);
       return this.getChecklist(checklistId);
     }
@@ -650,7 +706,8 @@ export class ChecklistStore {
          SET status = 'active', continuation_count = continuation_count + 1,
              last_reminder_at = ?, continuation_claimed_at = ?, last_error = NULL, updated_at = ?
          WHERE id = ? AND continuation_count < max_continuations
-           AND status IN ('active', 'awaiting_approval')`,
+           AND status IN ('active', 'awaiting_approval')
+           AND continuation_claimed_at IS NULL`,
       )
       .run(now, now, now, checklistId);
     if (result.changes !== 1) return null;
@@ -662,7 +719,7 @@ export class ChecklistStore {
     const current = this.getChecklist(checklistId);
     if (!current) throw new Error("Checklist not found");
     if (current.status !== "limit_reached") {
-      throw new Error("This checklist has not reached its continuation limit");
+      throw new Error("This Agent Checklist has not reached its continuation limit");
     }
     if (!current.steps.some((step) => !step.checked)) {
       return this.reconcileCompletion(current);
@@ -697,15 +754,41 @@ export class ChecklistStore {
       .prepare(
         `UPDATE checklists
          SET status = CASE WHEN status = 'completed' THEN status ELSE 'paused' END,
-             continuation_count = CASE WHEN continuation_count > 0 THEN continuation_count - 1 ELSE 0 END,
              last_reminder_at = NULL,
              continuation_claimed_at = NULL,
-             last_error = 'A continuation was interrupted before delivery; resume to retry.',
+             last_error = ?,
              updated_at = ?
          WHERE continuation_claimed_at IS NOT NULL AND status != 'orphaned'`,
       )
-      .run(now);
+      .run(INTERRUPTED_CONTINUATION_ERROR, now);
     return result.changes;
+  }
+
+  cancelContinuationClaim(checklistId: string, claimedAt: number | null): Checklist | null {
+    if (claimedAt === null) return this.getChecklist(checklistId);
+    const result = this.db
+      .prepare(
+        `UPDATE checklists
+         SET status = CASE WHEN continuation_mode = 'approval' AND status = 'active'
+                           THEN 'awaiting_approval' ELSE status END,
+             continuation_count = CASE WHEN continuation_count > 0 THEN continuation_count - 1 ELSE 0 END,
+             last_reminder_at = NULL,
+             continuation_claimed_at = NULL
+         WHERE id = ? AND continuation_claimed_at = ? AND status != 'orphaned'`,
+      )
+      .run(checklistId, claimedAt);
+    if (result.changes === 0) {
+      this.db
+        .prepare(
+          `UPDATE checklists
+           SET continuation_count = CASE WHEN continuation_count > 0 THEN continuation_count - 1 ELSE 0 END,
+               last_reminder_at = NULL
+           WHERE id = ? AND status = 'orphaned'
+             AND continuation_claimed_at IS NULL AND last_reminder_at = ?`,
+        )
+        .run(checklistId, claimedAt);
+    }
+    return this.getChecklist(checklistId);
   }
 
   completeContinuationClaim(checklistId: string, claimedAt: number | null): Checklist | null {
@@ -727,7 +810,7 @@ export class ChecklistStore {
   ): Checklist | null {
     if (claimedAt === null) return this.recordContinuationError(checklistId, error);
     const now = Date.now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE checklists
          SET status = CASE WHEN status IN ('orphaned', 'completed') THEN status ELSE 'paused' END,
@@ -738,6 +821,18 @@ export class ChecklistStore {
          WHERE id = ? AND continuation_claimed_at = ? AND status != 'orphaned'`,
       )
       .run(error.slice(0, 1000), now, checklistId, claimedAt);
+    if (result.changes === 0) {
+      this.db
+        .prepare(
+          `UPDATE checklists
+           SET continuation_count = CASE WHEN continuation_count > 0 THEN continuation_count - 1 ELSE 0 END,
+               last_reminder_at = NULL,
+               last_error = ?, updated_at = ?
+           WHERE id = ? AND status = 'orphaned'
+             AND continuation_claimed_at IS NULL AND last_reminder_at = ?`,
+        )
+        .run(error.slice(0, 1000), now, checklistId, claimedAt);
+    }
     return this.getChecklist(checklistId);
   }
 

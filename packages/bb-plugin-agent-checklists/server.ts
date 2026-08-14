@@ -41,7 +41,6 @@ const templateSchema = z
     name: z.string(),
     description: z.string(),
     defaultMode: modeSchema,
-    isBuiltIn: z.boolean(),
     steps: z.array(templateStepSchema),
     createdAt: z.number(),
     updatedAt: z.number(),
@@ -95,29 +94,6 @@ const checklistSchema = z
 const threadIdInput = z.object({ threadId: z.string().min(1) }).strict();
 const checklistIdInput = z.object({ checklistId: z.string().min(1) }).strict();
 
-const updateStepInput = z
-  .object({
-    checklistId: z.string().min(1),
-    stepId: z.string().min(1),
-    checked: z.boolean().optional(),
-    note: z.string().max(10_000).nullable().optional(),
-    evidence: z.string().max(10_000).nullable().optional(),
-  })
-  .strict()
-  .refine(
-    (input) =>
-      input.checked !== undefined || input.note !== undefined || input.evidence !== undefined,
-    "Provide a checkbox value, note, or evidence.",
-  );
-
-const addNoteInput = z
-  .object({
-    checklistId: z.string().min(1),
-    stepId: z.string().min(1).nullable().optional(),
-    content: z.string().trim().min(1).max(10_000),
-  })
-  .strict();
-
 const updateSettingsInput = z
   .object({
     checklistId: z.string().min(1),
@@ -140,11 +116,23 @@ const attachInput = z
 
 const saveTemplateInput = z
   .object({
-    templateId: z.string().min(1).nullable().optional(),
+    templateId: z.string().trim().min(1).nullable().optional(),
+    expectedUpdatedAt: z.number().int().nonnegative().optional(),
     name: z.string().trim().min(1).max(200),
     description: z.string().trim().max(2_000),
     defaultMode: modeSchema,
     steps: z.array(templateStepInputSchema).min(1).max(100),
+  })
+  .strict()
+  .refine(
+    (input) => input.templateId == null || input.expectedUpdatedAt !== undefined,
+    "An expected revision is required when editing an Agent Checklist",
+  );
+
+const deleteTemplateInput = z
+  .object({
+    templateId: z.string().min(1),
+    expectedUpdatedAt: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -160,10 +148,23 @@ const agentUpdateInput = z
   .refine(
     (input) =>
       input.stepId !== undefined ||
+      input.checked !== undefined ||
       input.note !== undefined ||
       input.evidence !== undefined ||
       input.status !== undefined,
     "Provide a step update, note, evidence, or status.",
+  )
+  .refine(
+    (input) => input.checked === undefined || input.stepId !== undefined,
+    "A step ID is required when changing a checkbox.",
+  )
+  .refine(
+    (input) =>
+      input.stepId === undefined ||
+      input.checked !== undefined ||
+      input.note !== undefined ||
+      input.evidence !== undefined,
+    "Provide a checkbox, note, or evidence change for the step.",
   );
 
 export const rpcContract = defineRpcContract({
@@ -179,24 +180,24 @@ export const rpcContract = defineRpcContract({
     input: attachInput,
     output: checklistSchema,
   },
+  pickTemplate: {
+    input: threadIdInput,
+    output: z.object({ templateId: z.string().nullable() }).strict(),
+  },
+  detach: {
+    input: checklistIdInput,
+    output: z.object({ detached: z.boolean() }).strict(),
+  },
   saveTemplate: {
     input: saveTemplateInput,
     output: templateSchema,
   },
   deleteTemplate: {
-    input: z.object({ templateId: z.string().min(1) }).strict(),
+    input: deleteTemplateInput,
     output: z.object({ deleted: z.boolean() }).strict(),
   },
   updateSettings: {
     input: updateSettingsInput,
-    output: checklistSchema,
-  },
-  updateStep: {
-    input: updateStepInput,
-    output: checklistSchema,
-  },
-  addNote: {
-    input: addNoteInput,
     output: checklistSchema,
   },
   continue: {
@@ -243,16 +244,27 @@ function publishTemplate(bb: BbPluginApi, templateId: string): void {
   });
 }
 
+function publishDetached(bb: BbPluginApi, checklist: Checklist): void {
+  bb.realtime.publish(REALTIME_CHANNEL, {
+    checklistId: checklist.id,
+    threadId: checklist.threadId,
+    detached: true,
+    updatedAt: Date.now(),
+  });
+}
+
 function reminderText(checklist: Checklist): string {
   const next = nextStep(checklist);
   const complete = checklist.steps.filter((step) => step.checked).length;
   const total = checklist.steps.length;
+  const remaining = total - complete;
   return [
-    `Agent Checklist reminder: "${checklist.name}" is ${complete} of ${total} steps complete.`,
+    "Agent Checklist continuation",
+    `BB resumed this thread because the attached Agent Checklist "${checklist.name}" is still incomplete (${complete} of ${total} steps complete; ${remaining} remaining). This is not a new user request. Do not stop merely because the previous turn became idle.`,
     next
-      ? `Continue with the next unchecked step: "${next.title}". ${next.description}`
-      : "The checklist has no remaining unchecked steps.",
-    "Use agent_checklist_update after completing a step. Leave the step unchecked and add a note if user input or an external dependency blocks progress.",
+      ? `Continue the current task from the next unchecked step: "${next.title}".${next.description ? `\n${next.description}` : ""}`
+      : "The checklist has no remaining unchecked steps; verify its state with agent_checklist_get before stopping.",
+    "Call agent_checklist_get if you need the full current state. After completing the step, call agent_checklist_update with checked: true. If user input or an external dependency blocks progress, leave the step unchecked and add a note.",
   ].join("\n\n");
 }
 
@@ -278,7 +290,7 @@ async function sendContinuation(
   store: ChecklistStore,
   checklistId: string,
   manual: boolean,
-  canSend: (threadId: string) => boolean,
+  canSend: (claimed: Checklist, manual: boolean) => boolean,
 ): Promise<{ sent: boolean; checklist: Checklist | null }> {
   const claimed = store.claimContinuation(checklistId, manual);
   if (!claimed) {
@@ -295,8 +307,13 @@ async function sendContinuation(
   } catch (error) {
     if (isMissingThreadError(error)) {
       const orphaned = store.markOrphaned(claimed.threadId);
-      publish(bb, orphaned);
-      return { sent: false, checklist: orphaned };
+      const released = store.releaseContinuationClaim(
+        claimed.id,
+        claimed.lastReminderAt,
+        "The attached thread became unavailable before the reminder was delivered.",
+      );
+      publish(bb, released ?? orphaned);
+      return { sent: false, checklist: released ?? orphaned };
     }
     const paused = store.releaseContinuationClaim(
       claimed.id,
@@ -306,10 +323,28 @@ async function sendContinuation(
     publish(bb, paused);
     throw error;
   }
-  if (isUnavailableThread(thread) || !canSend(claimed.threadId)) {
+  if (isUnavailableThread(thread)) {
     const orphaned = store.markOrphaned(claimed.threadId);
-    publish(bb, orphaned);
-    return { sent: false, checklist: orphaned };
+    const released = store.releaseContinuationClaim(
+      claimed.id,
+      claimed.lastReminderAt,
+      "The attached thread became unavailable before the reminder was delivered.",
+    );
+    publish(bb, released ?? orphaned);
+    return { sent: false, checklist: released ?? orphaned };
+  }
+  if (thread.status !== "idle") {
+    const released = store.cancelContinuationClaim(claimed.id, claimed.lastReminderAt);
+    publish(bb, released);
+    return { sent: false, checklist: released };
+  }
+  if (!canSend(claimed, manual)) {
+    const released = store.cancelContinuationClaim(
+      claimed.id,
+      claimed.lastReminderAt,
+    );
+    publish(bb, released);
+    return { sent: false, checklist: released };
   }
 
   try {
@@ -326,13 +361,16 @@ async function sendContinuation(
       ],
     });
   } catch (error) {
-    const paused = store.releaseContinuationClaim(
-      claimed.id,
-      claimed.lastReminderAt,
-      errorText(error),
-    );
+    const paused = canSend(claimed, manual)
+      ? store.releaseContinuationClaim(claimed.id, claimed.lastReminderAt, errorText(error))
+      : store.cancelContinuationClaim(claimed.id, claimed.lastReminderAt);
     publish(bb, paused);
     throw error;
+  }
+  if (!canSend(claimed, manual)) {
+    const updated = store.completeContinuationClaim(claimed.id, claimed.lastReminderAt);
+    publish(bb, updated);
+    return { sent: true, checklist: updated };
   }
   store.completeContinuationClaim(claimed.id, claimed.lastReminderAt);
   const updated = store.getChecklist(claimed.id);
@@ -359,17 +397,37 @@ export default async function plugin(bb: BbPluginApi) {
   db.pragma("foreign_keys = ON");
   bb.storage.migrate(db, migrations);
   const store = new ChecklistStore(db);
-  store.seedBuiltInTemplates();
+  store.retireBuiltInTemplates();
   store.recoverInterruptedContinuationClaims();
   await reconcilePersistedThreads(bb, store);
-  const continuationsInFlight = new Set<string>();
+  const continuationTasks = new Map<
+    string,
+    {
+      manual: boolean;
+      version: number;
+      promise: Promise<{ sent: boolean; checklist: Checklist | null }>;
+    }
+  >();
+  const recentContinuationResults = new Map<
+    string,
+    {
+      version: number;
+      result: { sent: boolean; checklist: Checklist | null };
+    }
+  >();
   const threadLifecycleVersions = new Map<string, number>();
 
   const lifecycleVersion = (threadId: string): number =>
     threadLifecycleVersions.get(threadId) ?? 0;
 
-  const markThreadUnavailable = (threadId: string): Checklist | null => {
+  const bumpThreadVersion = (threadId: string): void => {
     threadLifecycleVersions.set(threadId, lifecycleVersion(threadId) + 1);
+  };
+
+  const markThreadUnavailable = (threadId: string): Checklist | null => {
+    bumpThreadVersion(threadId);
+    const checklist = store.getChecklistForThread(threadId);
+    if (checklist) recentContinuationResults.delete(checklist.id);
     return store.markOrphaned(threadId);
   };
 
@@ -377,26 +435,66 @@ export default async function plugin(bb: BbPluginApi) {
     checklistId: string,
     manual: boolean,
   ): Promise<{ sent: boolean; checklist: Checklist | null }> => {
-    if (continuationsInFlight.has(checklistId)) {
-      return { sent: false, checklist: store.getChecklist(checklistId) };
+    while (true) {
+      const current = store.getChecklist(checklistId);
+      const version = current ? lifecycleVersion(current.threadId) : 0;
+      const existing = continuationTasks.get(checklistId);
+      if (!existing) break;
+      if (existing.manual === manual && existing.version === version) {
+        return existing.promise;
+      }
+      const existingResult = await existing.promise.catch(() => null);
+      if (continuationTasks.get(checklistId) === existing) {
+        continuationTasks.delete(checklistId);
+      }
+      if (existingResult?.sent) {
+        recentContinuationResults.delete(checklistId);
+        return { ...existingResult, checklist: store.getChecklist(checklistId) };
+      }
     }
+
     const current = store.getChecklist(checklistId);
     const version = current ? lifecycleVersion(current.threadId) : 0;
-    continuationsInFlight.add(checklistId);
-    try {
-      return await sendContinuation(
-        bb,
-        store,
-        checklistId,
-        manual,
-        (threadId) => lifecycleVersion(threadId) === version,
-      );
-    } finally {
-      continuationsInFlight.delete(checklistId);
-    }
+    const task = sendContinuation(
+      bb,
+      store,
+      checklistId,
+      manual,
+      (claimed, claimIsManual) => {
+        if (lifecycleVersion(claimed.threadId) !== version) return false;
+        const latest = store.getChecklist(claimed.id);
+        return Boolean(
+          latest &&
+            latest.threadId === claimed.threadId &&
+            latest.status === "active" &&
+            latest.lastReminderAt === claimed.lastReminderAt &&
+            hasIncompleteSteps(latest) &&
+            latest.continuationMode === (claimIsManual ? "approval" : "automatic"),
+        );
+      },
+    );
+    const entry = { manual, version, promise: task };
+    continuationTasks.set(checklistId, entry);
+    const cleanup = () => {
+      if (continuationTasks.get(checklistId) === entry) {
+        continuationTasks.delete(checklistId);
+      }
+    };
+    void task.then(
+      (result) => {
+        cleanup();
+        if (result.sent) recentContinuationResults.set(checklistId, { version, result });
+      },
+      cleanup,
+    );
+    return task;
   };
 
-  const continueIfIdle = async (checklist: Checklist): Promise<Checklist> => {
+  const continueIfIdle = async (
+    checklist: Checklist,
+    retryAfterInFlight = true,
+    consumeRecentDelivery = false,
+  ): Promise<Checklist> => {
     let thread;
     try {
       thread = await bb.sdk.threads.get({ threadId: checklist.threadId });
@@ -415,7 +513,52 @@ export default async function plugin(bb: BbPluginApi) {
       return orphaned ?? checklist;
     }
     if (thread.status !== "idle") return checklist;
+    if (consumeRecentDelivery) {
+      const recent = recentContinuationResults.get(checklist.id);
+      if (recent && recent.version !== lifecycleVersion(checklist.threadId)) {
+        recentContinuationResults.delete(checklist.id);
+        return store.getChecklist(checklist.id) ?? checklist;
+      }
+    }
+    if (checklist.continuationMode === "approval") {
+      const inFlight = continuationTasks.get(checklist.id);
+      let inFlightResult: { sent: boolean; checklist: Checklist | null } | null = null;
+      if (inFlight) {
+        inFlightResult = await inFlight.promise.catch(() => null);
+        if (continuationTasks.get(checklist.id) === inFlight) {
+          continuationTasks.delete(checklist.id);
+        }
+      }
+      const latest = store.getChecklist(checklist.id);
+      if (inFlightResult?.sent) {
+        recentContinuationResults.delete(checklist.id);
+        publish(bb, latest);
+        return latest ?? checklist;
+      }
+      if (
+        !latest ||
+        latest.status !== "active" ||
+        latest.continuationMode !== "approval" ||
+        !hasIncompleteSteps(latest)
+      ) {
+        return latest ?? checklist;
+      }
+      const awaiting = store.markAwaitingApproval(latest.id);
+      publish(bb, awaiting);
+      return awaiting ?? latest;
+    }
+    if (checklist.continuationMode !== "automatic") return checklist;
     const result = await guardedSendContinuation(checklist.id, false);
+    if (!result.sent && retryAfterInFlight) {
+      const latest = store.getChecklist(checklist.id);
+      if (
+        latest?.status === "active" &&
+        hasIncompleteSteps(latest) &&
+        latest.continuationMode === "automatic"
+      ) {
+        return continueIfIdle(latest, false);
+      }
+    }
     return result.checklist ?? checklist;
   };
 
@@ -427,8 +570,8 @@ export default async function plugin(bb: BbPluginApi) {
       return { checklist: store.getChecklistForThread(threadId) };
     },
     async attach({ threadId, templateId, continuationMode }) {
-      const configured = await settings.get();
       const lifecycleBeforeLookup = lifecycleVersion(threadId);
+      const configured = await settings.get();
       const thread = await bb.sdk.threads.get({ threadId });
       if (
         isUnavailableThread(thread) ||
@@ -445,47 +588,77 @@ export default async function plugin(bb: BbPluginApi) {
       publish(bb, checklist);
       return checklist;
     },
+    async pickTemplate({ threadId }) {
+      const templates = store.listTemplates().map((template) => ({
+        id: template.id,
+        name: template.name,
+      }));
+      const result = await bb.ui.requestInput({
+        threadId,
+        rendererId: "agent-checklist-picker",
+        title: "Agent Checklist",
+        payload: { templates },
+        timeoutMs: 300_000,
+      });
+      if (result.outcome === "cancelled") return { templateId: null };
+      const value = result.value as { templateId?: unknown };
+      return {
+        templateId: typeof value?.templateId === "string" ? value.templateId : null,
+      };
+    },
+    async detach({ checklistId }) {
+      const current = store.getChecklist(checklistId);
+      if (!current) throw new Error("Checklist not found");
+      bumpThreadVersion(current.threadId);
+      const continuation = continuationTasks.get(checklistId);
+      if (continuation) await continuation.promise.catch(() => undefined);
+      continuationTasks.delete(checklistId);
+      recentContinuationResults.delete(checklistId);
+      const latest = store.getChecklist(checklistId);
+      if (!latest) return { detached: true };
+      store.detachChecklist(checklistId);
+      publishDetached(bb, latest);
+      return { detached: true };
+    },
     saveTemplate(input) {
       const template = store.saveTemplate(input);
       publishTemplate(bb, template.id);
       return template;
     },
-    deleteTemplate({ templateId }) {
-      store.deleteTemplate(templateId);
+    deleteTemplate({ templateId, expectedUpdatedAt }) {
+      store.deleteTemplate(templateId, expectedUpdatedAt);
       publishTemplate(bb, templateId);
       return { deleted: true };
     },
     async updateSettings(input) {
       const current = store.getChecklist(input.checklistId);
       const checklist = store.updateSettings(input.checklistId, input);
+      bumpThreadVersion(checklist.threadId);
       const shouldContinue =
         checklist.status === "active" &&
-        checklist.continuationMode === "automatic" &&
         hasIncompleteSteps(checklist) &&
         (input.status === "active" ||
-          (input.continuationMode === "automatic" && current?.continuationMode !== "automatic"));
-      const updated = shouldContinue ? await continueIfIdle(checklist) : checklist;
+          (input.continuationMode !== undefined &&
+            input.continuationMode !== current?.continuationMode));
+      const updated = shouldContinue ? await continueIfIdle(checklist, true, true) : checklist;
       publish(bb, updated);
       return updated;
-    },
-    updateStep(input) {
-      const checklist = store.updateStep(input.checklistId, input.stepId, input);
-      publish(bb, checklist);
-      return checklist;
-    },
-    addNote(input) {
-      const checklist = store.addNote(input.checklistId, input.stepId ?? null, input.content);
-      publish(bb, checklist);
-      return checklist;
     },
     async continue({ checklistId }) {
       const result = await guardedSendContinuation(checklistId, true);
       return result;
     },
-    resume({ checklistId }) {
+    async resume({ checklistId }) {
       const checklist = store.resumeAfterLimit(checklistId);
-      publish(bb, checklist);
-      return checklist;
+      bumpThreadVersion(checklist.threadId);
+      const updated =
+        checklist.status === "active" &&
+        (checklist.continuationMode === "automatic" || checklist.continuationMode === "approval") &&
+        hasIncompleteSteps(checklist)
+          ? await continueIfIdle(checklist)
+          : checklist;
+      publish(bb, updated);
+      return updated;
     },
   });
 
@@ -520,6 +693,8 @@ export default async function plugin(bb: BbPluginApi) {
         return JSON.stringify({ checklist: null, message: "No Agent Checklist is attached to this thread." });
       }
       const updated = store.applyAgentUpdate(checklist.id, input);
+      bumpThreadVersion(updated.threadId);
+      recentContinuationResults.delete(updated.id);
       publish(bb, updated);
       return JSON.stringify({ checklist: updated });
     },
@@ -535,6 +710,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.idle", ({ thread }) => {
     void (async () => {
       const checklist = store.getChecklistForThread(thread.id);
+      if (checklist) recentContinuationResults.delete(checklist.id);
       if (!checklist || !hasIncompleteSteps(checklist) || checklist.status !== "active") return;
       if (checklist.continuationMode === "automatic") {
         await guardedSendContinuation(checklist.id, false);

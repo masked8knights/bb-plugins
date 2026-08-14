@@ -4,6 +4,9 @@ import plugin from "../server";
 import type { Checklist } from "./types";
 
 const hosts: Array<ReturnType<typeof createFakePluginHost>> = [];
+const templateIds = new WeakMap<object, { research: string; softwareDelivery: string }>();
+
+type TestHost = ReturnType<typeof createFakePluginHost>;
 
 function createHost(settings?: Record<string, string>) {
   const host = createFakePluginHost({
@@ -12,7 +15,7 @@ function createHost(settings?: Record<string, string>) {
     sdk: {
       threads: {
         send: async () => ({ ok: true }),
-        get: async ({ threadId }) => makeThreadResponse({ id: threadId, status: "active" }),
+        get: async ({ threadId }) => makeThreadResponse({ id: threadId, status: "idle" }),
       },
     },
   });
@@ -20,24 +23,76 @@ function createHost(settings?: Record<string, string>) {
   return host;
 }
 
+async function startHost(
+  settings?: Record<string, string>,
+  configure?: (host: ReturnType<typeof createFakePluginHost>) => void,
+) {
+  const host = createHost(settings);
+  configure?.(host);
+  await plugin(host.bb);
+  const research = (await host.harness.callRpc("saveTemplate", {
+    name: "Research to technical document",
+    description: "Turn research into a clear document.",
+    defaultMode: "approval",
+    steps: Array.from({ length: 8 }, (_, index) => ({
+      title: `Research step ${index + 1}`,
+      description: "",
+    })),
+  })) as { id: string };
+  const softwareDelivery = (await host.harness.callRpc("saveTemplate", {
+    name: "Software delivery",
+    description: "Carry a coding task through handoff.",
+    defaultMode: "automatic",
+    steps: Array.from({ length: 8 }, (_, index) => ({
+      title: `Delivery step ${index + 1}`,
+      description: "",
+    })),
+  })) as { id: string };
+  templateIds.set(host, { research: research.id, softwareDelivery: softwareDelivery.id });
+  return host;
+}
+
+function softwareTemplateId(host: TestHost): string {
+  const ids = templateIds.get(host);
+  if (!ids) throw new Error("Missing test template IDs");
+  return ids.softwareDelivery;
+}
+
+function researchTemplateId(host: TestHost): string {
+  const ids = templateIds.get(host);
+  if (!ids) throw new Error("Missing test template IDs");
+  return ids.research;
+}
+
 afterEach(async () => {
   await Promise.all(hosts.splice(0).map((host) => host.harness.lifecycle.dispose()));
 });
 
 describe("Agent Checklists server", () => {
-  it("attaches a template, exposes agent tools, and updates a step", async () => {
+  it("does not seed reusable Agent Checklists", async () => {
     const host = createHost();
     await plugin(host.bb);
+
+    const result = (await host.harness.callRpc("listTemplates", null)) as {
+      templates: unknown[];
+    };
+    expect(result.templates).toEqual([]);
+    expect(host.harness.registrations.rpcMethods).not.toContain("updateStep");
+    expect(host.harness.registrations.rpcMethods).not.toContain("addNote");
+  });
+
+  it("attaches a template, exposes agent tools, and updates a step", async () => {
+    const host = await startHost();
 
     const templates = (await host.harness.callRpc("listTemplates", null)) as {
       templates: Array<{ id: string }>;
     };
-    const template = templates.templates.find((entry) => entry.id === "software-delivery");
+    const template = templates.templates.find((entry) => entry.id === softwareTemplateId(host));
     expect(template).toBeDefined();
 
     const checklist = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
     })) as Checklist;
     expect(checklist).toMatchObject({ threadId: "thread-1", continuationMode: "automatic" });
 
@@ -56,9 +111,104 @@ describe("Agent Checklists server", () => {
     expect(updated).toContain('"checked":true');
   });
 
+  it("starts a new automatic continuation after agent progress", async () => {
+    const host = await startHost();
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    const idle = {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    };
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+
+    await host.harness.callAgentTool(
+      "agent_checklist_update",
+      { stepId: attached.steps[0]!.id, checked: true },
+      { threadId: "thread-1", projectId: "project-1" },
+    );
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(2));
+  });
+
+  it("requires a step ID for checkbox updates and rejects no-op step updates", async () => {
+    const host = await startHost();
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+    })) as Checklist;
+
+    await expect(
+      host.harness.callAgentTool(
+        "agent_checklist_update",
+        { checked: true, note: "Done." },
+        { threadId: "thread-1", projectId: "project-1" },
+      ),
+    ).rejects.toThrow("step ID");
+    await expect(
+      host.harness.callAgentTool(
+        "agent_checklist_update",
+        { stepId: attached.steps[0]!.id },
+        { threadId: "thread-1", projectId: "project-1" },
+      ),
+    ).rejects.toThrow("checkbox, note, or evidence");
+
+    const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+      checklist: Checklist;
+    };
+    expect(current.checklist.steps[0]?.checked).toBe(false);
+    expect(current.checklist.notes).toHaveLength(0);
+  });
+
+  it("round trips the Agent Checklist picker and cancellation through the host interaction", async () => {
+    const host = await startHost();
+    const picking = host.harness.callRpc("pickTemplate", { threadId: "thread-1" });
+    await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
+    const interaction = host.harness.pendingInteractions[0]!;
+    expect(interaction).toMatchObject({
+      rendererId: "agent-checklist-picker",
+      title: "Agent Checklist",
+      threadId: "thread-1",
+    });
+    host.harness.submitInteraction(interaction.id, { templateId: researchTemplateId(host) });
+    await expect(picking).resolves.toEqual({ templateId: researchTemplateId(host) });
+
+    const cancelled = host.harness.callRpc("pickTemplate", { threadId: "thread-1" });
+    await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
+    host.harness.cancelInteraction(host.harness.pendingInteractions[0]!.id);
+    await expect(cancelled).resolves.toEqual({ templateId: null });
+  });
+
+  it("requires explicit detach before attaching a replacement", async () => {
+    const host = await startHost();
+    const first = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+    })) as Checklist;
+
+    await expect(
+      host.harness.callRpc("attach", {
+        threadId: "thread-1",
+        templateId: researchTemplateId(host),
+      }),
+    ).rejects.toThrow("Detach the current Agent Checklist before attaching another");
+
+    await expect(host.harness.callRpc("detach", { checklistId: first.id })).resolves.toEqual({
+      detached: true,
+    });
+    const replacement = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+        templateId: researchTemplateId(host),
+    })) as Checklist;
+    expect(replacement.name).toBe("Research to technical document");
+  });
+
   it("persists custom templates through the authoring RPCs", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
 
     const created = (await host.harness.callRpc("saveTemplate", {
       name: "Release workflow",
@@ -68,14 +218,15 @@ describe("Agent Checklists server", () => {
     })) as {
       id: string;
       name: string;
-      isBuiltIn: boolean;
+      updatedAt: number;
       steps: Array<{ title: string }>;
     };
-    expect(created).toMatchObject({ name: "Release workflow", isBuiltIn: false });
+    expect(created).toMatchObject({ name: "Release workflow" });
     expect(created.steps[0]?.title).toBe("Run checks");
 
     const edited = (await host.harness.callRpc("saveTemplate", {
       templateId: created.id,
+      expectedUpdatedAt: created.updatedAt,
       name: "Release todo",
       description: "A short release reminder.",
       defaultMode: "tracking",
@@ -83,11 +234,31 @@ describe("Agent Checklists server", () => {
         { title: "Run checks", description: "Run the test suite." },
         { title: "Share the result", description: "Write the handoff." },
       ],
-    })) as { name: string; steps: Array<unknown> };
+    })) as { name: string; updatedAt: number; steps: Array<unknown> };
     expect(edited).toMatchObject({ name: "Release todo" });
     expect(edited.steps).toHaveLength(2);
 
-    await host.harness.callRpc("deleteTemplate", { templateId: created.id });
+    await expect(
+      host.harness.callRpc("saveTemplate", {
+        templateId: created.id,
+        expectedUpdatedAt: created.updatedAt,
+        name: "Stale release",
+        description: "This must not replace the newer edit.",
+        defaultMode: "automatic",
+        steps: [{ title: "Stale step", description: "No-op." }],
+      }),
+    ).rejects.toThrow("changed elsewhere");
+
+    await expect(
+      host.harness.callRpc("deleteTemplate", {
+        templateId: created.id,
+        expectedUpdatedAt: created.updatedAt,
+      }),
+    ).rejects.toThrow("changed elsewhere");
+    await host.harness.callRpc("deleteTemplate", {
+      templateId: created.id,
+      expectedUpdatedAt: edited.updatedAt,
+    });
     const templates = (await host.harness.callRpc("listTemplates", null)) as {
       templates: Array<{ id: string }>;
     };
@@ -95,11 +266,10 @@ describe("Agent Checklists server", () => {
   });
 
   it("continues an automatic checklist after thread idle", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     });
 
@@ -109,19 +279,33 @@ describe("Agent Checklists server", () => {
     });
 
     expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
-    expect(host.harness.sdk.callsTo("threads.send")[0]?.[0]).toMatchObject({
+    const sent = host.harness.sdk.callsTo("threads.send")[0]?.[0] as
+      | {
+          threadId?: string;
+          mode?: string;
+          input?: Array<{ type?: string; visibility?: string; text?: string }>;
+        }
+      | undefined;
+    expect(sent).toMatchObject({
       threadId: "thread-1",
       mode: "auto",
       input: [expect.objectContaining({ type: "text", visibility: "agent-only" })],
     });
+    const notice = (sent?.input?.[0] as { text?: string } | undefined)?.text ?? "";
+    expect(notice).toContain("Agent Checklist continuation");
+    expect(notice).toContain(
+      'BB resumed this thread because the attached Agent Checklist "Software delivery" is still incomplete (0 of 8 steps complete; 8 remaining).',
+    );
+    expect(notice).toContain('Continue the current task from the next unchecked step: "Delivery step 1".');
+    expect(notice).toContain("Call agent_checklist_get");
+    expect(notice).toContain("call agent_checklist_update with checked: true");
   });
 
   it("does not send a reminder after the continuation cap is reached", async () => {
-    const host = createHost({ maxContinuations: "1" });
-    await plugin(host.bb);
+    const host = await startHost({ maxContinuations: "1" });
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     });
 
@@ -145,12 +329,12 @@ describe("Agent Checklists server", () => {
     const sendPromise = new Promise<{ ok: true }>((resolve) => {
       resolveSend = resolve;
     });
-    const host = createHost();
-    host.harness.sdk.stub("threads.send", () => sendPromise);
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     });
 
@@ -166,12 +350,44 @@ describe("Agent Checklists server", () => {
     resolveSend?.({ ok: true });
   });
 
+  it("does not redeliver after pausing and resuming during an in-flight send", async () => {
+    let resolveSend: ((value: { ok: true }) => void) | undefined;
+    const sendPromise = new Promise<{ ok: true }>((resolve) => {
+      resolveSend = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+    await host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      status: "paused",
+    });
+    const resuming = host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      status: "active",
+    });
+    resolveSend?.({ ok: true });
+
+    await expect(resuming).resolves.toMatchObject({ status: "active", continuationCount: 1 });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
   it("resumes a capped checklist through the explicit resume RPC", async () => {
-    const host = createHost({ maxContinuations: "1" });
-    await plugin(host.bb);
+    const host = await startHost({ maxContinuations: "1" });
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     });
 
@@ -188,15 +404,88 @@ describe("Agent Checklists server", () => {
         checklist: Checklist;
       }).checklist.id,
     })) as Checklist;
-    expect(resumed).toMatchObject({ status: "active", continuationCount: 0 });
+    expect(resumed).toMatchObject({ status: "active", continuationCount: 1 });
+  });
+
+  it("resumes a capped checklist and continues immediately when the thread is idle", async () => {
+    const host = await startHost({ maxContinuations: "1" }, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) =>
+        makeThreadResponse({ id: threadId, status: "idle" }),
+      );
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    const idle = {
+      thread: makeThreadResponse({ id: "thread-1", status: "idle" }),
+      lastAssistantText: "I stopped early.",
+    };
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist.status).toBe("limit_reached");
+    });
+
+    const resumed = (await host.harness.callRpc("resume", { checklistId: attached.id })) as Checklist;
+    expect(resumed).toMatchObject({ status: "active", continuationCount: 1 });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(2);
+  });
+
+  it("resumes an approval checklist to an approval prompt when the thread is idle", async () => {
+    const host = await startHost({ maxContinuations: "1" }, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) =>
+        makeThreadResponse({ id: threadId, status: "idle" }),
+      );
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+        templateId: researchTemplateId(host),
+      continuationMode: "approval",
+    })) as Checklist;
+    const idle = {
+      thread: makeThreadResponse({ id: "thread-1", status: "idle" }),
+      lastAssistantText: "I stopped early.",
+    };
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist.status).toBe("awaiting_approval");
+    });
+    await host.harness.callRpc("continue", { checklistId: attached.id });
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist.status).toBe("limit_reached");
+    });
+
+    const limited = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+      checklist: Checklist;
+    };
+    expect(limited.checklist).toMatchObject({ status: "limit_reached", continuationMode: "approval" });
+
+    const resumed = (await host.harness.callRpc("resume", { checklistId: attached.id })) as Checklist;
+    expect(resumed).toMatchObject({ status: "awaiting_approval", continuationCount: 0 });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
   });
 
   it("marks approval mode as waiting without sending", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "research-to-technical-document",
+        templateId: researchTemplateId(host),
       continuationMode: "approval",
     });
 
@@ -213,11 +502,10 @@ describe("Agent Checklists server", () => {
   });
 
   it("does not manually continue after switching away from approval mode", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
     const attached = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "research-to-technical-document",
+        templateId: researchTemplateId(host),
       continuationMode: "approval",
     })) as Checklist;
 
@@ -239,18 +527,116 @@ describe("Agent Checklists server", () => {
     expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(0);
   });
 
-  it("retries a failed reminder without consuming the continuation cap", async () => {
-    const host = createHost({ maxContinuations: "1" });
-    let sendCount = 0;
-    host.harness.sdk.stub("threads.send", async () => {
-      sendCount += 1;
-      if (sendCount === 1) throw new Error("send unavailable");
-      return { ok: true };
+  it("does not lose the first approval after switching modes during validation", async () => {
+    let getCount = 0;
+    let resolveAutomaticValidation: ((value: ReturnType<typeof makeThreadResponse>) => void) | undefined;
+    const automaticValidation = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
+      resolveAutomaticValidation = resolve;
     });
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) => {
+        getCount += 1;
+        if (getCount === 1) return makeThreadResponse({ id: threadId, status: "active" });
+        if (getCount === 2) return automaticValidation;
+        return makeThreadResponse({ id: threadId, status: "idle" });
+      });
+    });
     const attached = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(2));
+    const switching = host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      continuationMode: "approval",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(3));
+    resolveAutomaticValidation?.(makeThreadResponse({ id: "thread-1", status: "idle" }));
+    await expect(switching).resolves.toMatchObject({ status: "awaiting_approval" });
+
+    const approving = host.harness.callRpc("continue", { checklistId: attached.id });
+    await expect(approving).resolves.toMatchObject({ sent: true });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
+  it("does not create an approval prompt after an in-flight automatic reminder delivered", async () => {
+    let resolveSend: ((value: { ok: true }) => void) | undefined;
+    const sendPromise = new Promise<{ ok: true }>((resolve) => {
+      resolveSend = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+    const switching = host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      continuationMode: "approval",
+    });
+    resolveSend?.({ ok: true });
+
+    await expect(switching).resolves.toMatchObject({
+      status: "active",
+      continuationMode: "approval",
+    });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
+  it("restores approval waiting state when a manual continuation meets a busy thread", async () => {
+    const host = await startHost();
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: researchTemplateId(host),
+      continuationMode: "approval",
+    })) as Checklist;
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "Ready for review.",
+    });
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist.status).toBe("awaiting_approval");
+    });
+    host.harness.sdk.stub("threads.get", async ({ threadId }) =>
+      makeThreadResponse({ id: threadId, status: "active" }),
+    );
+
+    const result = (await host.harness.callRpc("continue", { checklistId: attached.id })) as {
+      sent: boolean;
+      checklist: Checklist;
+    };
+    expect(result).toMatchObject({ sent: false, checklist: { status: "awaiting_approval", continuationCount: 0 } });
+  });
+
+  it("retries a failed reminder without consuming the continuation cap", async () => {
+    let sendCount = 0;
+    const host = await startHost({ maxContinuations: "1" }, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", async () => {
+        sendCount += 1;
+        if (sendCount === 1) throw new Error("send unavailable");
+        return { ok: true };
+      });
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     })) as Checklist;
 
@@ -271,7 +657,6 @@ describe("Agent Checklists server", () => {
       checklistId: attached.id,
       status: "active",
     });
-    await host.harness.behavior.emitThreadEvent("thread.idle", idle);
     await vi.waitFor(async () => {
       expect(sendCount).toBe(2);
       const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
@@ -282,14 +667,14 @@ describe("Agent Checklists server", () => {
   });
 
   it("continues immediately when automatic mode is enabled on an idle thread", async () => {
-    const host = createHost();
-    host.harness.sdk.stub("threads.get", async ({ threadId }) =>
-      makeThreadResponse({ id: threadId, status: "idle" }),
-    );
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) =>
+        makeThreadResponse({ id: threadId, status: "idle" }),
+      );
+    });
     const attached = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "tracking",
     })) as Checklist;
 
@@ -301,17 +686,137 @@ describe("Agent Checklists server", () => {
     expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
   });
 
+  it("does not send a stale reminder after pausing during pre-send validation", async () => {
+    let getCount = 0;
+    let resolveValidation: ((value: ReturnType<typeof makeThreadResponse>) => void) | undefined;
+    const validation = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) => {
+        getCount += 1;
+        if (getCount === 1) return makeThreadResponse({ id: threadId, status: "active" });
+        return validation;
+      });
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(2));
+    await host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      status: "paused",
+    });
+    resolveValidation?.(makeThreadResponse({ id: "thread-1", status: "idle" }));
+
+    await vi.waitFor(async () => {
+      expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(0);
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist).toMatchObject({ status: "paused", continuationCount: 0 });
+    });
+  });
+
+  it("retries continuation after resuming during pre-send validation", async () => {
+    let getCount = 0;
+    let resolveValidation: ((value: ReturnType<typeof makeThreadResponse>) => void) | undefined;
+    const validation = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) => {
+        getCount += 1;
+        if (getCount === 1) return makeThreadResponse({ id: threadId, status: "active" });
+        return validation;
+      });
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(2));
+    await host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      status: "paused",
+    });
+    const resuming = host.harness.callRpc("updateSettings", {
+      checklistId: attached.id,
+      status: "active",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(3));
+    resolveValidation?.(makeThreadResponse({ id: "thread-1", status: "idle" }));
+
+    await expect(resuming).resolves.toMatchObject({
+      status: "active",
+      continuationCount: 1,
+    });
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
+  it("does not send a reminder after the thread becomes active during validation", async () => {
+    let getCount = 0;
+    let resolveValidation: ((value: ReturnType<typeof makeThreadResponse>) => void) | undefined;
+    const validation = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) => {
+        getCount += 1;
+        if (getCount === 1) return makeThreadResponse({ id: threadId, status: "idle" });
+        return validation;
+      });
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1", status: "idle" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(2));
+    resolveValidation?.(makeThreadResponse({ id: "thread-1", status: "active" }));
+
+    await vi.waitFor(async () => {
+      expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(0);
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist).toMatchObject({
+        id: attached.id,
+        status: "active",
+        continuationCount: 0,
+      });
+    });
+  });
+
   it("rejects attaching a checklist to an archived thread", async () => {
-    const host = createHost();
-    host.harness.sdk.stub("threads.get", async ({ threadId }) =>
-      makeThreadResponse({ id: threadId, archivedAt: 1 }),
-    );
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) =>
+        makeThreadResponse({ id: threadId, archivedAt: 1 }),
+      );
+    });
 
     await expect(
       host.harness.callRpc("attach", {
         threadId: "thread-archived",
-        templateId: "software-delivery",
+        templateId: softwareTemplateId(host),
       }),
     ).rejects.toThrow("archived or deleted");
   });
@@ -321,13 +826,13 @@ describe("Agent Checklists server", () => {
     const threadPromise = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
       resolveThread = resolve;
     });
-    const host = createHost();
-    host.harness.sdk.stub("threads.get", () => threadPromise);
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", () => threadPromise);
+    });
 
     const attaching = host.harness.callRpc("attach", {
       threadId: "thread-racing-archive",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
     });
     await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.get")).toHaveLength(1));
     await host.harness.behavior.emitThreadEvent("thread.archived", {
@@ -347,12 +852,12 @@ describe("Agent Checklists server", () => {
     const sendPromise = new Promise<{ ok: true }>((resolve) => {
       resolveSend = resolve;
     });
-    const host = createHost();
-    host.harness.sdk.stub("threads.send", () => sendPromise);
-    await plugin(host.bb);
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
     await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
       continuationMode: "automatic",
     });
 
@@ -374,12 +879,47 @@ describe("Agent Checklists server", () => {
     });
   });
 
+  it("does not orphan a replacement checklist when a detached send resolves", async () => {
+    let resolveSend: ((value: { ok: true }) => void) | undefined;
+    const sendPromise = new Promise<{ ok: true }>((resolve) => {
+      resolveSend = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
+    const first = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+    const detaching = host.harness.callRpc("detach", { checklistId: first.id });
+    await Promise.resolve();
+    resolveSend?.({ ok: true });
+    await detaching;
+    const replacement = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+        templateId: researchTemplateId(host),
+    })) as Checklist;
+
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist | null;
+      };
+      expect(current.checklist).toMatchObject({ id: replacement.id, status: "active" });
+    });
+  });
+
   it("does not partially commit a conflicting compound agent update", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
     const attached = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
     })) as Checklist;
     for (const step of attached.steps.slice(0, -1)) {
       await host.harness.callAgentTool(
@@ -399,7 +939,7 @@ describe("Agent Checklists server", () => {
         { stepId: lastStep.id, checked: true, status: "active" },
         { threadId: "thread-1", projectId: "project-1" },
       ),
-    ).rejects.toThrow("completed checklist");
+    ).rejects.toThrow("completed Agent Checklist");
 
     const after = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
       checklist: Checklist;
@@ -409,11 +949,10 @@ describe("Agent Checklists server", () => {
   });
 
   it("rejects derived checklist statuses from the public settings RPC", async () => {
-    const host = createHost();
-    await plugin(host.bb);
+    const host = await startHost();
     const attached = (await host.harness.callRpc("attach", {
       threadId: "thread-1",
-      templateId: "software-delivery",
+      templateId: softwareTemplateId(host),
     })) as Checklist;
 
     await expect(

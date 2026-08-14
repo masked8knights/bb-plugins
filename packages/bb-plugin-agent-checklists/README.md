@@ -1,43 +1,47 @@
 # Agent Checklists
 
-Agent Checklists gives a BB thread a persisted, structured set of steps. The
-agent can read and update the checklist through native tools, while the
-workbench shows progress, notes, evidence, and continuation state.
+Agent Checklists gives a BB thread a persisted, structured set of steps for
+the agent to follow. The agent reads and updates progress through native tools;
+the user gets a compact status summary and a read-only detail view.
 
-## Included templates
+## Library
 
-- **Software delivery** — carries a coding task from understanding through
-  validation and handoff.
-- **Research to technical document** — turns source-supported research into a
-  clear technical document with a simplified technical-English pass.
+Open Agent Checklists in the workbench to create a saved Agent Checklist. Each
+definition is user-owned and can be edited, deleted, and reordered with drag
+and drop. There are no seeded definitions or protected built-ins.
 
-## Create your own checklists
+An attached thread keeps a snapshot of its definition, so editing or deleting
+the saved definition does not erase work already attached to a thread.
 
-Open Agent Checklists in the workbench to see the row-based collection. Create
-a todo list or workflow, open any row, and edit its name, description,
-continuation default, and ordered steps. Built-in examples are protected, but
-you can copy them into an editable checklist.
+## Attach to a thread
 
-Saved custom checklists appear in every thread’s attachment picker. A thread
-keeps a snapshot of the steps it used, so later template edits do not change
-work that is already in progress.
+Use the composer `+` menu and choose **Agent checklist**. Select one of the
+saved definitions in the picker. A thread can have one attachment at a time;
+detach the current Agent Checklist from its detail view before attaching a
+different one.
+
+The area above the composer shows the attached name, progress, and the next
+few incomplete steps. It is intentionally read-only for the user. Select
+**View** to open the full thread inspector, which includes every agent step,
+agent notes, evidence, errors, and continuation controls.
 
 ## Continuation modes
 
-- **Automatic** — when the agent becomes idle with unchecked steps, BB sends an
-  agent-only reminder and resumes the thread.
+- **Automatic** — when the agent becomes idle with incomplete steps, BB sends an
+  agent-only continuation notice explaining why the thread resumed and naming
+  the next unchecked step, then resumes the thread.
 - **Approval** — BB waits for the user to approve each continuation.
 - **Tracking only** — BB records progress without waking the agent.
 
-Every checklist has a configurable continuation limit. Pausing a checklist,
-checking a step, adding notes, or adding evidence never requires proof. The
-checkbox is the source of truth.
+Every Agent Checklist has a configurable continuation limit. The structured
+checkbox state is the source of truth; notes and evidence are optional context.
 
 ## Agent tools
 
-- `agent_checklist_get` reads the checklist attached to the current thread.
-- `agent_checklist_update` checks or unchecks a step, adds a note or evidence,
-  or pauses the checklist.
+- `agent_checklist_get` reads the Agent Checklist attached to the current
+  thread.
+- `agent_checklist_update` checks or unchecks an agent step, adds a note or
+  evidence, or pauses continuation.
 
 Install from this repository with:
 
