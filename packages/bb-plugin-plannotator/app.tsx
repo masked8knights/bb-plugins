@@ -1,12 +1,25 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   definePluginApp,
+  useBbNavigate,
+  useRealtime,
+  useRealtimeConnectionState,
   useRpc,
   type JsonValue,
+  type PluginThreadHeaderActionProps,
   type PluginThreadPanelProps,
 } from "@bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import { PANEL_ACTION_ID } from "./src/constants";
+import {
+  PANEL_ACTION_ID,
+  PLANNOTATOR_REALTIME_CHANNEL,
+} from "./src/constants";
 import {
   PLANNOTATOR_RELAY_PATH,
   embeddedSessionUrl,
@@ -26,7 +39,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parsePayload(value: JsonValue | null | undefined): PlannotatorPayload | null {
+function parsePayload(value: unknown): PlannotatorPayload | null {
   if (!isRecord(value)) return null;
   if (
     value.kind !== "plannotator" ||
@@ -52,6 +65,68 @@ function parsePayload(value: JsonValue | null | undefined): PlannotatorPayload |
     relayPath: PLANNOTATOR_RELAY_PATH,
     title: value.title,
   };
+}
+
+function parseReviewOpened(value: unknown): PlannotatorPayload | null {
+  if (!isRecord(value) || value.kind !== "review-opened") return null;
+  return parsePayload(value.payload);
+}
+
+/**
+ * Server-side tool calls can persist a tab, but only the app navigation API
+ * can focus/open the side panel. This deliberately renders no control: it is
+ * just a per-thread listener for the one-shot review-opened signal.
+ */
+function PlannotatorFocusBridge({
+  threadId,
+}: PluginThreadHeaderActionProps) {
+  const navigate = useBbNavigate();
+  const rpc = useRpc<typeof rpcContract>();
+  const realtimeConnectionState = useRealtimeConnectionState();
+  const focusedSessionId = useRef<string | null>(null);
+
+  const focusReview = useCallback(
+    (value: unknown) => {
+      const payload = parsePayload(value);
+      if (!payload || payload.threadId !== threadId) return;
+      if (focusedSessionId.current === payload.sessionId) return;
+
+      if (
+        navigate.openThreadPanel({
+          actionId: PANEL_ACTION_ID,
+          title: payload.title,
+          params: payload,
+        })
+      ) {
+        focusedSessionId.current = payload.sessionId;
+      }
+    },
+    [navigate, threadId],
+  );
+
+  useRealtime(PLANNOTATOR_REALTIME_CHANNEL, (value) => {
+    const review = parseReviewOpened(value);
+    if (review) focusReview(review);
+  });
+
+  // Realtime signals are intentionally ephemeral. Reconcile the durable
+  // active-review record on first mount and after reconnect so a late-mounted
+  // or temporarily disconnected BB client still focuses the persisted tab.
+  useEffect(() => {
+    if (realtimeConnectionState !== "connected") return;
+    let cancelled = false;
+    void rpc
+      .call("getActiveReview", { threadId })
+      .then((value) => {
+        if (!cancelled) focusReview(value);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [focusReview, realtimeConnectionState, rpc, threadId]);
+
+  return null;
 }
 
 function EmptyPanel() {
@@ -198,5 +273,10 @@ export default definePluginApp((app) => {
     icon: "ClipboardCheck",
     layout: "flush",
     component: PlannotatorPanel,
+  });
+  app.slots.experimental_threadHeaderAction({
+    id: "plannotator-focus-bridge",
+    title: "Plannotator focus bridge",
+    component: PlannotatorFocusBridge,
   });
 });

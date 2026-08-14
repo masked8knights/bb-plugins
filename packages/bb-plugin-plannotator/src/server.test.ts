@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
+  makeThreadResponse,
   type FakePluginHost,
 } from "@bb/plugin-sdk/testing";
-import { PLANNOTATOR_RELAY_PATH } from "./constants";
+import {
+  PLANNOTATOR_REALTIME_CHANNEL,
+  PLANNOTATOR_RELAY_PATH,
+} from "./constants";
 import plugin, {
   shouldUseRemotePlannotatorMode,
   upstreamOriginForProvider,
@@ -126,6 +130,7 @@ describe("BB upstream Plannotator bridge", () => {
 
     expect(host.harness.inspection.registrations.rpcMethods).toEqual([
       "status",
+      "getActiveReview",
       "cancelReview",
     ]);
     expect(
@@ -195,6 +200,24 @@ describe("BB upstream Plannotator bridge", () => {
       relayPath: PLANNOTATOR_RELAY_PATH,
     });
     expect(host.harness.inspection.pendingInteractions).toHaveLength(0);
+    expect(
+      await host.harness.callRpc("getActiveReview", { threadId: "thread-1" }),
+    ).toMatchObject({
+      threadId: "thread-1",
+      title: "Upstream UI",
+      relayPath: PLANNOTATOR_RELAY_PATH,
+    });
+    expect(host.harness.realtimeSignals).toContainEqual({
+      channel: PLANNOTATOR_REALTIME_CHANNEL,
+      payload: {
+        kind: "review-opened",
+        payload: expect.objectContaining({
+          sessionId: expect.any(String),
+          threadId: "thread-1",
+          relayPath: PLANNOTATOR_RELAY_PATH,
+        }),
+      },
+    });
 
     const result = await toolCall;
     expect(result).toBe(JSON.stringify({ decision: "approved", source: "plannotator" }));
@@ -259,6 +282,39 @@ describe("BB upstream Plannotator bridge", () => {
         sessionId: "not-active",
       }),
     ).resolves.toEqual({ cancelled: false });
+  });
+
+  it("removes deleted reviews before asynchronous cleanup", async () => {
+    const binary = await fakePlannotatorBinary();
+    const host = createFakePluginHost({
+      pluginId: "plannotator",
+      settings: { binaryPath: binary },
+    });
+    hosts.push(host);
+    await plugin(host.bb);
+    wireInteractionSdk(host);
+
+    const toolCall = host.harness.behavior.callAgentTool(
+      "plannotator_review_plan",
+      { planMarkdown: "# Plan\n\n- Delete me" },
+      { threadId: "thread-1", projectId: "project-1" },
+    );
+    const panel = await reviewPanelTab(host);
+    const payload = JSON.parse(String(panel.paramsJson)) as {
+      sessionId: string;
+    };
+    await expect(
+      host.harness.callRpc("getActiveReview", { threadId: "thread-1" }),
+    ).resolves.toMatchObject({ sessionId: payload.sessionId });
+
+    await host.harness.behavior.emitThreadEvent("thread.deleted", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+    });
+    await expect(
+      host.harness.callRpc("getActiveReview", { threadId: "thread-1" }),
+    ).resolves.toBeNull();
+
+    await toolCall;
   });
 
   it("returns an actionable error when the official binary is missing", async () => {

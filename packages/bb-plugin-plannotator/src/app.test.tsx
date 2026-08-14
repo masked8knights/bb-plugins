@@ -7,6 +7,7 @@ import {
   UPSTREAM_LOOK_AND_FEEL_COOKIE,
   UPSTREAM_LOOK_AND_FEEL_VERSION,
 } from "./embedded";
+import { PLANNOTATOR_REALTIME_CHANNEL } from "./constants";
 
 const app = await loadPluginApp(() => import("../app"));
 
@@ -28,6 +29,103 @@ describe("Plannotator BB shell", () => {
       "plannotator-review",
     ]);
     expect(app.pendingInteractions).toHaveLength(0);
+    expect(app.threadHeaderActions.map((action) => action.id)).toEqual([
+      "plannotator-focus-bridge",
+    ]);
+  });
+
+  it("focuses the review panel from a same-thread realtime event", async () => {
+    const slot = renderSlot(
+      app.threadHeaderActions[0]!,
+      {
+        threadId: "thread-1",
+        projectId: "project-1",
+        isCompactViewport: false,
+      },
+      {
+        openThreadPanel: () => true,
+        rpc: { getActiveReview: () => null },
+      },
+    );
+
+    await slot.behavior.emitRealtime(PLANNOTATOR_REALTIME_CHANNEL, {
+      kind: "review-opened",
+      payload,
+    });
+    expect(slot.inspection.navigateCalls).toContainEqual({
+      method: "openThreadPanel",
+      options: {
+        actionId: "plannotator-review",
+        title: payload.title,
+        params: payload,
+      },
+    });
+  });
+
+  it("ignores review-opened events for other threads", async () => {
+    const slot = renderSlot(
+      app.threadHeaderActions[0]!,
+      {
+        threadId: "thread-2",
+        projectId: "project-1",
+        isCompactViewport: false,
+      },
+      {
+        openThreadPanel: () => true,
+        rpc: { getActiveReview: () => null },
+      },
+    );
+
+    await slot.behavior.emitRealtime(PLANNOTATOR_REALTIME_CHANNEL, {
+      kind: "review-opened",
+      payload,
+    });
+    expect(slot.inspection.navigateCalls).toHaveLength(0);
+  });
+
+  it("reconciles a durable active review on mount and reconnect", async () => {
+    const slot = renderSlot(
+      app.threadHeaderActions[0]!,
+      {
+        threadId: "thread-1",
+        projectId: "project-1",
+        isCompactViewport: false,
+      },
+      {
+        openThreadPanel: () => true,
+        rpc: { getActiveReview: () => payload },
+      },
+    );
+
+    await waitFor(() =>
+      expect(slot.inspection.navigateCalls).toContainEqual({
+        method: "openThreadPanel",
+        options: {
+          actionId: "plannotator-review",
+          title: payload.title,
+          params: payload,
+        },
+      }),
+    );
+    expect(slot.inspection.rpcCalls).toContainEqual({
+      method: "getActiveReview",
+      input: { threadId: "thread-1" },
+    });
+
+    await slot.behavior.setRealtimeConnectionState("reconnecting");
+    await slot.behavior.setRealtimeConnectionState("connected");
+    await waitFor(() =>
+      expect(
+        slot.inspection.rpcCalls.filter(
+          (call) => call.method === "getActiveReview",
+        ),
+      ).toHaveLength(2),
+    );
+    expect(
+      slot.inspection.navigateCalls.filter(
+        (call) => call.method === "openThreadPanel",
+      ),
+    ).toHaveLength(1);
   });
 
   it("renders the real upstream URL in the right-panel iframe", async () => {

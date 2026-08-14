@@ -23,6 +23,7 @@ import {
 import {
   PANEL_ACTION_ID,
   PLANNOTATOR_RELAY_PATH,
+  PLANNOTATOR_REALTIME_CHANNEL,
 } from "./src/constants";
 import { isLocalBindHostname } from "./src/embedded";
 import {
@@ -60,6 +61,14 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
   },
+  getActiveReview: {
+    input: z
+      .object({
+        threadId: z.string().min(1),
+      })
+      .strict(),
+    output: interactionPayloadSchema.nullable(),
+  },
   cancelReview: {
     input: z
       .object({
@@ -73,6 +82,7 @@ export const rpcContract = defineRpcContract({
 
 type ActiveReview = {
   sessionId: string;
+  payload: ReviewPanelPayload;
   review: RunningUpstreamReview;
 };
 
@@ -352,8 +362,11 @@ export default async function plugin(bb: BbPluginApi) {
         binary:
           configuredPath === BUNDLED_BINARY
             ? null
-            : resolvePlannotatorBinary(configuredPath),
+          : resolvePlannotatorBinary(configuredPath),
       };
+    },
+    async getActiveReview({ threadId }) {
+      return activeReviews.get(threadId)?.payload ?? null;
     },
     async cancelReview({ threadId, sessionId }) {
       const active = activeReviews.get(threadId);
@@ -410,7 +423,6 @@ export default async function plugin(bb: BbPluginApi) {
         return errorResponse(error instanceof Error ? error.message : String(error));
       }
 
-      activeReviews.set(context.threadId, { sessionId, review: upstream });
       const title = params.title?.trim() || "Plannotator review";
       const payload = interactionPayloadSchema.parse({
         kind: "plannotator",
@@ -421,9 +433,14 @@ export default async function plugin(bb: BbPluginApi) {
         title,
       });
       relaySessions.set(sessionId, upstream.url);
+      activeReviews.set(context.threadId, { sessionId, payload, review: upstream });
 
       try {
         await openReviewPanel(bb, context.threadId, payload);
+        bb.realtime.publish(PLANNOTATOR_REALTIME_CHANNEL, {
+          kind: "review-opened",
+          payload,
+        });
         return toolResponse(await upstream.result);
       } catch (error) {
         return errorResponse(error instanceof Error ? error.message : String(error));
@@ -444,6 +461,10 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.deleted", ({ thread }) => {
     const active = activeReviews.get(thread.id);
     if (active) {
+      // Remove the lookup before asynchronous cleanup starts. A deleted
+      // thread must not be eligible for panel reconciliation while the
+      // upstream process is winding down.
+      activeReviews.delete(thread.id);
       void Promise.all([
         closeReviewPanel(bb, thread.id, active.sessionId),
         active.review.stop(),
