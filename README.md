@@ -31,6 +31,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-sessions`](packages/bb-plugin-sessions/) — index Codex, Claude
   Code, and Pi (prime-agent) sessions on this machine, search them from a
   sidebar panel, and rehydrate any session into a BB thread.
+- [`bb-plugin-toolbox`](packages/bb-plugin-toolbox/) — manage MCP servers and
+  declared CLI operations through one provider-neutral agent bridge and
+  aggregated MCP endpoint.
 - [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
   in the assistant-message text-selection menu; the reaction list is
   configurable in plugin settings.

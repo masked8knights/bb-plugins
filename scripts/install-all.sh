@@ -23,4 +23,4 @@ done
 
 echo
 echo "Installed $ok plugin(s). Installed plugins from this repo:"
-bb plugin list 2>/dev/null | grep -E "^(auto-new-tab|cobalt2|ds4|excalidraw|omp|plannotator|prime-agent|sessions)@|bb-plugin" || true
+bb plugin list 2>/dev/null | grep -E "^(auto-new-tab|cobalt2|ds4|excalidraw|omp|plannotator|prime-agent|sessions|toolbox)@|bb-plugin" || true
