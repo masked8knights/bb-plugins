@@ -5,9 +5,12 @@
  * page can share those cookies with the iframe only when both use the same
  * loopback hostname; ports are intentionally ignored by cookie scoping.
  */
+import { PLANNOTATOR_RELAY_PATH } from "./constants";
+
 export const UPSTREAM_LOOK_AND_FEEL_COOKIE =
   "plannotator-look-feel-announcement-seen";
 export const UPSTREAM_LOOK_AND_FEEL_VERSION = "2";
+export { PLANNOTATOR_RELAY_PATH } from "./constants";
 
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const LOCAL_BIND_HOSTNAMES = new Set([
@@ -51,6 +54,48 @@ export function normalizeEmbeddedSessionUrl(
   } catch {
     return url;
   }
+}
+
+export function buildPlannotatorRelayUrl(
+  sessionId: string,
+  upstreamPath = "/",
+  browserOrigin = "http://bb.invalid",
+): string {
+  const relay = new URL(PLANNOTATOR_RELAY_PATH, browserOrigin);
+  relay.searchParams.set("sessionId", sessionId);
+  relay.searchParams.set("path", upstreamPath);
+  return browserOrigin === "http://bb.invalid"
+    ? `${relay.pathname}${relay.search}`
+    : relay.toString();
+}
+
+/**
+ * A local child listener is reachable by BB, but not necessarily by the
+ * browser. Use the same-origin relay for both HTTP and HTTPS BB pages so a
+ * remote client only needs the BB/Tailscale endpoint; already-public upstream
+ * URLs remain direct.
+ */
+export function embeddedSessionUrl(
+  sessionUrl: string,
+  sessionId: string,
+  browserLocation: { hostname: string; protocol: string; origin: string },
+): string {
+  try {
+    const parsed = new URL(sessionUrl);
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      isLocalBindHostname(parsed.hostname)
+    ) {
+      return buildPlannotatorRelayUrl(
+        sessionId,
+        "/",
+        browserLocation.origin,
+      );
+    }
+  } catch {
+    return sessionUrl;
+  }
+  return normalizeEmbeddedSessionUrl(sessionUrl, browserLocation.hostname);
 }
 
 export function upstreamOnboardingCookie(): string {

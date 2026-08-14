@@ -2,7 +2,11 @@
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@bb/plugin-sdk/testing/app";
-import { UPSTREAM_LOOK_AND_FEEL_COOKIE, UPSTREAM_LOOK_AND_FEEL_VERSION } from "./embedded";
+import {
+  PLANNOTATOR_RELAY_PATH,
+  UPSTREAM_LOOK_AND_FEEL_COOKIE,
+  UPSTREAM_LOOK_AND_FEEL_VERSION,
+} from "./embedded";
 
 const app = await loadPluginApp(() => import("../app"));
 
@@ -13,18 +17,17 @@ const payload = {
   sessionId: "session-1",
   threadId: "thread-1",
   sessionUrl: "http://127.0.0.1:43210",
+  relayPath: PLANNOTATOR_RELAY_PATH,
   title: "Upstream plan review",
 };
 
 describe("Plannotator BB shell", () => {
-  it("registers only the upstream panel and pending bridge renderer", () => {
+  it("registers only the upstream panel", () => {
     expect(app.navPanels).toHaveLength(0);
     expect(app.threadPanelActions.map((action) => action.id)).toEqual([
       "plannotator-review",
     ]);
-    expect(app.pendingInteractions.map((interaction) => interaction.id)).toEqual([
-      "plannotator-upstream-review",
-    ]);
+    expect(app.pendingInteractions).toHaveLength(0);
   });
 
   it("renders the real upstream URL in the right-panel iframe", async () => {
@@ -35,7 +38,7 @@ describe("Plannotator BB shell", () => {
 
     const iframe = await slot.findByTitle("Plannotator review");
     expect(iframe.getAttribute("src")).toBe(
-      `http://${window.location.hostname}:43210`,
+      `http://${window.location.host}${PLANNOTATOR_RELAY_PATH}?sessionId=session-1&path=%2F`,
     );
     expect(iframe.getAttribute("allow")).toBe("clipboard-read; clipboard-write");
     expect(document.cookie).toContain(
@@ -43,40 +46,22 @@ describe("Plannotator BB shell", () => {
     );
   });
 
-  it("opens the right panel from the pending interaction and exposes cancellation", async () => {
-    let cancelled = false;
+  it("exposes explicit cancellation without a host interaction deadline", async () => {
     const slot = renderSlot(
-      app.pendingInteractions[0]!,
-      {
-        interaction: {
-          id: "interaction-1",
-          threadId: "thread-1",
-          title: payload.title,
-          payload,
-          createdAt: 1,
-          expiresAt: null,
-        },
-        submit: async () => undefined,
-        cancel: async () => {
-          cancelled = true;
-        },
-      },
+      app.threadPanelActions[0]!,
+      { threadId: "thread-1", params: payload },
+      { rpc: { cancelReview: () => ({ cancelled: true }) } },
     );
 
-    await waitFor(() => {
-      expect(slot.inspection.navigateCalls).toContainEqual({
-        method: "openThreadPanel",
-        options: {
-          actionId: "plannotator-review",
-          title: payload.title,
-          params: payload,
-        },
-      });
-    });
+    await slot.findByRole("button", { name: "Cancel review" });
     expect(slot.queryByRole("timer")).toBeNull();
-    expect(slot.getByText(/stays open until you approve/u)).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "Cancel review" }));
-    await waitFor(() => expect(cancelled).toBe(true));
+    await waitFor(() =>
+      expect(slot.rpcCalls).toContainEqual({
+        method: "cancelReview",
+        input: { threadId: "thread-1", sessionId: "session-1" },
+      }),
+    );
   });
 
 });

@@ -1,14 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   definePluginApp,
-  useBbNavigate,
+  useRpc,
   type JsonValue,
-  type PluginPendingInteractionProps,
   type PluginThreadPanelProps,
 } from "@bb/plugin-sdk/app";
-import { PANEL_ACTION_ID, RENDERER_ID } from "./src/constants";
+import type { rpcContract } from "./server";
+import { PANEL_ACTION_ID } from "./src/constants";
 import {
-  normalizeEmbeddedSessionUrl,
+  PLANNOTATOR_RELAY_PATH,
+  embeddedSessionUrl,
   upstreamOnboardingCookie,
 } from "./src/embedded";
 
@@ -17,6 +18,7 @@ type PlannotatorPayload = {
   sessionId: string;
   threadId: string;
   sessionUrl: string;
+  relayPath: typeof PLANNOTATOR_RELAY_PATH;
   title: string;
 };
 
@@ -31,6 +33,7 @@ function parsePayload(value: JsonValue | null | undefined): PlannotatorPayload |
     typeof value.sessionId !== "string" ||
     typeof value.threadId !== "string" ||
     typeof value.sessionUrl !== "string" ||
+    (value.relayPath !== undefined && value.relayPath !== PLANNOTATOR_RELAY_PATH) ||
     typeof value.title !== "string"
   ) {
     return null;
@@ -46,6 +49,7 @@ function parsePayload(value: JsonValue | null | undefined): PlannotatorPayload |
     sessionId: value.sessionId,
     threadId: value.threadId,
     sessionUrl: value.sessionUrl,
+    relayPath: PLANNOTATOR_RELAY_PATH,
     title: value.title,
   };
 }
@@ -59,20 +63,31 @@ function EmptyPanel() {
   );
 }
 
-function PlannotatorPanel({ params }: PluginThreadPanelProps) {
+function PlannotatorPanel({ threadId, params }: PluginThreadPanelProps) {
   const payload = parsePayload(params);
+  const rpc = useRpc<typeof rpcContract>();
   const [reloadKey, setReloadKey] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [embeddedUrl, setEmbeddedUrl] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState(false);
+  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setLoaded(false);
-  }, [embeddedUrl]);
+    setLoadError(false);
+    if (loadTimer.current) clearTimeout(loadTimer.current);
+    if (!embeddedUrl) return;
+    loadTimer.current = setTimeout(() => setLoadError(true), 15_000);
+    return () => {
+      if (loadTimer.current) clearTimeout(loadTimer.current);
+    };
+  }, [embeddedUrl, reloadKey]);
 
   // The upstream runtime stores its one-time announcement dismissal in a
-  // cookie. Prime that cookie from BB before mounting the iframe, and rewrite
-  // loopback URLs to the browser-facing hostname so the cookie belongs to the
-  // same host as the child UI. This keeps the real upstream UI while removing
+  // cookie. Prime that cookie from BB before mounting the iframe. HTTPS pages
+  // use the same-origin relay; plain HTTP pages rewrite loopback URLs to the
+  // browser-facing hostname. This keeps the real upstream UI while removing
   // standalone-browser onboarding from the embedded workflow.
   useLayoutEffect(() => {
     if (!payload) {
@@ -82,9 +97,13 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
 
     document.cookie = upstreamOnboardingCookie();
     setEmbeddedUrl(
-      normalizeEmbeddedSessionUrl(payload.sessionUrl, window.location.hostname),
+      embeddedSessionUrl(payload.sessionUrl, payload.sessionId, {
+        hostname: window.location.hostname,
+        protocol: window.location.protocol,
+        origin: window.location.origin,
+      }),
     );
-  }, [payload?.sessionUrl]);
+  }, [payload?.sessionId, payload?.sessionUrl]);
 
   if (!payload) return <EmptyPanel />;
 
@@ -121,12 +140,32 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
           >
             Open externally
           </a>
+          <button
+            type="button"
+            disabled={canceling}
+            className="rounded border border-destructive/40 px-2 py-1 text-destructive hover:bg-destructive/10 disabled:opacity-60"
+            onClick={() => {
+              if (!payload) return;
+              setCanceling(true);
+              void rpc
+                .call("cancelReview", { threadId, sessionId: payload.sessionId })
+                .catch(() => setCanceling(false));
+            }}
+          >
+            {canceling ? "Cancelling…" : "Cancel review"}
+          </button>
         </div>
       </div>
       <div className="relative min-h-0 flex-1">
-        {!loaded ? (
+        {!loaded && !loadError ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-background text-xs text-muted-foreground">
             Loading Plannotator…
+          </div>
+        ) : null}
+        {loadError ? (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-background p-6 text-center text-xs text-muted-foreground">
+            <div>Plannotator did not load through the current connection.</div>
+            <div>Try Reload or Open externally.</div>
           </div>
         ) : null}
         <iframe
@@ -136,76 +175,17 @@ function PlannotatorPanel({ params }: PluginThreadPanelProps) {
           className="h-full w-full border-0"
           referrerPolicy="no-referrer"
           allow="clipboard-read; clipboard-write"
-          onLoad={() => setLoaded(true)}
-        />
-      </div>
-    </div>
-  );
-}
-
-function PendingPlannotatorReview({
-  interaction,
-  submit: _submit,
-  cancel,
-}: PluginPendingInteractionProps) {
-  const navigate = useBbNavigate();
-  const openedSession = useRef<string | null>(null);
-  const payload = parsePayload(interaction.payload);
-
-  useEffect(() => {
-    if (!payload || openedSession.current === payload.sessionId) return;
-    openedSession.current = payload.sessionId;
-    navigate.openThreadPanel({
-      actionId: PANEL_ACTION_ID,
-      title: payload.title,
-      params: payload,
-    });
-  }, [navigate, payload]);
-
-  if (!payload) {
-    return (
-      <div className="border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-        Plannotator returned an invalid session payload.
-        <button
-          type="button"
-          className="ml-2 underline"
-          onClick={() => void cancel()}
-        >
-          Cancel review
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="border border-border bg-surface-recessed p-3 text-sm">
-      <div className="font-medium">Plannotator is open in the right panel</div>
-      <div className="mt-1 text-xs text-muted-foreground">
-        Approve or annotate the plan in the upstream review surface. BB will
-        return its decision to the agent when you finish. The review stays open
-        until you approve, request changes, or cancel it.
-      </div>
-      <div className="mt-3 flex gap-2">
-        <button
-          type="button"
-          className="rounded border border-border px-2 py-1 text-xs hover:bg-state-hover"
-          onClick={() => {
-            navigate.openThreadPanel({
-              actionId: PANEL_ACTION_ID,
-              title: payload.title,
-              params: payload,
-            });
+          onLoad={() => {
+            if (loadTimer.current) clearTimeout(loadTimer.current);
+            setLoadError(false);
+            setLoaded(true);
           }}
-        >
-          Focus review
-        </button>
-        <button
-          type="button"
-          className="rounded border border-destructive/40 px-2 py-1 text-xs text-destructive hover:bg-destructive/10"
-          onClick={() => void cancel()}
-        >
-          Cancel review
-        </button>
+          onError={() => {
+            if (loadTimer.current) clearTimeout(loadTimer.current);
+            setLoaded(false);
+            setLoadError(true);
+          }}
+        />
       </div>
     </div>
   );
@@ -218,10 +198,5 @@ export default definePluginApp((app) => {
     icon: "ClipboardCheck",
     layout: "flush",
     component: PlannotatorPanel,
-  });
-
-  app.slots.pendingInteraction({
-    id: RENDERER_ID,
-    component: PendingPlannotatorReview,
   });
 });

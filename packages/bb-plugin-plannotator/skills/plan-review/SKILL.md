@@ -1,20 +1,32 @@
 ---
 name: plan-review
-description: Use the upstream Plannotator review gate before implementing a concrete plan in BB.
+description: Optional upstream Plannotator review UI for plans in BB.
 ---
 
-# Plannotator plan review
+# Optional Plannotator plan review
 
-Before changing files or taking implementation actions, call
-`plannotator_review_plan` with the complete Markdown plan.
+This is opt-in reference material. Plannotator is never an authorization gate
+in BB: agents may edit, implement, or continue work without opening it. Do not
+invoke `plannotator_review_plan` unless the user explicitly asks for
+Plannotator or a plan review.
+
+Native provider Plan mode is a separate provider-controlled workflow. This
+reference does not enable it, replace it, or require either workflow.
+
+When the user does request Plannotator, call `plannotator_review_plan` with the
+complete Markdown plan. A review is informational and collaborative; its
+approval is not a permission grant, and cancellation or omission never blocks
+implementation.
 
 The tool opens the upstream Plannotator app in BB's right panel and waits for
 the user's decision:
 
-- `decision=approved`: continue with the approved plan.
-- `decision=changes_requested`: revise the plan using the returned feedback,
-  then call the tool again.
-- `decision=cancelled`: stop and ask what should change.
+- `decision=approved`: report the approval and continue as appropriate.
+- `decision=changes_requested`: report the feedback and revise only if the
+  user wants another review.
+- `decision=cancelled`: report the cancellation, then continue normally unless
+  the user specifically asked to stop.
 
-Do not claim approval from the presence of a review panel alone. Only the
-returned tool decision is authoritative.
+Do not claim a review decision from the presence of a panel alone. Only the
+returned tool decision describes what happened in Plannotator; it does not
+authorize or prohibit file changes.

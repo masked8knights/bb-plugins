@@ -1,2 +1,3 @@
-export const RENDERER_ID = "plannotator-upstream-review";
 export const PANEL_ACTION_ID = "plannotator-review";
+export const PLANNOTATOR_RELAY_PATH =
+  "/api/v1/plugins/plannotator/http/review";
