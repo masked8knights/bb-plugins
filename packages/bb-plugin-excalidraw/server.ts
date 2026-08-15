@@ -8,9 +8,8 @@
 // Attaching to conversations is supported two ways:
 //   - mention provider `@drawing` — pick a drawing in any composer; at send
 //     time the agent receives the drawing's scene as context.
-//   - `attachDrawingImage` rpc — the frontend renders the scene to a PNG,
-//     the server uploads it as a project prompt attachment and sends it to a
-//     thread as a localImage input.
+//   - `attachDrawingImage` rpc — the frontend renders the scene to a PNG and
+//     the server uploads it as a project prompt attachment.
 import { randomUUID } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
@@ -83,8 +82,6 @@ export const rpcContract = defineRpcContract({
       drawingId: z.string(),
       /** Base64-encoded PNG, rendered client-side by the editor. */
       pngBase64: z.string(),
-      /** Optional caption text sent with the image. */
-      caption: z.string().max(500).optional(),
     }),
     output: z.object({ ok: z.boolean() }),
   },
@@ -235,7 +232,7 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare("DELETE FROM drawings WHERE id = ?").run(id);
       return { ok: true };
     },
-    async attachDrawingImage({ threadId, drawingId, pngBase64, caption }) {
+    async attachDrawingImage({ threadId, drawingId, pngBase64 }) {
       const row = getRow(drawingId);
       if (!row) throw new Error(`Drawing ${drawingId} not found`);
       const bytes = new Uint8Array(Buffer.from(pngBase64, "base64"));
@@ -248,21 +245,11 @@ export default async function plugin(bb: BbPluginApi) {
         .replace(/^-+|-+$/g, "")
         .slice(0, 60) || "drawing";
 
-      const attachment = await bb.sdk.projects.attachments.upload({
+      await bb.sdk.projects.attachments.upload({
         projectId: thread.projectId,
         clientFile: bytes,
         filename: `${slug}-${row.id.slice(0, 8)}.png`,
         mimeType: "image/png",
-      });
-
-      const text = caption?.trim() || `Here is my Excalidraw drawing “${row.name}”.`;
-      await bb.sdk.threads.send({
-        threadId,
-        mode: "auto",
-        input: [
-          { type: "text", text, mentions: [] },
-          { type: "localImage", path: attachment.path },
-        ],
       });
       return { ok: true };
     },

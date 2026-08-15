@@ -13,9 +13,10 @@ attach them to conversations.
   delete.
 - **Attach as an image via the composer `+` menu**: in any conversation,
   open the `+` menu → **Excalidraw drawing**, pick a drawing, and the
-  rendered PNG is attached to that conversation as an image message.
+  rendered PNG is uploaded as an image attachment without sending a message.
 - **Attach from the thread panel**: open the thread right panel → Actions →
-  **Excalidraw**, then **Attach image** on a drawing — same result.
+  **Excalidraw**, then **Attach image** on a drawing — the PNG is uploaded
+  without sending a message.
 - **`@drawing` mentions** (composer-native): type `@` and pick a drawing to
   add a mention pill; when you send, the agent receives the drawing's scene
   data as context so it can reason about the diagram.
@@ -80,9 +81,8 @@ versa) via tombstones; edits to the *same* element resolve by Excalidraw's
 - Attaching renders the scene to a PNG in the browser
   (`exportToBlob` — no editor mount needed), base64-encodes it, and the
   server uploads the bytes with
-  `bb.sdk.projects.attachments.upload` then sends them to the thread with
-  `bb.sdk.threads.send` as a `localImage` prompt input. The `+` menu flow
-  uses a host-rendered picker (`bb.ui.requestInput` +
+  `bb.sdk.projects.attachments.upload`; it does not send a thread message. The
+  `+` menu flow uses a host-rendered picker (`bb.ui.requestInput` +
   `pendingInteraction` slot).
 - Mention pills are backed by a server-side mention provider (`@drawing`)
   whose `resolve` attaches the current drawing scene to the message at send

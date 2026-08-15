@@ -1,7 +1,7 @@
 // Full Excalidraw editor: loads a drawing, autosaves (debounced, ordered),
 // and offers attach actions — "Attach image" renders the live scene to a
-// PNG and sends it to the bound thread as an image attachment; outside a
-// thread, "Add to draft" inserts a @drawing mention pill instead.
+// PNG and uploads it as an image attachment; outside a thread, "Add to draft"
+// inserts a @drawing mention pill instead.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -50,7 +50,7 @@ export function DrawingEditor({
   const [initialData, setInitialData] = useState<ExcalidrawInitialDataState | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [attaching, setAttaching] = useState(false);
 
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const loadedRef = useRef(false);
@@ -288,7 +288,7 @@ export function DrawingEditor({
 
   async function attachAsImage() {
     if (!threadId) return;
-    setSending(true);
+    setAttaching(true);
     try {
       const blob = await renderPng();
       const pngBase64 = await blobToBase64(blob);
@@ -296,13 +296,12 @@ export function DrawingEditor({
         threadId,
         drawingId,
         pngBase64,
-        caption: "Attached an Excalidraw drawing:",
       });
-      toast.success("Drawing attached to the conversation");
+      toast.success("Drawing PNG attached");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Attach failed");
     } finally {
-      setSending(false);
+      setAttaching(false);
     }
   }
 
@@ -373,11 +372,11 @@ export function DrawingEditor({
                 variant="ghost"
                 className="h-8 w-8"
                 aria-label="Attach to conversation"
-                disabled={sending}
+                disabled={attaching}
                 onClick={() => void attachAsImage()}
               >
                 <Icon
-                  name={sending ? "Loading" : "Paperclip"}
+                  name={attaching ? "Loading" : "Paperclip"}
                   aria-hidden="true"
                 />
               </Button>

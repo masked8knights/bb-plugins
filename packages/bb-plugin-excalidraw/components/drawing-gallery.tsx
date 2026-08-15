@@ -1,7 +1,7 @@
 // Drawing gallery: image-first card grid with lazy SVG previews. The title
 // is just a small caption — the preview is the identity of each card.
 // Optionally bound to a thread (thread right-panel "Excalidraw" action) so
-// drawings can be attached to that conversation as rendered images.
+// drawings can be uploaded for that conversation as rendered images.
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useComposer, useRealtime, useRpc } from "@bb/plugin-sdk/app";
@@ -76,7 +76,7 @@ export function DrawingGallery({
     }
   }
 
-  /** Render the drawing to a PNG and send it to the bound thread. */
+  /** Render the drawing to a PNG and attach it to the bound thread's project. */
   async function attachImage(id: string) {
     if (!threadId) return;
     setAttachingId(id);
@@ -89,9 +89,8 @@ export function DrawingGallery({
         threadId,
         drawingId: id,
         pngBase64,
-        caption: "Attached an Excalidraw drawing:",
       });
-      toast.success("Drawing attached to the conversation");
+      toast.success("Drawing PNG attached");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Attach failed");
     } finally {

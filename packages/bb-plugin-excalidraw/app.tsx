@@ -6,7 +6,7 @@
 //     thread's right panel, where "Attach image" attaches the rendered
 //     drawing to that conversation.
 //   - composer `+` menu → "Excalidraw drawing": pick a drawing (host picker)
-//     and attach it to the current conversation as a rendered image.
+//     and upload it as a rendered image attachment for the current conversation.
 //   - mention provider (server): `@drawing` works in every composer.
 import { useState } from "react";
 import { toast } from "sonner";
@@ -35,7 +35,7 @@ function DrawingsSurface({ threadId }: { threadId?: string | null }) {
   return <DrawingGallery threadId={threadId} onOpen={setOpenId} />;
 }
 
-/** `+` menu flow: pick a drawing, render it to a PNG, send it to the thread. */
+/** `+` menu flow: pick a drawing, render it to a PNG, and attach it. */
 async function attachFromComposer(scope: PluginComposerScope) {
   if (scope.kind !== "thread") return;
   try {
@@ -51,9 +51,8 @@ async function attachFromComposer(scope: PluginComposerScope) {
       threadId: scope.threadId,
       drawingId,
       pngBase64,
-      caption: "Attached an Excalidraw drawing:",
     });
-    toast.success("Drawing attached to the conversation");
+    toast.success("Drawing PNG attached");
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "Attach failed");
   }

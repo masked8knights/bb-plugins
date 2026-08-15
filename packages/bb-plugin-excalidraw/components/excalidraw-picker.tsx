@@ -1,7 +1,7 @@
 // Composer picker shown while "Excalidraw drawing" is selected from the
 // composer's `+` menu. Rendered by the host in place of the composer
 // (pendingInteraction); picking a drawing submits its id to the waiting
-// backend call, which then attaches the rendered image to the thread.
+// backend call, which then uploads the rendered image for the thread.
 // No titles — drawings are identified by their thumbnail.
 import type { PluginPendingInteractionProps } from "@bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
@@ -34,7 +34,7 @@ export function ExcalidrawPicker({
           <header>
             <h1 className="text-sm font-semibold text-foreground">Attach a drawing</h1>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Choose a drawing to send to this conversation as an image.
+              Choose a drawing to attach as a PNG.
             </p>
           </header>
           {drawings.length === 0 ? (
