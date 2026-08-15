@@ -12,8 +12,8 @@ import { createInterface } from "node:readline";
 import {
   createProviderJsonlParser,
   MAX_LINE_BYTES,
-} from "bb-plugin-telemetry/src/providers/index";
-import type { ParsedProviderSession, ProviderId as TelemetryProviderId } from "bb-plugin-telemetry/src/types";
+} from "./provider-parser";
+import type { ParsedProviderSession, ProviderId as TelemetryProviderId } from "./provider-telemetry-types";
 import {
   deriveTitle,
   firstUserMessage,

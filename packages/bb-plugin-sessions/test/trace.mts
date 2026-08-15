@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJsonlStreaming } from "../src/streaming.ts";
-import { MAX_LINE_BYTES } from "bb-plugin-telemetry/src/providers/index";
+import { MAX_LINE_BYTES } from "../src/provider-parser";
 import { MAX_TRANSCRIPT_CHARS } from "../src/parsers.ts";
 import { capTraceEntries, parseStoredTrace } from "../src/trace.ts";
 import { buildRehydratePrompt } from "../src/format.ts";

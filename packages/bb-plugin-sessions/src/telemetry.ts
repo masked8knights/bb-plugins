@@ -1,7 +1,7 @@
 // Local telemetry projection for the unified Sessions plugin.
 //
-// The JSONL parser is shared with the former Telemetry plugin, while this
-// read model deliberately lives beside the conversation index. There is one
+// The JSONL parser lives beside the conversation index, while this read model
+// deliberately stays separate from the conversation index. There is one
 // scan, one SQLite database, and one answer for both search and metrics.
 
 import type Database from "better-sqlite3";
@@ -73,8 +73,8 @@ export interface TelemetryDashboard {
   }>;
 }
 
-// Rich dashboard types retained from the former Telemetry page. They live in
-// Sessions now, but remain separate from the compact agent-tool projection.
+// Rich dashboard types live in Sessions alongside the compact agent-tool
+// projection.
 export type DashboardRange = "1h" | "6h" | "24h" | "7d" | "30d" | "lifetime";
 export type DashboardView = "provider" | "unified";
 export type CapabilityLevel = "complete" | "partial" | "unavailable";

@@ -9,7 +9,7 @@ import {
   type ProviderSessionRecord,
   type SessionStatus,
   type UsageSnapshot,
-} from "../types";
+} from "./provider-telemetry-types";
 
 type JsonRecord = Record<string, unknown>;
 
