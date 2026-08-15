@@ -634,6 +634,44 @@ describe("Agent Checklists server", () => {
     expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
   });
 
+  it("allows an already-issued reminder to finish after closing", async () => {
+    let resolveSend: ((value: { ok: true }) => void) | undefined;
+    const sendPromise = new Promise<{ ok: true }>((resolve) => {
+      resolveSend = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.send", () => sendPromise);
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1));
+
+    const closed = (await host.harness.callRpc("close", { checklistId: attached.id })) as Checklist;
+    expect(closed).toMatchObject({ status: "closed", continuationCount: 1 });
+    resolveSend?.({ ok: true });
+
+    await vi.waitFor(async () => {
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist).toMatchObject({ status: "closed", continuationCount: 1 });
+    });
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "The reminder finished.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1);
+  });
+
   it("restores approval waiting state when a manual continuation meets a busy thread", async () => {
     const host = await startHost();
     const attached = (await host.harness.callRpc("attach", {

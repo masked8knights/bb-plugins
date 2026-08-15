@@ -351,6 +351,9 @@ async function sendContinuation(
     return { sent: false, checklist: released };
   }
 
+  // Once the host send has started, BB may still deliver that in-flight
+  // reminder after a close or other lifecycle change. The version and claim
+  // guards below settle it without allowing any follow-up continuation.
   try {
     await bb.sdk.threads.send({
       threadId: claimed.threadId,

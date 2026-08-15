@@ -25,9 +25,11 @@ few incomplete steps. It is intentionally read-only for the user. Select
 **View** to open the full thread inspector, which includes every agent step,
 agent notes, evidence, errors, and continuation controls. The compact view's
 close action ends the current lifecycle and removes it from the composer while
-preserving its progress and notes. **Detach** in the inspector removes the
-thread attachment so another definition can be attached; it does not delete
-the saved definition from the library.
+preserving its progress, notes, and errors. If a reminder has already been
+handed to BB when close is clicked, that in-flight reminder may finish; the
+closed lifecycle cannot issue any later reminders. **Detach** in the inspector
+removes the thread attachment so another definition can be attached; it does
+not delete the saved definition from the library.
 
 Closing a lifecycle is terminal for that attached run. Reattach the definition
 to start a new run.
