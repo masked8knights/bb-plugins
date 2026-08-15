@@ -475,7 +475,32 @@ describe("Agent Checklists app", () => {
     expect(slot.getAllByRole("img", { name: /^Completed:/u })).toHaveLength(4);
     expect(slot.getByText("Run checks").className).toContain("line-through");
     expect(slot.queryByRole("button", { name: "Pause agent continuation" })).toBeNull();
+    expect(slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" })).toBeTruthy();
     expect((slot.getByRole("button", { name: "Automatic" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("closes a lifecycle from the inspector toolbar while keeping the detail record visible", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let current: Omit<typeof attachedChecklist, "status"> & { status: "active" | "closed" } = attachedChecklist;
+    const slot = renderSlot(
+      app.threadPanelActions[0]!,
+      { threadId: "thread-1", params: null },
+      {
+        rpc: {
+          getForThread: () => ({ checklist: current }),
+          close: () => {
+            current = { ...current, status: "closed" as const };
+            return current;
+          },
+        },
+      },
+    );
+
+    await slot.findByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" });
+    fireEvent.click(slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" }));
+    await waitFor(() => expect(slot.getByText("Closed")).toBeTruthy());
+    expect(slot.rpcCalls).toContainEqual({ method: "close", input: { checklistId: attachedChecklist.id } });
+    expect(slot.getByRole("button", { name: "Detach" })).toBeTruthy();
   });
 
   it("shows the approval action while an Agent Checklist is awaiting approval", async () => {
@@ -579,6 +604,32 @@ describe("Agent Checklists app", () => {
       method: "openThreadPanel",
       options: { actionId: "agent-checklist", title: "Agent Checklist · Release Agent Checklist" },
     });
+  });
+
+  it("removes a completed lifecycle from the compact composer banner", async () => {
+    const completed = {
+      ...attachedChecklist,
+      status: "completed" as const,
+      steps: attachedChecklist.steps.map((step) => ({ ...step, checked: true })),
+    };
+    const slot = renderSlot(
+      app.composerCustomizations[0]!.banners![0]!,
+      {},
+      {
+        composer: { scope: { kind: "thread", threadId: "thread-1" } },
+        rpc: {
+          getForThread: () => ({ checklist: completed }),
+          close: () => ({ ...completed, status: "closed" as const }),
+        },
+      },
+    );
+
+    await slot.findByRole("region", { name: "Agent Checklist status" });
+    fireEvent.click(
+      slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" }),
+    );
+    await waitFor(() => expect(slot.queryByRole("region", { name: "Agent Checklist status" })).toBeNull());
+    expect(slot.rpcCalls).toContainEqual({ method: "close", input: { checklistId: completed.id } });
   });
 
   it("shows approval status and an action in the compact composer banner", async () => {

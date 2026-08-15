@@ -207,6 +207,43 @@ describe("Agent Checklists server", () => {
     expect(replacement.name).toBe("Research to technical document");
   });
 
+  it("closes an attached lifecycle and prevents future continuation", async () => {
+    const host = await startHost();
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+    })) as Checklist;
+
+    const closed = (await host.harness.callRpc("close", { checklistId: attached.id })) as Checklist;
+    expect(closed).toMatchObject({ id: attached.id, status: "closed" });
+    expect(
+      (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      },
+    ).toMatchObject({ checklist: { id: attached.id, status: "closed" } });
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "The thread is idle.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(0);
+  });
+
+  it("rejects continuing a closed lifecycle", async () => {
+    const host = await startHost();
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+    })) as Checklist;
+
+    await host.harness.callRpc("close", { checklistId: attached.id });
+
+    await expect(host.harness.callRpc("continue", { checklistId: attached.id })).rejects.toThrow(
+      "This Agent Checklist is closed",
+    );
+  });
+
   it("persists custom templates through the authoring RPCs", async () => {
     const host = await startHost();
 
@@ -722,6 +759,43 @@ describe("Agent Checklists server", () => {
         checklist: Checklist;
       };
       expect(current.checklist).toMatchObject({ status: "paused", continuationCount: 0 });
+    });
+  });
+
+  it("invalidates an in-flight continuation when the lifecycle is closed", async () => {
+    let getCount = 0;
+    let resolveValidation: ((value: ReturnType<typeof makeThreadResponse>) => void) | undefined;
+    const validation = new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const host = await startHost(undefined, (candidate) => {
+      candidate.harness.sdk.stub("threads.get", async ({ threadId }) => {
+        getCount += 1;
+        if (getCount === 1) return makeThreadResponse({ id: threadId, status: "idle" });
+        return validation;
+      });
+    });
+    const attached = (await host.harness.callRpc("attach", {
+      threadId: "thread-1",
+      templateId: softwareTemplateId(host),
+      continuationMode: "automatic",
+    })) as Checklist;
+
+    await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thread-1" }),
+      lastAssistantText: "I stopped early.",
+    });
+    await vi.waitFor(() => expect(getCount).toBe(2));
+    const closed = (await host.harness.callRpc("close", { checklistId: attached.id })) as Checklist;
+    expect(closed.status).toBe("closed");
+    resolveValidation?.(makeThreadResponse({ id: "thread-1", status: "idle" }));
+
+    await vi.waitFor(async () => {
+      expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(0);
+      const current = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
+        checklist: Checklist;
+      };
+      expect(current.checklist).toMatchObject({ status: "closed", continuationCount: 0 });
     });
   });
 

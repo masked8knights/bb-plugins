@@ -386,7 +386,7 @@ function ToolboxPanel({}: PluginNavPanelProps) {
   if (loading && !snapshot) return <div className="p-5 text-sm text-muted-foreground">Loading Toolbox…</div>;
 
   return (
-    <div className="min-h-full bg-background p-4 text-foreground md:p-5">
+    <div className="h-full min-h-0 overflow-y-auto bg-background p-4 text-foreground md:p-5">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>

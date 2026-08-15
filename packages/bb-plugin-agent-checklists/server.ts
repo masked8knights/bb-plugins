@@ -188,6 +188,10 @@ export const rpcContract = defineRpcContract({
     input: checklistIdInput,
     output: z.object({ detached: z.boolean() }).strict(),
   },
+  close: {
+    input: checklistIdInput,
+    output: checklistSchema,
+  },
   saveTemplate: {
     input: saveTemplateInput,
     output: templateSchema,
@@ -620,6 +624,15 @@ export default async function plugin(bb: BbPluginApi) {
       publishDetached(bb, latest);
       return { detached: true };
     },
+    close({ checklistId }) {
+      const current = store.getChecklist(checklistId);
+      if (!current) throw new Error("Checklist not found");
+      bumpThreadVersion(current.threadId);
+      const closed = store.closeChecklist(checklistId);
+      recentContinuationResults.delete(checklistId);
+      publish(bb, closed);
+      return closed;
+    },
     saveTemplate(input) {
       const template = store.saveTemplate(input);
       publishTemplate(bb, template.id);
@@ -645,6 +658,11 @@ export default async function plugin(bb: BbPluginApi) {
       return updated;
     },
     async continue({ checklistId }) {
+      const current = store.getChecklist(checklistId);
+      if (!current) throw new Error("Checklist not found");
+      if (current.status === "closed") {
+        throw new Error("This Agent Checklist is closed");
+      }
       const result = await guardedSendContinuation(checklistId, true);
       return result;
     },

@@ -23,7 +23,14 @@ different one.
 The area above the composer shows the attached name, progress, and the next
 few incomplete steps. It is intentionally read-only for the user. Select
 **View** to open the full thread inspector, which includes every agent step,
-agent notes, evidence, errors, and continuation controls.
+agent notes, evidence, errors, and continuation controls. The compact view's
+close action ends the current lifecycle and removes it from the composer while
+preserving its progress and notes. **Detach** in the inspector removes the
+thread attachment so another definition can be attached; it does not delete
+the saved definition from the library.
+
+Closing a lifecycle is terminal for that attached run. Reattach the definition
+to start a new run.
 
 ## Continuation modes
 

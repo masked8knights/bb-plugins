@@ -111,6 +111,7 @@ function toStatus(value: unknown): ChecklistStatus {
     case "awaiting_approval":
     case "paused":
     case "completed":
+    case "closed":
     case "limit_reached":
     case "orphaned":
       return value;
@@ -297,6 +298,30 @@ export class ChecklistStore {
     this.db.prepare("DELETE FROM checklists WHERE id = ?").run(checklistId);
   }
 
+  closeChecklist(checklistId: string): Checklist {
+    const current = this.getChecklist(checklistId);
+    if (!current) throw new Error("Agent Checklist not found");
+    if (current.status === "orphaned") {
+      throw new Error("This Agent Checklist belongs to an unavailable thread");
+    }
+    if (current.status === "closed") return current;
+
+    const now = Date.now();
+    this.db
+      .prepare(
+        `UPDATE checklists
+         SET status = 'closed',
+             last_reminder_at = CASE
+               WHEN continuation_claimed_at IS NULL THEN NULL
+               ELSE last_reminder_at
+             END,
+             updated_at = ?
+         WHERE id = ? AND status != 'orphaned'`,
+      )
+      .run(now, checklistId);
+    return this.getChecklist(checklistId)!;
+  }
+
   private getChecklistRow(checklistId: string): Row | undefined {
     return this.db
       .prepare("SELECT * FROM checklists WHERE id = ?")
@@ -407,7 +432,7 @@ export class ChecklistStore {
   }
 
   private reconcileCompletion(checklist: Checklist): Checklist {
-    if (checklist.status === "orphaned") return checklist;
+    if (checklist.status === "orphaned" || checklist.status === "closed") return checklist;
     const complete = checklist.steps.length > 0 && checklist.steps.every((step) => step.checked);
     if (complete && checklist.status !== "completed") {
       const now = Date.now();
@@ -434,6 +459,9 @@ export class ChecklistStore {
     if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
       throw new Error("This Agent Checklist belongs to an unavailable thread");
+    }
+    if (current.status === "closed") {
+      throw new Error("This Agent Checklist is closed");
     }
     if (
       input.status !== undefined &&
@@ -492,6 +520,9 @@ export class ChecklistStore {
     if (current.status === "orphaned") {
       throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
+    if (current.status === "closed") {
+      throw new Error("This Agent Checklist is closed");
+    }
     const step = this.db
       .prepare("SELECT * FROM checklist_steps WHERE id = ? AND checklist_id = ?")
       .get(stepId, checklistId) as Row | undefined;
@@ -528,6 +559,9 @@ export class ChecklistStore {
     if (current.status === "orphaned") {
       throw new Error("This Agent Checklist belongs to an unavailable thread");
     }
+    if (current.status === "closed") {
+      throw new Error("This Agent Checklist is closed");
+    }
     if (stepId) {
       const step = this.db
         .prepare("SELECT id FROM checklist_steps WHERE id = ? AND checklist_id = ?")
@@ -556,6 +590,9 @@ export class ChecklistStore {
     if (!current) throw new Error("Agent Checklist not found");
     if (current.status === "orphaned") {
       throw new Error("This Agent Checklist belongs to an unavailable thread");
+    }
+    if (current.status === "closed") {
+      throw new Error("This Agent Checklist is closed");
     }
     if (
       input.status !== undefined &&
@@ -738,7 +775,7 @@ export class ChecklistStore {
 
   recordContinuationError(checklistId: string, error: string): Checklist | null {
     const current = this.getChecklist(checklistId);
-    if (!current || current.status === "orphaned") return current;
+    if (!current || current.status === "orphaned" || current.status === "closed") return current;
     const now = Date.now();
     this.db
       .prepare(
@@ -753,10 +790,10 @@ export class ChecklistStore {
     const result = this.db
       .prepare(
         `UPDATE checklists
-         SET status = CASE WHEN status = 'completed' THEN status ELSE 'paused' END,
+         SET status = CASE WHEN status IN ('completed', 'closed') THEN status ELSE 'paused' END,
              last_reminder_at = NULL,
              continuation_claimed_at = NULL,
-             last_error = ?,
+             last_error = CASE WHEN status = 'closed' THEN NULL ELSE ? END,
              updated_at = ?
          WHERE continuation_claimed_at IS NOT NULL AND status != 'orphaned'`,
       )
@@ -813,7 +850,7 @@ export class ChecklistStore {
     const result = this.db
       .prepare(
         `UPDATE checklists
-         SET status = CASE WHEN status IN ('orphaned', 'completed') THEN status ELSE 'paused' END,
+         SET status = CASE WHEN status IN ('orphaned', 'completed', 'closed') THEN status ELSE 'paused' END,
              continuation_count = CASE WHEN continuation_count > 0 THEN continuation_count - 1 ELSE 0 END,
              last_reminder_at = NULL,
              continuation_claimed_at = NULL,

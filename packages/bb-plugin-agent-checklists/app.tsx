@@ -63,6 +63,8 @@ function statusLabel(status: Checklist["status"]): string {
       return "Paused";
     case "completed":
       return "Complete";
+    case "closed":
+      return "Closed";
     case "limit_reached":
       return "Continuation limit reached";
     case "orphaned":
@@ -82,6 +84,8 @@ function statusTone(status: Checklist["status"]): string {
       return "text-warning";
     case "orphaned":
       return "text-destructive";
+    case "closed":
+      return "text-muted-foreground";
     default:
       return "text-primary";
   }
@@ -984,6 +988,20 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
     if (next) setChecklist(next);
   };
 
+  const closeLifecycle = async () => {
+    if (!checklist || checklist.status === "orphaned" || checklist.status === "closed") return;
+    if (
+      checklist.status !== "completed" &&
+      !window.confirm(
+        `Close Agent Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
+      )
+    ) {
+      return;
+    }
+    const next = await mutate(() => rpc.call("close", { checklistId: checklist.id }));
+    if (next) setChecklist(next);
+  };
+
   const detach = async () => {
     if (!checklist || !window.confirm(`Detach Agent Checklist “${checklist.name}”?`)) return;
     const result = await mutate(() => rpc.call("detach", { checklistId: checklist.id }));
@@ -1088,6 +1106,18 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
               Resume continuation
             </button>
           ) : null}
+          {checklist.status !== "closed" && !unavailable ? (
+            <button
+              type="button"
+              className={`${quietButtonClass} text-destructive hover:text-destructive`}
+              disabled={busy}
+              title="Close lifecycle"
+              aria-label={`Close Agent Checklist lifecycle for ${checklist.name}`}
+              onClick={() => void closeLifecycle()}
+            >
+              Close lifecycle
+            </button>
+          ) : null}
           <button
             type="button"
             className={`${quietButtonClass} text-destructive hover:text-destructive`}
@@ -1105,7 +1135,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
                 type="button"
                 className={modeButtonClass(checklist.continuationMode === value)}
                 aria-pressed={checklist.continuationMode === value}
-                disabled={busy || unavailable || checklist.status === "completed"}
+                disabled={busy || unavailable || checklist.status === "completed" || checklist.status === "closed"}
                 onClick={() => void updateSettings({ continuationMode: value as ContinuationMode })}
               >
                 {label}
@@ -1162,7 +1192,7 @@ function ComposerChecklistBanner() {
     try {
       const result = await rpc.call("getForThread", { threadId });
       if (generation !== refreshGeneration.current) return;
-      setChecklist(result.checklist);
+      setChecklist(result.checklist?.status === "closed" ? null : result.checklist);
       setError(null);
       setLoading(false);
     } catch (reason) {
@@ -1202,7 +1232,7 @@ function ComposerChecklistBanner() {
     );
   }
 
-  if (!checklist) return null;
+  if (!checklist || checklist.status === "closed") return null;
 
   const completed = completedCount(checklist);
   const total = checklist.steps.length;
@@ -1213,19 +1243,43 @@ function ComposerChecklistBanner() {
     }
   };
 
-  const performAction = async (action: () => Promise<Checklist | null>) => {
+  const performAction = async (
+    action: () => Promise<Checklist | null>,
+    onSuccess?: () => void,
+  ) => {
     if (actionBusy) return;
     const actionThreadId = threadId;
     setActionBusy(true);
     setError(null);
     try {
       const next = await action();
-      if (actionThreadId === activeThreadId.current && next) setChecklist(next);
+      if (actionThreadId === activeThreadId.current) {
+        if (next) setChecklist(next);
+        onSuccess?.();
+      }
     } catch (reason) {
       if (actionThreadId === activeThreadId.current) setError(errorText(reason));
     } finally {
       if (actionThreadId === activeThreadId.current) setActionBusy(false);
     }
+  };
+
+  const closeLifecycle = () => {
+    if (
+      checklist.status !== "completed" &&
+      !window.confirm(
+        `Close Agent Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
+      )
+    ) {
+      return;
+    }
+    void performAction(
+      async () => {
+        await rpc.call("close", { checklistId: checklist.id });
+        return null;
+      },
+      () => setChecklist(null),
+    );
   };
 
   return (
@@ -1255,6 +1309,18 @@ function ComposerChecklistBanner() {
         >
           Open
         </button>
+        {checklist.status !== "orphaned" ? (
+          <button
+            type="button"
+            className={iconButtonClass}
+            aria-label={`Close Agent Checklist lifecycle for ${checklist.name}`}
+            title="Close lifecycle"
+            disabled={actionBusy}
+            onClick={closeLifecycle}
+          >
+            <span aria-hidden="true" className="text-base leading-none">×</span>
+          </button>
+        ) : null}
       </div>
       <div
         className="mt-2 h-1 overflow-hidden rounded-full bg-surface-recessed"

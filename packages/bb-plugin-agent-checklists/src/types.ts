@@ -6,6 +6,7 @@ export const checklistStatuses = [
   "awaiting_approval",
   "paused",
   "completed",
+  "closed",
   "limit_reached",
   "orphaned",
 ] as const;

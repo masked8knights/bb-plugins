@@ -183,6 +183,46 @@ describe("ChecklistStore", () => {
     expect(store.getChecklistForThread("thread-1")).toBeNull();
   });
 
+  it("closes a lifecycle without deleting its progress or allowing mutations", () => {
+    const store = createStore();
+    const checklist = store.createChecklist("thread-1", templateId(store, "Software delivery"), undefined, 8);
+    const completed = checklist.steps.reduce(
+      (current, step) => store.updateStep(current.id, step.id, { checked: true }),
+      checklist,
+    );
+    expect(completed.status).toBe("completed");
+
+    const closed = store.closeChecklist(checklist.id);
+    expect(closed).toMatchObject({ id: checklist.id, status: "closed" });
+    expect(store.getChecklistForThread("thread-1")).toMatchObject({
+      id: checklist.id,
+      status: "closed",
+      steps: completed.steps,
+      notes: [],
+    });
+    expect(() => store.updateSettings(checklist.id, { status: "active" })).toThrow("closed");
+    expect(() => store.updateStep(checklist.id, checklist.steps[0]!.id, { checked: false })).toThrow(
+      "closed",
+    );
+    expect(() => store.addNote(checklist.id, null, "Should not be added")).toThrow("closed");
+    expect(() => store.applyAgentUpdate(checklist.id, { stepId: checklist.steps[0]!.id, checked: false })).toThrow(
+      "closed",
+    );
+  });
+
+  it("preserves a continuation error when closing a lifecycle", () => {
+    const store = createStore();
+    const checklist = store.createChecklist("thread-1", templateId(store, "Software delivery"), undefined, 8);
+    store.recordContinuationError(checklist.id, "The reminder could not be delivered.");
+
+    const closed = store.closeChecklist(checklist.id);
+
+    expect(closed).toMatchObject({
+      status: "closed",
+      lastError: "The reminder could not be delivered.",
+    });
+  });
+
   it("settles an orphaned continuation claim without leaving progress behind", () => {
     const store = createStore();
     const checklist = store.createChecklist("thread-1", templateId(store, "Software delivery"), undefined, 8);
