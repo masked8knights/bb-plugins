@@ -23,7 +23,7 @@ Plugins for [bb](https://github.com/patleeman/bb).
   declared CLI operations through one provider-neutral agent bridge and
   aggregated MCP endpoint.
 - [`bb-plugin-comprehension`](packages/bb-plugin-comprehension/) — turn messages,
-  selections, and threads into clear, skimmable HTML explainers.
+  selections, and threads into clear HTML, audio, and podcast explainers.
 - [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
   in the assistant-message text-selection menu; the reaction list is
   configurable in plugin settings.
