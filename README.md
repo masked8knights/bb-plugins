@@ -16,9 +16,6 @@ Plugins for [bb](https://github.com/patleeman/bb).
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
   attach Excalidraw drawings in conversations.
-- [`bb-plugin-sessions`](packages/bb-plugin-sessions/) — index Codex, Claude
-  Code, and Pi (prime-agent) sessions on this machine, search them from a
-  sidebar panel, and rehydrate any session into a BB thread.
 - [`bb-plugin-toolbox`](packages/bb-plugin-toolbox/) — manage MCP servers and
   declared CLI operations through one provider-neutral agent bridge and
   aggregated MCP endpoint.
@@ -52,5 +49,5 @@ This runs `bb plugin install <path> --yes` for every `packages/bb-plugin-*`
 and prints the resulting installed list. To install just one, use its path:
 
 ```sh
-bb plugin install ./packages/bb-plugin-sessions
+bb plugin install ./packages/bb-plugin-toolbox
 ```
