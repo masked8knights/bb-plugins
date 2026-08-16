@@ -14,9 +14,10 @@ import {
 } from "@modelcontextprotocol/server";
 import type { Context } from "hono";
 import type { ToolboxStore } from "./store";
-import { cliResultText, runCliTool } from "./cli-runner";
+import { cliResultText, runCliSource, runCliTool, type CliRunResult } from "./cli-runner";
 import type {
   CatalogTool,
+  CliSourceRecord,
   CliToolRecord,
   JsonRecord,
   McpServerRecord,
@@ -51,7 +52,7 @@ function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 10);
 }
 
-export function exposedToolName(sourceId: string, toolName: string, kind: "mcp" | "cli"): string {
+export function exposedToolName(sourceId: string, toolName: string, kind: "mcp" | "cli" | "cli-source"): string {
   return `${kind}_${slug(sourceId)}__${slug(toolName)}_${shortHash(JSON.stringify([kind, sourceId, toolName]))}`;
 }
 
@@ -84,6 +85,33 @@ function toolDefinitionFromCli(tool: CliToolRecord): CatalogTool {
     sourceId: tool.id,
     sourceName: tool.name,
     sourceKind: "cli",
+    status: "ready",
+  };
+}
+
+const RAW_CLI_INPUT_SCHEMA: JsonRecord = {
+  type: "object",
+  properties: {
+    argv: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: 128,
+      description: "Arguments passed directly to the CLI. Do not include shell syntax.",
+    },
+  },
+  required: ["argv"],
+  additionalProperties: false,
+};
+
+function toolDefinitionFromCliSource(source: CliSourceRecord): CatalogTool {
+  return {
+    name: source.name,
+    exposedName: exposedToolName(source.id, "run", "cli-source"),
+    description: source.description || `Run ${source.command} with direct argv arguments.`,
+    inputSchema: RAW_CLI_INPUT_SCHEMA,
+    sourceId: source.id,
+    sourceName: source.name,
+    sourceKind: "cli-source",
     status: "ready",
   };
 }
@@ -271,6 +299,9 @@ export class McpGateway {
     for (const cli of this.store.listCliTools()) {
       if (cli.enabled) tools.push(toolDefinitionFromCli(cli));
     }
+    for (const source of this.store.listCliSources()) {
+      if (source.enabled) tools.push(toolDefinitionFromCliSource(source));
+    }
     return tools;
   }
 
@@ -328,6 +359,27 @@ export class McpGateway {
     }));
   }
 
+  cliSourceSummaries() {
+    return this.store.listCliSources().map((source) => ({
+      id: source.id,
+      name: source.name,
+      description: source.description,
+      command: source.command,
+      cwd: source.cwd,
+      enabled: source.enabled,
+      hasEnv: Object.keys(source.env).length > 0,
+      status: source.enabled ? ("ready" as const) : ("disabled" as const),
+      updatedAt: source.updatedAt,
+    }));
+  }
+
+  async runCliSource(sourceId: string, args: unknown, signal?: AbortSignal): Promise<CliRunResult> {
+    const source = this.store.getCliSource(sourceId);
+    if (!source) throw new Error(`CLI source not found: ${sourceId}`);
+    if (!source.enabled) throw new Error(`CLI source is disabled: ${source.name}`);
+    return runCliSource(source, args, { ...this.cliOptions, signal });
+  }
+
   async call(exposedName: string, args: unknown, signal?: AbortSignal): Promise<CallToolResult> {
     const tools = await this.catalog();
     const definition = tools.find((tool) => tool.exposedName === exposedName);
@@ -336,6 +388,13 @@ export class McpGateway {
       const cli = this.store.getCliTool(definition.sourceId);
       if (!cli) throw new Error(`CLI tool not found: ${definition.sourceId}`);
       const result = await runCliTool(cli, args, { ...this.cliOptions, signal });
+      return {
+        content: [{ type: "text", text: cliResultText(result) }],
+        isError: result.exitCode !== 0,
+      };
+    }
+    if (definition.sourceKind === "cli-source") {
+      const result = await this.runCliSource(definition.sourceId, args, signal);
       return {
         content: [{ type: "text", text: cliResultText(result) }],
         isError: result.exitCode !== 0,

@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
   CliToolRecord,
+  CliSourceRecord,
+  CliSourceUpsertInput,
   CliUpsertInput,
   JsonRecord,
   McpServerRecord,
@@ -40,6 +42,18 @@ export const migrations = [
    )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_toolbox_mcp_name ON toolbox_mcp_servers(name)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_toolbox_cli_name ON toolbox_cli_tools(name)`,
+  `CREATE TABLE IF NOT EXISTS toolbox_cli_sources (
+     id TEXT PRIMARY KEY,
+     name TEXT NOT NULL,
+     description TEXT NOT NULL DEFAULT '',
+     command TEXT NOT NULL,
+     cwd TEXT,
+     env_json TEXT NOT NULL DEFAULT '{}',
+     enabled INTEGER NOT NULL DEFAULT 1,
+     created_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL
+   )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_toolbox_cli_source_name ON toolbox_cli_sources(name)`,
 ];
 
 const mcpRowSchema = z
@@ -68,6 +82,20 @@ const cliRowSchema = z
     command: z.string(),
     args_template_json: z.string(),
     input_schema_json: z.string(),
+    cwd: z.string().nullable(),
+    env_json: z.string(),
+    enabled: z.number(),
+    created_at: z.number(),
+    updated_at: z.number(),
+  })
+  .strict();
+
+const cliSourceRowSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    description: z.string(),
+    command: z.string(),
     cwd: z.string().nullable(),
     env_json: z.string(),
     enabled: z.number(),
@@ -119,6 +147,21 @@ function rowToCli(row: unknown): CliToolRecord {
       { type: "object", properties: {}, additionalProperties: false },
       (value) => jsonRecordSchema.parse(value),
     ),
+    cwd: parsed.cwd,
+    env: parseJson(parsed.env_json, {}, (value) => jsonRecordSchema.parse(value) as Record<string, string>),
+    enabled: parsed.enabled === 1,
+    createdAt: parsed.created_at,
+    updatedAt: parsed.updated_at,
+  };
+}
+
+function rowToCliSource(row: unknown): CliSourceRecord {
+  const parsed = cliSourceRowSchema.parse(row);
+  return {
+    id: parsed.id,
+    name: parsed.name,
+    description: parsed.description,
+    command: parsed.command,
     cwd: parsed.cwd,
     env: parseJson(parsed.env_json, {}, (value) => jsonRecordSchema.parse(value) as Record<string, string>),
     enabled: parsed.enabled === 1,
@@ -271,6 +314,57 @@ export class ToolboxStore {
 
   deleteCli(id: string): boolean {
     return this.db.prepare("DELETE FROM toolbox_cli_tools WHERE id = ?").run(id).changes > 0;
+  }
+
+  listCliSources(): CliSourceRecord[] {
+    return cliSourceRowSchema
+      .array()
+      .parse(this.db.prepare("SELECT * FROM toolbox_cli_sources ORDER BY name COLLATE NOCASE").all())
+      .map(rowToCliSource);
+  }
+
+  getCliSource(id: string): CliSourceRecord | null {
+    const row = this.db.prepare("SELECT * FROM toolbox_cli_sources WHERE id = ?").get(id);
+    return row === undefined ? null : rowToCliSource(row);
+  }
+
+  upsertCliSource(input: CliSourceUpsertInput): CliSourceRecord {
+    const now = Date.now();
+    const id = input.id?.trim() || `cli_source_${randomUUID()}`;
+    const name = nonEmpty(input.name, "CLI source name");
+    const command = nonEmpty(input.command, "CLI command");
+    const existing = this.getCliSource(id);
+    const record = {
+      id,
+      name,
+      description: input.description.trim(),
+      command,
+      cwd: input.cwd?.trim() || null,
+      env: JSON.stringify(normalizeStringMap(input.env)),
+      enabled: input.enabled ? 1 : 0,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO toolbox_cli_sources
+           (id, name, description, command, cwd, env_json, enabled, created_at, updated_at)
+         VALUES (@id, @name, @description, @command, @cwd, @env, @enabled, @createdAt, @updatedAt)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           description = excluded.description,
+           command = excluded.command,
+           cwd = excluded.cwd,
+           env_json = excluded.env_json,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(record);
+    return this.getCliSource(id)!;
+  }
+
+  deleteCliSource(id: string): boolean {
+    return this.db.prepare("DELETE FROM toolbox_cli_sources WHERE id = ?").run(id).changes > 0;
   }
 }
 

@@ -16,7 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-type Tab = "mcp" | "cli";
+type Tab = "mcp" | "cli-source" | "cli";
 
 interface McpFormState {
   id: string | null;
@@ -39,6 +39,16 @@ interface CliFormState {
   command: string;
   argsTemplateJson: string;
   inputSchemaJson: string;
+  cwd: string;
+  envJson: string;
+  enabled: boolean;
+}
+
+interface CliSourceFormState {
+  id: string | null;
+  name: string;
+  description: string;
+  command: string;
   cwd: string;
   envJson: string;
   enabled: boolean;
@@ -77,6 +87,18 @@ function emptyCliForm(): CliFormState {
     command: "",
     argsTemplateJson: "[]",
     inputSchemaJson: '{\n  "type": "object",\n  "properties": {},\n  "additionalProperties": false\n}',
+    cwd: "",
+    envJson: "",
+    enabled: true,
+  };
+}
+
+function emptyCliSourceForm(): CliSourceFormState {
+  return {
+    id: null,
+    name: "",
+    description: "",
+    command: "",
     cwd: "",
     envJson: "",
     enabled: true,
@@ -274,12 +296,71 @@ function CliForm({
   );
 }
 
+function CliSourceForm({
+  form,
+  busy,
+  onChange,
+  onCancel,
+  onSubmit,
+}: {
+  form: CliSourceFormState;
+  busy: boolean;
+  onChange: (next: CliSourceFormState) => void;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{form.id ? "Edit CLI source" : "Add CLI source"}</CardTitle>
+        <CardDescription>Expose the CLI itself. Agents pass direct argv arguments; Toolbox never invokes a shell.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="grid gap-3" onSubmit={onSubmit}>
+          <div className="grid gap-3 md:grid-cols-2">
+            <FormLabel>
+              Name
+              <input className={fieldClass} value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="Bird" required />
+            </FormLabel>
+            <FormLabel>
+              Executable
+              <input className={fieldClass} value={form.command} onChange={(event) => onChange({ ...form, command: event.target.value })} placeholder="bird" required />
+            </FormLabel>
+          </div>
+          <FormLabel>
+            Description
+            <input className={fieldClass} value={form.description} onChange={(event) => onChange({ ...form, description: event.target.value })} placeholder="Twitter CLI for reading and posting" />
+          </FormLabel>
+          <div className="grid gap-3 md:grid-cols-2">
+            <FormLabel>
+              Working directory
+              <input className={fieldClass} value={form.cwd} onChange={(event) => onChange({ ...form, cwd: event.target.value })} placeholder="Optional" />
+            </FormLabel>
+            <FormLabel>
+              Environment JSON object
+              <textarea className={textareaClass} value={form.envJson} onChange={(event) => onChange({ ...form, envJson: event.target.value })} placeholder='{"NO_COLOR":"1"}' />
+            </FormLabel>
+          </div>
+          {form.id && form.envJson.trim() === "" ? <p className="text-xs text-muted-foreground">Leave environment blank to keep the existing values.</p> : null}
+          <div className="flex flex-wrap items-center gap-3">
+            <Toggle checked={form.enabled} onChange={(enabled) => onChange({ ...form, enabled })} />
+            <span className="flex-1" />
+            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+            <Button type="submit" size="sm" disabled={busy}>{busy ? "Saving…" : "Save CLI source"}</Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 function ToolboxPanel({}: PluginNavPanelProps) {
   const rpc = useRpc<typeof rpcContract>();
   const [tab, setTab] = useState<Tab>("mcp");
   const [snapshot, setSnapshot] = useState<ToolboxSnapshot | null>(null);
   const [mcpForm, setMcpForm] = useState<McpFormState | null>(null);
   const [cliForm, setCliForm] = useState<CliFormState | null>(null);
+  const [cliSourceForm, setCliSourceForm] = useState<CliSourceFormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -362,6 +443,30 @@ function ToolboxPanel({}: PluginNavPanelProps) {
     }
   };
 
+  const saveCliSource = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!cliSourceForm) return;
+    try {
+      setBusy(true);
+      setError(null);
+      const next = await rpc.call("saveCliSource", {
+        id: cliSourceForm.id,
+        name: cliSourceForm.name,
+        description: cliSourceForm.description,
+        command: cliSourceForm.command,
+        cwd: cliSourceForm.cwd || null,
+        env: parseOptionalMap(cliSourceForm.envJson, "Environment"),
+        enabled: cliSourceForm.enabled,
+      });
+      setSnapshot(next);
+      setCliSourceForm(null);
+    } catch (saveError) {
+      setError(errorText(saveError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const invoke = async () => {
     if (!selectedTool) return;
     try {
@@ -391,12 +496,13 @@ function ToolboxPanel({}: PluginNavPanelProps) {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-lg font-semibold">Toolbox</h1>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">One repository for MCP servers and safe, named CLI operations. BB agents use the same catalog through native tools.</p>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">One repository for MCP servers, raw CLI sources, and optional typed operations. BB agents use the same catalog through native tools.</p>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => void load()}>Refresh</Button>
             <Button size="sm" onClick={() => { setTab("mcp"); setMcpForm(emptyMcpForm()); setCliForm(null); }}>Add MCP</Button>
             <Button variant="outline" size="sm" onClick={() => { setTab("cli"); setCliForm(emptyCliForm()); setMcpForm(null); }}>Add CLI</Button>
+            <Button variant="outline" size="sm" onClick={() => { setTab("cli-source"); setCliSourceForm(emptyCliSourceForm()); setMcpForm(null); setCliForm(null); }}>Add CLI source</Button>
           </div>
         </div>
 
@@ -412,10 +518,12 @@ function ToolboxPanel({}: PluginNavPanelProps) {
         <div className="flex gap-1 border-b border-border">
           <button className={`${buttonClass} rounded-b-none ${tab === "mcp" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("mcp")}>MCP servers ({snapshot?.mcpServers.length ?? 0})</button>
           <button className={`${buttonClass} rounded-b-none ${tab === "cli" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("cli")}>CLI tools ({snapshot?.cliTools.length ?? 0})</button>
+          <button className={`${buttonClass} rounded-b-none ${tab === "cli-source" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("cli-source")}>CLI sources ({snapshot?.cliSources.length ?? 0})</button>
         </div>
 
         {tab === "mcp" && mcpForm ? <McpForm form={mcpForm} busy={busy} onChange={setMcpForm} onCancel={() => setMcpForm(null)} onSubmit={(event) => void saveMcp(event)} /> : null}
         {tab === "cli" && cliForm ? <CliForm form={cliForm} busy={busy} onChange={setCliForm} onCancel={() => setCliForm(null)} onSubmit={(event) => void saveCli(event)} /> : null}
+        {tab === "cli-source" && cliSourceForm ? <CliSourceForm form={cliSourceForm} busy={busy} onChange={setCliSourceForm} onCancel={() => setCliSourceForm(null)} onSubmit={(event) => void saveCliSource(event)} /> : null}
 
         {tab === "mcp" ? (
           <div className="grid gap-3">
@@ -433,7 +541,7 @@ function ToolboxPanel({}: PluginNavPanelProps) {
               </Card>
             )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No MCP servers yet. Add a URL or a local stdio command.</CardContent></Card>}
           </div>
-        ) : (
+        ) : tab === "cli" ? (
           <div className="grid gap-3">
             {snapshot?.cliTools.length ? snapshot.cliTools.map((tool) => (
               <Card key={tool.id}>
@@ -443,6 +551,21 @@ function ToolboxPanel({}: PluginNavPanelProps) {
                 </CardContent>
               </Card>
             )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No CLI tools yet. Define a named operation with a JSON input schema.</CardContent></Card>}
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            {snapshot?.cliSources.length ? snapshot.cliSources.map((source) => (
+              <Card key={source.id}>
+                <CardContent className="flex flex-wrap items-start gap-3 py-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{source.name}</span><span className={`text-xs ${statusTone(source.status)}`}>{source.status}</span></div>
+                    <p className="mt-1 text-sm text-muted-foreground">{source.description || source.command}</p>
+                    <p className="mt-2 font-mono text-xs text-muted-foreground">{source.command}{source.cwd ? ` · ${source.cwd}` : ""}{source.hasEnv ? " · environment configured" : ""}</p>
+                  </div>
+                  <div className="flex gap-1"><Button variant="ghost" size="sm" onClick={() => { setCliSourceForm({ ...emptyCliSourceForm(), id: source.id, name: source.name, description: source.description, command: source.command, cwd: source.cwd ?? "", enabled: source.enabled, envJson: source.hasEnv ? "// existing environment kept when blank" : "" }); setMcpForm(null); setCliForm(null); }}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => { if (window.confirm(`Delete ${source.name}?`)) void rpc.call("deleteCliSource", { id: source.id }).then(setSnapshot).catch((deleteError) => setError(errorText(deleteError))); }}>Delete</Button></div>
+                </CardContent>
+              </Card>
+            )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No raw CLI sources yet. Add an executable and agents can use its own subcommands.</CardContent></Card>}
           </div>
         )}
 

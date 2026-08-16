@@ -32,13 +32,25 @@ export interface CliToolRecord {
   updatedAt: number;
 }
 
+export interface CliSourceRecord {
+  id: string;
+  name: string;
+  description: string;
+  command: string;
+  cwd: string | null;
+  env: Record<string, string>;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: JsonRecord;
   sourceId: string;
   sourceName: string;
-  sourceKind: "mcp" | "cli";
+  sourceKind: "mcp" | "cli" | "cli-source";
   remoteName?: string;
 }
 
@@ -80,9 +92,22 @@ export interface CliSummary {
   updatedAt: number;
 }
 
+export interface CliSourceSummary {
+  id: string;
+  name: string;
+  description: string;
+  command: string;
+  cwd: string | null;
+  enabled: boolean;
+  hasEnv: boolean;
+  status: "ready" | "disabled";
+  updatedAt: number;
+}
+
 export interface ToolboxSnapshot {
   mcpServers: SourceSummary[];
   cliTools: CliSummary[];
+  cliSources: CliSourceSummary[];
   tools: CatalogTool[];
   mcpEndpoint: string;
 }
@@ -108,6 +133,16 @@ export interface CliUpsertInput {
   command: string;
   argsTemplate: string[];
   inputSchema: JsonRecord;
+  cwd?: string | null;
+  env?: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface CliSourceUpsertInput {
+  id?: string | null;
+  name: string;
+  description: string;
+  command: string;
   cwd?: string | null;
   env?: Record<string, string>;
   enabled: boolean;

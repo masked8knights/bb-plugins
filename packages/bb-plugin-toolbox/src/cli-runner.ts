@@ -1,6 +1,6 @@
 import Ajv from "ajv";
 import { spawn } from "node:child_process";
-import type { CliToolRecord, JsonRecord } from "./types";
+import type { CliSourceRecord, CliToolRecord, JsonRecord } from "./types";
 
 const PLACEHOLDER = /^\{\{(?:(json|args):)?([A-Za-z_][A-Za-z0-9_-]*)\}\}$/u;
 const INLINE_PLACEHOLDER = /\{\{(?:(json|args):)?([A-Za-z_][A-Za-z0-9_-]*)\}\}/gu;
@@ -18,6 +18,9 @@ export interface CliRunResult {
   stderr: string;
   argv: string[];
 }
+
+const MAX_RAW_ARG_COUNT = 128;
+const MAX_RAW_ARG_BYTES = 256 * 1024;
 
 const ajv = new Ajv({ allErrors: true, strict: false, allowUnionTypes: true });
 
@@ -81,15 +84,51 @@ export async function runCliTool(
 ): Promise<CliRunResult> {
   validateInput(tool.inputSchema, input);
   const argv = renderCliArgs(tool.argsTemplate, input);
+  return runCliProcess(tool.command, tool.cwd, tool.env, argv, options);
+}
+
+export async function runCliSource(
+  source: CliSourceRecord,
+  input: unknown,
+  options: CliRunOptions,
+): Promise<CliRunResult> {
+  if (!isRecord(input) || !Array.isArray(input.argv)) {
+    throw new Error('Raw CLI input must be an object with an "argv" array');
+  }
+  if (Object.keys(input).some((key) => key !== "argv")) {
+    throw new Error('Raw CLI input only accepts the "argv" field');
+  }
+  if (input.argv.length > MAX_RAW_ARG_COUNT) {
+    throw new Error(`Raw CLI argv cannot contain more than ${MAX_RAW_ARG_COUNT} arguments`);
+  }
+  const argv = input.argv.map((value, index) => {
+    if (typeof value !== "string") throw new Error(`Raw CLI argv[${index}] must be a string`);
+    if (value.includes("\u0000")) throw new Error(`Raw CLI argv[${index}] contains a null byte`);
+    return value;
+  });
+  const argvBytes = Buffer.byteLength(JSON.stringify(argv), "utf8");
+  if (argvBytes > MAX_RAW_ARG_BYTES) {
+    throw new Error(`Raw CLI argv exceeds the ${MAX_RAW_ARG_BYTES}-byte limit`);
+  }
+  return runCliProcess(source.command, source.cwd, source.env, argv, options);
+}
+
+function runCliProcess(
+  command: string,
+  cwd: string | null,
+  env: Record<string, string>,
+  argv: string[],
+  options: CliRunOptions,
+): Promise<CliRunResult> {
   const outputChunks: Buffer[] = [];
   const errorChunks: Buffer[] = [];
   let outputBytes = 0;
   let settled = false;
 
   return new Promise<CliRunResult>((resolve, reject) => {
-    const child = spawn(tool.command, argv, {
-      cwd: tool.cwd ?? undefined,
-      env: { ...process.env, ...tool.env },
+    const child = spawn(command, argv, {
+      cwd: cwd ?? undefined,
+      env: { ...process.env, ...env },
       shell: false,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],

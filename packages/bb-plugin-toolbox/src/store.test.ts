@@ -38,6 +38,14 @@ describe("ToolboxStore", () => {
       env: { GH_TOKEN: "secret" },
       enabled: true,
     });
+    const source = store.upsertCliSource({
+      name: "bird",
+      description: "Twitter CLI",
+      command: "bird",
+      cwd: "/tmp/social",
+      env: { NO_COLOR: "1" },
+      enabled: true,
+    });
 
     expect(store.getMcpServer(mcp.id)).toMatchObject({
       name: "Docs MCP",
@@ -50,11 +58,18 @@ describe("ToolboxStore", () => {
       argsTemplate: ["pr", "view", "{{number}}"],
       inputSchema: expect.objectContaining({ type: "object" }),
     });
+    expect(store.getCliSource(source.id)).toMatchObject({
+      name: "bird",
+      command: "bird",
+      env: { NO_COLOR: "1" },
+    });
 
     store.deleteMcp(mcp.id);
     store.deleteCli(cli.id);
+    store.deleteCliSource(source.id);
     expect(store.listMcpServers()).toHaveLength(0);
     expect(store.listCliTools()).toHaveLength(0);
+    expect(store.listCliSources()).toHaveLength(0);
     db.close();
   });
 

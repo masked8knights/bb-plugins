@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { McpGateway, exposedToolName } from "./gateway";
 import type { ToolboxStore } from "./store";
-import type { McpServerRecord } from "./types";
+import type { CliSourceRecord, McpServerRecord } from "./types";
 
 const log = {
   info: () => undefined,
@@ -46,10 +46,41 @@ describe("MCP gateway", () => {
     const store = {
       listMcpServers: () => [source],
       listCliTools: () => [],
+      listCliSources: () => [],
     } as unknown as ToolboxStore;
     const gateway = new McpGateway(store, log, options);
 
     await expect(gateway.catalog({ connect: false })).resolves.toEqual([]);
+    await gateway.close();
+  });
+
+  it("catalogs one raw tool per CLI source", async () => {
+    const source: CliSourceRecord = {
+      id: "cli_source_bird",
+      name: "Bird",
+      description: "Use Bird's own commands",
+      command: "bird",
+      cwd: null,
+      env: {},
+      enabled: true,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const store = {
+      listMcpServers: () => [],
+      listCliTools: () => [],
+      listCliSources: () => [source],
+    } as unknown as ToolboxStore;
+    const gateway = new McpGateway(store, log, options);
+
+    await expect(gateway.catalog({ connect: false })).resolves.toEqual([
+      expect.objectContaining({
+        name: "Bird",
+        sourceId: source.id,
+        sourceKind: "cli-source",
+        inputSchema: expect.objectContaining({ required: ["argv"] }),
+      }),
+    ]);
     await gateway.close();
   });
 

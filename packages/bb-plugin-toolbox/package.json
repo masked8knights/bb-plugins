@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Toolbox",
-    "description": "Manage MCP servers and safe, named CLI tools through one proxy.",
+    "description": "Manage MCP servers, raw CLI sources, and optional typed CLI tools through one proxy.",
     "branding": {
       "icon": "Wrench"
     },
