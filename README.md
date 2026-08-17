@@ -24,6 +24,9 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
   in the assistant-message text-selection menu; the reaction list is
   configurable in plugin settings.
+- [`bb-plugin-lapdog`](packages/bb-plugin-lapdog/) — auto-start the official
+  local Lapdog agent, capture BB Codex sessions locally, and open the official
+  Lapdog dashboard in BB.
 
 ## Development
 
