@@ -1100,6 +1100,18 @@ export class TraceIndexer {
     let firstUserTitle: string | null = reset || aggregate.title === basename(filePath) ? null : aggregate.title;
     let totalInput = reset ? null : aggregate.inputTokens;
     let totalOutput = reset ? null : aggregate.outputTokens;
+    // A file can be rewritten in place while it is being parsed and retain
+    // the same size and mtime. Keep a content snapshot at both sides of the
+    // parse so events and the persisted hash can never describe different
+    // versions of the file. If the bytes change, the transaction is rolled
+    // back and the caller requeues the path for a later stable read.
+    const parseStartHash = await fileFingerprint(filePath, fileStat.size, signal);
+    if (signal?.aborted) return false;
+    if (!parseStartHash) return false;
+    const parseStartStat = await stat(filePath);
+    if (parseStartStat.size !== fileStat.size || Math.round(parseStartStat.mtimeMs) !== mtimeKey) {
+      throw new Error("Trace file changed while preparing to index; retrying");
+    }
 
     this.db.exec("BEGIN");
     try {
@@ -1204,16 +1216,22 @@ export class TraceIndexer {
       if (reset) {
         this.db.prepare("DELETE FROM trace_events WHERE session_id = ? AND line_number >= ?").run(sessionId, indexedLines);
       }
-      let contentHash = await fileFingerprint(filePath, fileStat.size, signal);
+      const contentHash = await fileFingerprint(filePath, fileStat.size, signal);
       if (signal?.aborted) {
         this.db.exec("ROLLBACK");
         return false;
       }
       // The file may have been appended or rewritten while it was being
-      // parsed. Do not persist a hash for bytes that the transaction did not
-      // consume; the next watcher/safety scan must revisit it.
+      // parsed. Roll back so the next watcher/safety scan can read one stable
+      // version instead of pairing events with a different content hash.
       const finalStat = await stat(filePath);
-      if (finalStat.size !== fileStat.size || Math.round(finalStat.mtimeMs) !== mtimeKey) contentHash = null;
+      if (
+        finalStat.size !== fileStat.size ||
+        Math.round(finalStat.mtimeMs) !== mtimeKey ||
+        contentHash !== parseStartHash
+      ) {
+        throw new Error("Trace file changed while indexing; retrying");
+      }
       aggregate.title = firstUserTitle ?? aggregate.title;
       aggregate.startedAt = firstTimestamp;
       aggregate.updatedAt = lastTimestamp ?? fileStat.mtimeMs;
