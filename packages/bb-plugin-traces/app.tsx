@@ -8,6 +8,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, TraceArtifact, TraceEvent, TraceSession, TraceStatus } from "./server";
 import { listArtifactsInput, listSessionsInput } from "./src/rpc-input";
+import { conversationLabel, isConversationEvent } from "./src/view";
 
 const buttonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -191,17 +192,20 @@ function EventLedger({
   events,
   selectedId,
   onSelect,
+  mode,
 }: {
   events: TraceEvent[];
   selectedId: string | null;
   onSelect: (event: TraceEvent) => void;
+  mode: "conversation" | "all";
 }) {
-  if (!events.length) {
-    return <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">No indexed events in this session yet.</div>;
+  const visibleEvents = mode === "conversation" ? events.filter(isConversationEvent) : events;
+  if (!visibleEvents.length) {
+    return <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">{mode === "conversation" ? "No user, assistant, or tool messages in this session yet." : "No indexed events in this session yet."}</div>;
   }
   return (
     <div className="min-h-0 overflow-auto rounded-md border border-border">
-      {events.map((event) => (
+      {visibleEvents.map((event) => (
         <button
           type="button"
           key={event.id}
@@ -215,6 +219,7 @@ function EventLedger({
         >
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
             <span className="w-12 shrink-0 font-mono">#{event.line}</span>
+            {mode === "conversation" ? <span className={"font-semibold " + kindClass(event.kind)}>{conversationLabel(event)}</span> : null}
             <span className={"font-medium " + kindClass(event.kind)}>{event.type}</span>
             <span className="ml-auto shrink-0">{formatClock(event.timestamp)}</span>
           </div>
@@ -222,7 +227,9 @@ function EventLedger({
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{event.title}</span>
             {event.durationMs !== null ? <span className="shrink-0 text-[10px] text-muted-foreground">{formatDuration(event.durationMs)}</span> : null}
           </div>
-          <div className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{shortText(event.summary)}</div>
+          <div className={mode === "conversation" ? "mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground" : "mt-1 line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground"}>
+            {mode === "conversation" ? event.summary : shortText(event.summary)}
+          </div>
           {event.inputTokens !== null || event.outputTokens !== null ? (
             <div className="mt-1 flex gap-3 text-[10px] text-muted-foreground">
               <span>in {formatTokens(event.inputTokens)}</span>
@@ -278,6 +285,7 @@ function SessionDetail({
   raw: string | null;
   onSelectEvent: (event: TraceEvent) => void;
 }) {
+  const [ledgerMode, setLedgerMode] = useState<"conversation" | "all">("conversation");
   if (!session) {
     return (
       <div className="flex min-h-[20rem] flex-1 items-center justify-center p-8 text-center lg:min-h-0">
@@ -288,6 +296,7 @@ function SessionDetail({
       </div>
     );
   }
+  const conversationCount = events.filter(isConversationEvent).length;
   return (
     <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3 overflow-auto p-3 lg:min-h-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -315,7 +324,18 @@ function SessionDetail({
       </div>
       <TimelineOverview events={events} />
       {totalEvents > events.length ? <div className="text-[11px] text-muted-foreground">Showing the first {events.length} of {totalEvents} indexed events.</div> : null}
-      <EventLedger events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-medium text-foreground">{ledgerMode === "conversation" ? "Conversation" : "All events"}</div>
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5" aria-label="Event view">
+          <button type="button" className={ledgerMode === "conversation" ? primaryButtonClass : buttonClass} onClick={() => setLedgerMode("conversation")}>
+            Messages & tools{conversationCount ? " · " + conversationCount : ""}
+          </button>
+          <button type="button" className={ledgerMode === "all" ? primaryButtonClass : buttonClass} onClick={() => setLedgerMode("all")}>
+            All events
+          </button>
+        </div>
+      </div>
+      <EventLedger events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} mode={ledgerMode} />
       <SessionInspector event={selectedEvent} raw={raw} />
     </div>
   );
