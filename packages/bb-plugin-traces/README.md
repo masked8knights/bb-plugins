@@ -28,9 +28,9 @@ payload previews; the source files remain the complete record.
 ## UI model
 
 The explorer borrows the useful interaction model from DeepSeek Harness's
-open-source trajectory UI: a source-filterable session ledger, timing overview,
-nested tool rows, live-index state, and a payload inspector. The Artifacts tab
-is a separate collection of planning and context files; sessions are the model,
-message, and tool telemetry timeline.
+open-source trajectory UI: a source-filterable session ledger, compact single-line
+rows, timing overview, nested tool rows, live-index state, and a payload inspector.
+The collection is intentionally focused on model, message, and tool telemetry;
+opening a session takes you to its full trajectory view.
 
 Reference: https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/client/ui-trajectory

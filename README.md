@@ -25,8 +25,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   in the assistant-message text-selection menu; the reaction list is
   configurable in plugin settings.
 - [`bb-plugin-traces`](packages/bb-plugin-traces/) — index local Codex, Claude,
-  Pi, OMP, and DeepSeek Harness sessions plus decision artifacts in a private,
-  searchable trajectory explorer.
+  Pi, OMP, and DeepSeek Harness sessions in a private, searchable trajectory
+  explorer.
 
 ## Development
 

@@ -1,0 +1,183 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import type { TraceEvent, TraceSession, TraceStatus } from "../server";
+
+const app = await loadPluginApp(() => import("../app"));
+const panel = app.navPanels[0]!;
+
+const status: TraceStatus = {
+  localOnly: true,
+  state: "idle",
+  sessions: 2,
+  events: 4,
+  artifacts: 1,
+  bytes: 4_096,
+  lastScanAt: 1_000,
+  lastError: null,
+  sources: [
+    {
+      id: "dsh-sessions",
+      source: "dsh",
+      label: "DeepSeek Harness sessions",
+      path: "/tmp/dsh",
+      kind: "session",
+      format: "zstd",
+      exists: true,
+      fileCount: 1,
+      byteCount: 2_048,
+      lastScanAt: 1_000,
+      error: null,
+    },
+    {
+      id: "codex-sessions",
+      source: "codex",
+      label: "Codex sessions",
+      path: "/tmp/codex",
+      kind: "session",
+      format: "jsonl",
+      exists: true,
+      fileCount: 1,
+      byteCount: 2_048,
+      lastScanAt: 1_000,
+      error: null,
+    },
+  ],
+};
+
+const session: TraceSession = {
+  id: "dsh:session/one",
+  source: "dsh",
+  title: "Inspect trace",
+  filePath: "/tmp/dsh/session.jsonl.zstd",
+  model: "deepseek-v4-flash",
+  cwd: "/tmp/workspace",
+  startedAt: 1_000,
+  updatedAt: 2_000,
+  eventCount: 4,
+  userCount: 1,
+  assistantCount: 1,
+  toolCount: 1,
+  errorCount: 0,
+  inputTokens: 120,
+  outputTokens: 80,
+  durationMs: 2_000,
+  status: "completed",
+  fileSizeBytes: 2_048,
+};
+
+const event = (value: Partial<TraceEvent> & Pick<TraceEvent, "id" | "line" | "type" | "kind" | "title" | "summary">): TraceEvent => ({
+  sessionId: session.id,
+  role: null,
+  timestamp: 1_000,
+  durationMs: null,
+  inputTokens: null,
+  outputTokens: null,
+  usageIsTotal: false,
+  turn: 1,
+  step: null,
+  depth: 0,
+  model: session.model,
+  cwd: session.cwd,
+  rawJson: JSON.stringify({ type: value.type, text: value.summary }),
+  rawTruncated: false,
+  ...value,
+});
+
+const userEvent = event({ id: "event-user", line: 1, type: "user/message", kind: "message", role: "user", title: "User", summary: "Inspect the local trace" });
+const assistantEvent = event({ id: "event-assistant", line: 2, type: "assistant/message", kind: "message", role: "assistant", title: "Assistant", summary: "I found the trace." });
+const toolEvent = event({ id: "event-tool", line: 3, type: "tool/call", kind: "tool", title: "bash", summary: "pwd", depth: 1 });
+
+function commonRpc(overrides: Record<string, unknown> = {}) {
+  return {
+    status: () => status,
+    listSessions: () => ({ sessions: [session], total: 1 }),
+    getSession: () => ({ session, events: [userEvent, assistantEvent, toolEvent], totalEvents: 3 }),
+    getEventRaw: ({ id }: { id: string }) => ({ raw: `raw:${id}`, truncated: false }),
+    ...overrides,
+  };
+}
+
+afterEach(() => cleanup());
+
+describe("Traces app interactions", () => {
+  it("filters, sorts, loads another session page, and encodes a session deep link", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: commonRpc({
+        listSessions: (input: Record<string, unknown>) => {
+          calls.push(input);
+          return { sessions: [session], total: input.offset === 0 ? 2 : 2 };
+        },
+      }) as never,
+    });
+
+    await slot.findByRole("button", { name: /Inspect trace/ });
+    expect(slot.getByRole("textbox", { name: "Search local sessions" })).toHaveProperty("maxLength", 500);
+
+    fireEvent.change(slot.getByRole("textbox", { name: "Search local sessions" }), { target: { value: "local trace" } });
+    await waitFor(() => expect(calls.some((input) => input.query === "local trace")).toBe(true));
+
+    fireEvent.click(slot.getByRole("button", { name: "DeepSeek" }));
+    await waitFor(() => expect(calls.some((input) => input.source === "dsh")).toBe(true));
+
+    fireEvent.change(slot.getByRole("combobox", { name: "Sort sessions" }), { target: { value: "events" } });
+    await waitFor(() => expect(calls.some((input) => input.sort === "events")).toBe(true));
+
+    fireEvent.click(slot.getByRole("button", { name: /Load more/ }));
+    await waitFor(() => expect(calls.some((input) => input.offset === 1)).toBe(true));
+
+    fireEvent.click(slot.getByRole("button", { name: /Inspect trace/ }));
+    expect(slot.inspection.navigateCalls).toContainEqual({
+      method: "toPluginPanel",
+      path: "traces",
+      options: { subPath: "session/dsh%3Asession%2Fone" },
+    });
+  });
+
+  it("renders the trajectory, selects events, switches inspector tabs, and appends event pages", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const slot = renderSlot(panel, { subPath: "session/dsh%3Asession%2Fone" }, {
+      rpc: commonRpc({
+        getSession: (input: Record<string, unknown>) => {
+          calls.push(input);
+          return input.offset === 0
+            ? { session, events: [userEvent, assistantEvent], totalEvents: 3 }
+            : { session, events: [toolEvent], totalEvents: 3 };
+        },
+      }) as never,
+    });
+
+    await slot.findByLabelText("Trajectory event ledger");
+    expect(slot.getAllByRole("button", { name: "Select USER event 1" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(slot.getAllByRole("button", { name: "Select USER event 1" })[0]!);
+    await slot.findByRole("complementary", { name: "Selected event inspector" });
+    fireEvent.click(slot.getByRole("button", { name: "Raw" }));
+    await slot.findByText("raw:event-user");
+
+    fireEvent.click(slot.getByRole("button", { name: "Load more events" }));
+    await waitFor(() => expect(calls.some((input) => input.offset === 2)).toBe(true));
+    await slot.findByText(/pwd/);
+
+    fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
+    await slot.findByRole("button", { name: "Payload" });
+    fireEvent.click(slot.getByRole("button", { name: "Result" }));
+    expect(slot.getByRole("complementary", { name: "Selected event inspector" })).toBeTruthy();
+  });
+
+  it("shows a useful missing-session state and keeps the collection focused on sessions", async () => {
+    const missing = renderSlot(panel, { subPath: "session/missing" }, {
+      rpc: commonRpc({ getSession: () => ({ session: null, events: [], totalEvents: 0 }) }) as never,
+    });
+    await missing.findByText("Session not found");
+    expect(missing.getByRole("button", { name: /Back to sessions/ })).toBeTruthy();
+    missing.unmount();
+
+    const collection = renderSlot(panel, { subPath: "artifacts" }, { rpc: commonRpc() as never });
+    await collection.findByRole("button", { name: /Inspect trace/ });
+    expect(collection.queryByRole("button", { name: "Artifacts" })).toBeNull();
+    expect(collection.queryByText("Plans, checkpoints, and context files")).toBeNull();
+  });
+});

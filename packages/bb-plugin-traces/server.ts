@@ -13,6 +13,7 @@ import {
   type SessionSummary,
   type TraceSourceId,
 } from "./src/indexer";
+import { shouldScanAfterSettingsChange } from "./src/settings";
 
 const rootSchema = z.object({
   id: z.string(),
@@ -307,19 +308,15 @@ export default async function plugin(bb: BbPluginApi) {
       return indexer.rawEvent(id);
     },
     async rescan() {
-      scanRequested = true;
+      scanRequested = false;
       await scanNow();
       return status();
     },
   });
 
-  settings.onChange(() => {
-    void settings.get().then((current) => {
-      scanRequested = current.autoIndex;
-      publish();
-    }).catch((error) => {
-      lastError = errorText(error);
-    });
+  settings.onChange((next, previous) => {
+    scanRequested = shouldScanAfterSettingsChange(next, previous);
+    publish();
   });
 
   bb.background.service("indexer", {

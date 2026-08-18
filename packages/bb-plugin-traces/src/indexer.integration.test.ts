@@ -17,6 +17,7 @@ describe("TraceIndexer", () => {
   it("does not treat a home-directory host cwd as a workspace root", () => {
     expect(defaultArtifactRoots("/Users/tester", "/Users/tester").map((root) => root.id)).toEqual([
       "bb-thread-storage",
+      "bb-personal-workspaces",
     ]);
     expect(defaultArtifactRoots("/Users/tester", "/Users/tester/project").map((root) => root.id)).toContain("current-workspace");
   });

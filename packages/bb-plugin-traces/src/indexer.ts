@@ -451,6 +451,7 @@ export function defaultSessionRoots(home = homedir()): RootSpec[] {
 export function defaultArtifactRoots(home = homedir(), cwd = process.env.BB_WORKSPACE_PATH ?? process.cwd()): RootSpec[] {
   const roots: RootSpec[] = [
     { id: "bb-thread-storage", source: "artifacts", label: "BB thread storage", path: join(home, ".bb", "thread-storage"), kind: "artifact" },
+    { id: "bb-personal-workspaces", source: "artifacts", label: "BB personal workspaces", path: join(home, ".bb", "personal-workspaces"), kind: "artifact" },
   ];
   // The plugin host may start with the user's home directory as cwd. Never
   // interpret that as the current project: scanning a home directory makes a
