@@ -96,7 +96,7 @@ function completedCount(checklist: Checklist): number {
 }
 
 function LoadingState() {
-  return <div className="p-5 text-sm text-muted-foreground">Loading Agent Checklist…</div>;
+  return <div className="p-5 text-sm text-muted-foreground">Loading Checklist…</div>;
 }
 
 function ErrorNotice({ message }: { message: string }) {
@@ -130,15 +130,15 @@ function AgentChecklistPicker({
     <div className="flex items-center gap-2">
       {templates.length === 0 ? (
         <>
-          <span className="min-w-0 flex-1 text-sm text-muted-foreground">No saved Agent Checklists.</span>
+          <span className="min-w-0 flex-1 text-sm text-muted-foreground">No saved Checklists.</span>
           <button type="button" className={buttonClass} onClick={() => void createChecklist()}>
-            New Agent Checklist
+            New Checklist
           </button>
         </>
       ) : (
         <>
           <label className="sr-only" htmlFor="agent-checklist-picker">
-            Agent Checklist
+            Checklist
           </label>
           <select
             id="agent-checklist-picker"
@@ -151,7 +151,7 @@ function AgentChecklistPicker({
             }}
           >
             <option value="" disabled>
-              Select an Agent Checklist…
+              Select a checklist…
             </option>
             {templates.map((template) => (
               <option key={template.id} value={template.id}>
@@ -209,7 +209,7 @@ function blankTemplateDraft(): TemplateDraft {
   return {
     templateId: null,
     expectedUpdatedAt: null,
-    name: "New agent checklist",
+    name: "New checklist",
     description: "",
     defaultMode: "automatic",
     steps: [newDraftStep()],
@@ -394,7 +394,7 @@ function TemplateEditor({
     if (
       !template ||
       draft.expectedUpdatedAt === null ||
-      !window.confirm(`Delete Agent Checklist “${template.name}”?`)
+      !window.confirm(`Delete Checklist “${template.name}”?`)
     ) return;
     setDeleting(true);
     setError(null);
@@ -420,12 +420,12 @@ function TemplateEditor({
           disabled={editorBusy}
           onClick={() => navigate.toPluginPanel("checklists", { subPath: "", replace: true })}
         >
-          Back to Agent Checklists
+          Back to Checklists
         </button>
 
         <header>
           <h1 className="text-lg font-semibold text-foreground">
-            {draft.templateId ? "Edit Agent Checklist" : "New Agent Checklist"}
+            {draft.templateId ? "Edit Checklist" : "New Checklist"}
           </h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
             Define the steps the agent must follow and update as it works.
@@ -580,7 +580,7 @@ function TemplateEditor({
 
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <button type="submit" className={primaryButtonClass} disabled={editorBusy}>
-              {saving ? "Saving…" : "Save Agent Checklist"}
+              {saving ? "Saving…" : "Save Checklist"}
             </button>
             <button
               type="button"
@@ -597,7 +597,7 @@ function TemplateEditor({
                 disabled={editorBusy}
                 onClick={() => void deleteTemplate()}
               >
-                {deleting ? "Deleting…" : "Delete Agent Checklist"}
+                {deleting ? "Deleting…" : "Delete Checklist"}
               </button>
             ) : null}
           </div>
@@ -645,7 +645,7 @@ function TemplateCollectionRow({
         className={`${iconButtonClass} text-destructive hover:text-destructive`}
         disabled={disabled}
         aria-label={`Delete ${template.name}`}
-        title="Delete Agent Checklist"
+        title="Delete Checklist"
         onClick={onDelete}
       >
         <span aria-hidden="true" className="text-lg leading-none">×</span>
@@ -693,7 +693,7 @@ function TemplateLoadFailure({
             Retry
           </button>
           <button type="button" className={quietButtonClass} onClick={onBack}>
-            Back to Agent Checklists
+            Back to Checklists
           </button>
         </div>
       </div>
@@ -762,7 +762,7 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
   };
 
   const deleteTemplate = async (template: ChecklistTemplate) => {
-    if (!window.confirm(`Delete Agent Checklist “${template.name}”?`)) return;
+    if (!window.confirm(`Delete Checklist “${template.name}”?`)) return;
     setDeletingId(template.id);
     setActionError(null);
     try {
@@ -816,13 +816,13 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
       return (
         <div className="min-h-full bg-background p-4 md:p-6">
           <div className="mx-auto w-full max-w-3xl space-y-4">
-            <ErrorNotice message="Agent Checklist not found." />
+            <ErrorNotice message="Checklist not found." />
             <button
               type="button"
               className={buttonClass}
               onClick={() => navigate.toPluginPanel("checklists", { subPath: "", replace: true })}
             >
-              Back to Agent Checklists
+              Back to Checklists
             </button>
           </div>
         </div>
@@ -836,13 +836,13 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
       <div className="mx-auto w-full max-w-4xl space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-lg font-semibold text-foreground">Your Agent Checklists</h1>
+            <h1 className="text-lg font-semibold text-foreground">Your Checklists</h1>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
               Saved instructions the agent can follow and update while it works.
             </p>
           </div>
           <button type="button" className={primaryButtonClass} onClick={() => navigate.toPluginPanel("checklists", { subPath: "template/new" })}>
-            New Agent Checklist
+            New Checklist
           </button>
         </header>
 
@@ -850,13 +850,13 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
 
         {templates.length === 0 ? (
           <div className="rounded-md bg-surface-recessed/40 px-4 py-6">
-            <p className="text-sm font-medium text-foreground">No Agent Checklists yet</p>
+            <p className="text-sm font-medium text-foreground">No Checklists yet</p>
             <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">
               Create one to give the agent a durable set of steps for a conversation.
             </p>
           </div>
         ) : (
-          <section aria-label="Saved Agent Checklists" className="space-y-1">
+          <section aria-label="Saved Checklists" className="space-y-1">
             {templates.map((template) => (
               <TemplateCollectionRow
                 key={template.id}
@@ -993,7 +993,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
     if (
       checklist.status !== "completed" &&
       !window.confirm(
-        `Close Agent Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
+        `Close Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
       )
     ) {
       return;
@@ -1003,7 +1003,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
   };
 
   const detach = async () => {
-    if (!checklist || !window.confirm(`Detach Agent Checklist “${checklist.name}”?`)) return;
+    if (!checklist || !window.confirm(`Detach Checklist “${checklist.name}”?`)) return;
     const result = await mutate(() => rpc.call("detach", { checklistId: checklist.id }));
     if (result?.detached) setChecklist(null);
   };
@@ -1013,7 +1013,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
   if (error && !checklist) {
     return (
       <div className="space-y-4 p-5">
-        <ErrorNotice message={`Unable to load the Agent Checklist: ${error}`} />
+        <ErrorNotice message={`Unable to load the Checklist: ${error}`} />
         <button type="button" className={buttonClass} onClick={() => void refresh()}>
           Retry
         </button>
@@ -1024,9 +1024,9 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
   if (!checklist) {
     return (
       <div className="space-y-3 p-5">
-        <h2 className="text-base font-semibold text-foreground">No Agent Checklist attached</h2>
+        <h2 className="text-base font-semibold text-foreground">No Checklist attached</h2>
         <p className="text-sm leading-6 text-muted-foreground">
-          Use the composer’s <span className="font-medium text-foreground">+</span> menu and choose <span className="font-medium text-foreground">Agent checklist</span>.
+          Use the composer’s <span className="font-medium text-foreground">+</span> menu and choose <span className="font-medium text-foreground">Checklist</span>.
         </p>
       </div>
     );
@@ -1054,7 +1054,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
           <div
             className="h-1.5 overflow-hidden rounded-full bg-surface-recessed"
             role="progressbar"
-            aria-label="Agent Checklist progress"
+            aria-label="Checklist progress"
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={progress}
@@ -1067,7 +1067,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
 
         <section
           className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border px-4 py-2.5"
-          aria-label="Agent Checklist controls"
+          aria-label="Checklist controls"
           role="toolbar"
         >
           <span className={`shrink-0 text-xs font-medium ${statusTone(checklist.status)}`}>
@@ -1112,7 +1112,7 @@ function ThreadChecklistPanel({ threadId }: PluginThreadPanelProps) {
               className={`${quietButtonClass} text-destructive hover:text-destructive`}
               disabled={busy}
               title="Close lifecycle"
-              aria-label={`Close Agent Checklist lifecycle for ${checklist.name}`}
+              aria-label={`Close Checklist lifecycle for ${checklist.name}`}
               onClick={() => void closeLifecycle()}
             >
               Close lifecycle
@@ -1226,7 +1226,7 @@ function ComposerChecklistBanner() {
   if (error) {
     return (
       <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">
-        <span className="min-w-0 flex-1">Agent Checklist unavailable: {error}</span>
+        <span className="min-w-0 flex-1">Checklist unavailable: {error}</span>
         <button type="button" className={quietButtonClass} onClick={() => void refresh()}>Retry</button>
       </div>
     );
@@ -1238,8 +1238,8 @@ function ComposerChecklistBanner() {
   const total = checklist.steps.length;
   const nextStep = checklist.steps.find((step) => !step.checked) ?? null;
   const openDetails = () => {
-    if (!navigate.openThreadPanel({ actionId: "agent-checklist", title: `Agent Checklist · ${checklist.name}` })) {
-      toast.info("Open this conversation in the main view to inspect its Agent Checklist.");
+    if (!navigate.openThreadPanel({ actionId: "agent-checklist", title: `Checklist · ${checklist.name}` })) {
+      toast.info("Open this conversation in the main view to inspect its Checklist.");
     }
   };
 
@@ -1268,7 +1268,7 @@ function ComposerChecklistBanner() {
     if (
       checklist.status !== "completed" &&
       !window.confirm(
-        `Close Agent Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
+        `Close Checklist “${checklist.name}”? The agent will stop continuing it, but its progress and notes will remain available.`,
       )
     ) {
       return;
@@ -1286,7 +1286,7 @@ function ComposerChecklistBanner() {
     <div
       className="mx-auto mb-2 w-full max-w-3xl rounded-md border border-border bg-surface-recessed/10 px-3 py-2.5"
       role="region"
-      aria-label="Agent Checklist status"
+      aria-label="Checklist status"
     >
       <div className="flex items-center gap-3">
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{checklist.name}</span>
@@ -1297,14 +1297,14 @@ function ComposerChecklistBanner() {
         ) : null}
         <span
           className={`shrink-0 text-xs ${statusTone(checklist.status)}`}
-          aria-label={`${completed} of ${total} Agent Checklist steps complete`}
+          aria-label={`${completed} of ${total} Checklist steps complete`}
         >
           {completed} of {total}
         </span>
         <button
           type="button"
           className={quietButtonClass}
-          aria-label={`Open Agent Checklist details for ${checklist.name}`}
+          aria-label={`Open Checklist details for ${checklist.name}`}
           onClick={openDetails}
         >
           Open
@@ -1313,7 +1313,7 @@ function ComposerChecklistBanner() {
           <button
             type="button"
             className={iconButtonClass}
-            aria-label={`Close Agent Checklist lifecycle for ${checklist.name}`}
+            aria-label={`Close Checklist lifecycle for ${checklist.name}`}
             title="Close lifecycle"
             disabled={actionBusy}
             onClick={closeLifecycle}
@@ -1325,7 +1325,7 @@ function ComposerChecklistBanner() {
       <div
         className="mt-2 h-1 overflow-hidden rounded-full bg-surface-recessed"
         role="progressbar"
-        aria-label="Agent Checklist progress"
+        aria-label="Checklist progress"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={total === 0 ? 0 : Math.round((completed / total) * 100)}
@@ -1406,22 +1406,22 @@ async function attachFromComposer(scope: PluginComposerScope) {
   try {
     const current = await callRpc("getForThread", { threadId: scope.threadId });
     if (current.checklist) {
-      toast.info("Detach the current Agent Checklist before attaching another.");
+      toast.info("Detach the current Checklist before attaching another.");
       return;
     }
     const picked = await callRpc("pickTemplate", { threadId: scope.threadId });
     if (!picked.templateId) return;
     await callRpc("attach", { threadId: scope.threadId, templateId: picked.templateId });
-    toast.success("Agent Checklist attached");
+    toast.success("Checklist attached");
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : "Unable to attach Agent Checklist");
+    toast.error(error instanceof Error ? error.message : "Unable to attach Checklist");
   }
 }
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "templates",
-    title: "Agent Checklists",
+    title: "Checklists",
     icon: "ClipboardCheck",
     path: "checklists",
     component: TemplateCatalog,
@@ -1429,7 +1429,7 @@ export default definePluginApp((app) => {
 
   app.slots.threadPanelAction({
     id: "agent-checklist",
-    title: "Agent Checklist",
+    title: "Checklist",
     icon: "ClipboardCheck",
     component: ThreadChecklistPanel,
   });
@@ -1445,9 +1445,9 @@ export default definePluginApp((app) => {
     plusMenu: [
       {
         id: "agent-checklist",
-        label: "Agent checklist",
+        label: "Checklist",
         icon: "ClipboardCheck",
-        description: "Attach an Agent Checklist to this conversation",
+        description: "Attach a checklist to this conversation",
         disabled: (view) => view.scope.kind !== "thread",
         run: ({ view }) => {
           void attachFromComposer(view.scope);

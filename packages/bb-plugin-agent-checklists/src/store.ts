@@ -213,7 +213,7 @@ export class ChecklistStore {
     steps: Array<{ title: string; description: string }>;
   }): ChecklistTemplate {
     if (input.templateId !== undefined && input.templateId !== null && !input.templateId.trim()) {
-      throw new Error("Agent Checklist definition ID cannot be empty");
+      throw new Error("Checklist definition ID cannot be empty");
     }
     const name = input.name.trim();
     const description = input.description.trim();
@@ -221,21 +221,21 @@ export class ChecklistStore {
       title: step.title.trim(),
       description: step.description.trim(),
     }));
-    if (!name) throw new Error("Agent Checklist name cannot be empty");
-    if (steps.length === 0) throw new Error("An Agent Checklist needs at least one step");
-    if (steps.some((step) => !step.title)) throw new Error("Every Agent Checklist step needs a title");
+    if (!name) throw new Error("Checklist name cannot be empty");
+    if (steps.length === 0) throw new Error("A Checklist needs at least one step");
+    if (steps.some((step) => !step.title)) throw new Error("Every Checklist step needs a title");
 
     const requestedTemplateId = input.templateId?.trim() || null;
     const templateId = requestedTemplateId ?? `custom-${randomUUID()}`;
     const existing = requestedTemplateId ? this.getTemplate(requestedTemplateId) : null;
     if (requestedTemplateId && !existing) {
-      throw new Error("Agent Checklist definition not found");
+      throw new Error("Checklist definition not found");
     }
     if (existing && input.expectedUpdatedAt === undefined) {
-      throw new Error("Agent Checklist revision is required for edits");
+      throw new Error("Checklist revision is required for edits");
     }
     if (existing && input.expectedUpdatedAt !== existing.updatedAt) {
-      throw new Error("Agent Checklist was changed elsewhere; reload before saving");
+      throw new Error("Checklist was changed elsewhere; reload before saving");
     }
 
     const now = existing ? Math.max(Date.now(), existing.updatedAt + 1) : Date.now();
@@ -254,7 +254,7 @@ export class ChecklistStore {
           )
           .run(name, description, input.defaultMode, now, templateId, input.expectedUpdatedAt);
         if (updated.changes !== 1) {
-          throw new Error("Agent Checklist was changed elsewhere; reload before saving");
+          throw new Error("Checklist was changed elsewhere; reload before saving");
         }
         this.db
           .prepare("DELETE FROM checklist_template_steps WHERE template_id = ?")
@@ -278,9 +278,9 @@ export class ChecklistStore {
 
   deleteTemplate(templateId: string, expectedUpdatedAt: number): void {
     const template = this.getTemplate(templateId);
-    if (!template) throw new Error("Agent Checklist definition not found");
+    if (!template) throw new Error("Checklist definition not found");
     if (template.updatedAt !== expectedUpdatedAt) {
-      throw new Error("Agent Checklist was changed elsewhere; reload before deleting");
+      throw new Error("Checklist was changed elsewhere; reload before deleting");
     }
     const deleted = this.db
       .prepare(
@@ -288,21 +288,21 @@ export class ChecklistStore {
       )
       .run(Date.now(), templateId, expectedUpdatedAt);
     if (deleted.changes !== 1) {
-      throw new Error("Agent Checklist was changed elsewhere; reload before deleting");
+      throw new Error("Checklist was changed elsewhere; reload before deleting");
     }
   }
 
   detachChecklist(checklistId: string): void {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     this.db.prepare("DELETE FROM checklists WHERE id = ?").run(checklistId);
   }
 
   closeChecklist(checklistId: string): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This Agent Checklist belongs to an unavailable thread");
+      throw new Error("This Checklist belongs to an unavailable thread");
     }
     if (current.status === "closed") return current;
 
@@ -384,7 +384,7 @@ export class ChecklistStore {
   ): Checklist {
     const existing = this.getChecklistForThread(threadId);
     if (existing) {
-      throw new Error("Detach the current Agent Checklist before attaching another");
+      throw new Error("Detach the current Checklist before attaching another");
     }
     const template = this.getTemplate(templateId);
     if (!template) throw new Error("Checklist template not found");
@@ -456,24 +456,24 @@ export class ChecklistStore {
     input: { continuationMode?: ContinuationMode; status?: UserSettableChecklistStatus },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This Agent Checklist belongs to an unavailable thread");
+      throw new Error("This Checklist belongs to an unavailable thread");
     }
     if (current.status === "closed") {
-      throw new Error("This Agent Checklist is closed");
+      throw new Error("This Checklist is closed");
     }
     if (
       input.status !== undefined &&
       !userSettableChecklistStatuses.includes(input.status)
     ) {
-      throw new Error("Invalid Agent Checklist status");
+      throw new Error("Invalid Checklist status");
     }
     if (current.status === "completed" && input.status !== undefined) {
-      throw new Error("A completed Agent Checklist cannot change status until a step is unchecked");
+      throw new Error("A completed Checklist cannot change status until a step is unchecked");
     }
     if (current.status === "limit_reached" && input.status !== undefined) {
-      throw new Error("Resume a limited Agent Checklist before changing its status");
+      throw new Error("Resume a limited Checklist before changing its status");
     }
     const nextStatus =
       input.status ??
@@ -516,17 +516,17 @@ export class ChecklistStore {
     input: { checked?: boolean; note?: string | null; evidence?: string | null },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This Agent Checklist belongs to an unavailable thread");
+      throw new Error("This Checklist belongs to an unavailable thread");
     }
     if (current.status === "closed") {
-      throw new Error("This Agent Checklist is closed");
+      throw new Error("This Checklist is closed");
     }
     const step = this.db
       .prepare("SELECT * FROM checklist_steps WHERE id = ? AND checklist_id = ?")
       .get(stepId, checklistId) as Row | undefined;
-    if (!step) throw new Error("Agent Checklist step not found");
+    if (!step) throw new Error("Checklist step not found");
     const now = Date.now();
     const currentChecked = integer(step.checked) === 1;
     const checked = input.checked === undefined ? currentChecked : input.checked;
@@ -547,26 +547,26 @@ export class ChecklistStore {
       )
       .run(checked ? 1 : 0, note, evidence, checkedAt, now, stepId, checklistId);
     const checklist = this.getChecklist(checklistId);
-    if (!checklist) throw new Error("Agent Checklist not found");
+    if (!checklist) throw new Error("Checklist not found");
     return this.reconcileCompletion(checklist);
   }
 
   addNote(checklistId: string, stepId: string | null, content: string): Checklist {
     const trimmed = content.trim();
-    if (!trimmed) throw new Error("Agent Checklist note cannot be empty");
+    if (!trimmed) throw new Error("Checklist note cannot be empty");
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This Agent Checklist belongs to an unavailable thread");
+      throw new Error("This Checklist belongs to an unavailable thread");
     }
     if (current.status === "closed") {
-      throw new Error("This Agent Checklist is closed");
+      throw new Error("This Checklist is closed");
     }
     if (stepId) {
       const step = this.db
         .prepare("SELECT id FROM checklist_steps WHERE id = ? AND checklist_id = ?")
         .get(stepId, checklistId);
-      if (!step) throw new Error("Agent Checklist step not found");
+      if (!step) throw new Error("Checklist step not found");
     }
     this.db
       .prepare(
@@ -587,27 +587,27 @@ export class ChecklistStore {
     },
   ): Checklist {
     const current = this.getChecklist(checklistId);
-    if (!current) throw new Error("Agent Checklist not found");
+    if (!current) throw new Error("Checklist not found");
     if (current.status === "orphaned") {
-      throw new Error("This Agent Checklist belongs to an unavailable thread");
+      throw new Error("This Checklist belongs to an unavailable thread");
     }
     if (current.status === "closed") {
-      throw new Error("This Agent Checklist is closed");
+      throw new Error("This Checklist is closed");
     }
     if (
       input.status !== undefined &&
       !userSettableChecklistStatuses.includes(input.status)
     ) {
-      throw new Error("Invalid Agent Checklist status");
+      throw new Error("Invalid Checklist status");
     }
     if (current.status === "limit_reached" && input.status !== undefined) {
-      throw new Error("Resume a limited Agent Checklist before changing its status");
+      throw new Error("Resume a limited Checklist before changing its status");
     }
 
     const step = input.stepId
       ? current.steps.find((candidate) => candidate.id === input.stepId)
       : undefined;
-    if (input.stepId && !step) throw new Error("Agent Checklist step not found");
+    if (input.stepId && !step) throw new Error("Checklist step not found");
 
     let noteContent: string | null = null;
     if (!input.stepId && (input.note !== undefined || input.evidence !== undefined)) {
@@ -616,7 +616,7 @@ export class ChecklistStore {
       noteContent = [note, evidence ? `Evidence: ${evidence}` : null]
         .filter(Boolean)
         .join("\n\n");
-      if (!noteContent) throw new Error("Agent Checklist note cannot be empty");
+      if (!noteContent) throw new Error("Checklist note cannot be empty");
     }
 
     const projectedSteps = step
@@ -637,7 +637,7 @@ export class ChecklistStore {
     const complete =
       projectedSteps.length > 0 && projectedSteps.every((candidate) => candidate.checked);
     if (complete && input.status !== undefined) {
-      throw new Error("A completed Agent Checklist cannot change status until a step is unchecked");
+      throw new Error("A completed Checklist cannot change status until a step is unchecked");
     }
     const nextStatus = complete
       ? "completed"
@@ -756,7 +756,7 @@ export class ChecklistStore {
     const current = this.getChecklist(checklistId);
     if (!current) throw new Error("Checklist not found");
     if (current.status !== "limit_reached") {
-      throw new Error("This Agent Checklist has not reached its continuation limit");
+      throw new Error("This Checklist has not reached its continuation limit");
     }
     if (!current.steps.some((step) => !step.checked)) {
       return this.reconcileCompletion(current);

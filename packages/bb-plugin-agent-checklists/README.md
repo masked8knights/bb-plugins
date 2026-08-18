@@ -1,12 +1,12 @@
-# Agent Checklists
+# Checklists
 
-Agent Checklists gives a BB thread a persisted, structured set of steps for
+The Checklists plugin gives a BB thread a persisted, structured set of steps for
 the agent to follow. The agent reads and updates progress through native tools;
 the user gets a compact status summary and a read-only detail view.
 
 ## Library
 
-Open Agent Checklists in the workbench to create a saved Agent Checklist. Each
+Open Checklists in the workbench to create a saved Checklist. Each
 definition is user-owned and can be edited, deleted, and reordered with drag
 and drop. There are no seeded definitions or protected built-ins.
 
@@ -15,9 +15,9 @@ the saved definition does not erase work already attached to a thread.
 
 ## Attach to a thread
 
-Use the composer `+` menu and choose **Agent checklist**. Select one of the
+Use the composer `+` menu and choose **Checklist**. Select one of the
 saved definitions in the picker. A thread can have one attachment at a time;
-detach the current Agent Checklist from its detail view before attaching a
+detach the current Checklist from its detail view before attaching a
 different one.
 
 The area above the composer shows the attached name, progress, and the next
@@ -42,12 +42,12 @@ to start a new run.
 - **Approval** — BB waits for the user to approve each continuation.
 - **Tracking only** — BB records progress without waking the agent.
 
-Every Agent Checklist has a configurable continuation limit. The structured
+Every Checklist has a configurable continuation limit. The structured
 checkbox state is the source of truth; notes and evidence are optional context.
 
 ## Agent tools
 
-- `agent_checklist_get` reads the Agent Checklist attached to the current
+- `agent_checklist_get` reads the Checklist attached to the current
   thread.
 - `agent_checklist_update` checks or unchecks an agent step, adds a note or
   evidence, or pauses continuation.

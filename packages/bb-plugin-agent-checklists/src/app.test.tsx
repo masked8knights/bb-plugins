@@ -7,7 +7,7 @@ const app = await loadPluginApp(() => import("../app"));
 
 const template = {
   id: "agent-release",
-  name: "Release Agent Checklist",
+  name: "Release Checklist",
   description: "Carry a release through validation.",
   defaultMode: "automatic" as const,
   createdAt: 1,
@@ -90,16 +90,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Agent Checklists app", () => {
+describe("Checklists app", () => {
   it("registers the library, inspector, composer picker, and summary", () => {
     expect(app.navPanels.map((panel) => panel.id)).toEqual(["templates"]);
+    expect(app.navPanels[0]?.title).toBe("Checklists");
     expect(app.threadPanelActions.map((action) => action.id)).toEqual(["agent-checklist"]);
+    expect(app.threadPanelActions[0]?.title).toBe("Checklist");
     expect(app.pendingInteractions.map((interaction) => interaction.id)).toEqual(["agent-checklist-picker"]);
     expect(app.composerCustomizations).toHaveLength(1);
     const customization = app.composerCustomizations[0]!;
     expect(customization.scopes).toEqual(["thread", "new-thread"]);
     expect(customization.plusMenu?.map((item) => item.label)).toEqual([
-      "Agent checklist",
+      "Checklist",
     ]);
     const item = customization.plusMenu![0]!;
     expect(typeof item.disabled).toBe("function");
@@ -127,15 +129,15 @@ describe("Agent Checklists app", () => {
     ]);
   });
 
-  it("shows an empty user-owned library and opens a new Agent Checklist editor", async () => {
+  it("shows an empty user-owned library and opens a new Checklist editor", async () => {
     const slot = renderSlot(
       app.navPanels[0]!,
       { subPath: "" },
       { rpc: { listTemplates: () => ({ templates: [] }) } },
     );
 
-    await slot.findByText("No Agent Checklists yet");
-    fireEvent.click(slot.getByRole("button", { name: "New Agent Checklist" }));
+    await slot.findByText("No Checklists yet");
+    fireEvent.click(slot.getByRole("button", { name: "New Checklist" }));
     expect(slot.inspection.navigateCalls).toContainEqual({
       method: "toPluginPanel",
       path: "checklists",
@@ -150,9 +152,9 @@ describe("Agent Checklists app", () => {
       { rpc: { listTemplates: () => ({ templates: [template] }) } },
     );
 
-    await slot.findByRole("button", { name: "Edit Release Agent Checklist" });
-    expect(slot.getByRole("button", { name: "Delete Release Agent Checklist" })).toBeTruthy();
-    fireEvent.click(slot.getByRole("button", { name: "Edit Release Agent Checklist" }));
+    await slot.findByRole("button", { name: "Edit Release Checklist" });
+    expect(slot.getByRole("button", { name: "Delete Release Checklist" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Edit Release Checklist" }));
     expect(slot.inspection.navigateCalls).toContainEqual({
       method: "toPluginPanel",
       path: "checklists",
@@ -175,10 +177,10 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("button", { name: "Delete Release Agent Checklist" });
-    fireEvent.click(slot.getByRole("button", { name: "Delete Release Agent Checklist" }));
+    await slot.findByRole("button", { name: "Delete Release Checklist" });
+    fireEvent.click(slot.getByRole("button", { name: "Delete Release Checklist" }));
     await slot.findByText("Delete failed");
-    expect(slot.getByRole("button", { name: "Edit Release Agent Checklist" })).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Edit Release Checklist" })).toBeTruthy();
   });
 
   it("removes a definition after deleting it from the editor", async () => {
@@ -194,8 +196,8 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("button", { name: "Delete Agent Checklist" });
-    fireEvent.click(slot.getByRole("button", { name: "Delete Agent Checklist" }));
+    await slot.findByRole("button", { name: "Delete Checklist" });
+    fireEvent.click(slot.getByRole("button", { name: "Delete Checklist" }));
     await waitFor(() =>
       expect(slot.inspection.navigateCalls).toContainEqual({
         method: "toPluginPanel",
@@ -209,7 +211,7 @@ describe("Agent Checklists app", () => {
     });
   });
 
-  it("uses drag and drop to persist Agent Checklist step order", async () => {
+  it("uses drag and drop to persist Checklist step order", async () => {
     const saved = { ...template, updatedAt: 2 };
     const slot = renderSlot(
       app.navPanels[0]!,
@@ -255,7 +257,7 @@ describe("Agent Checklists app", () => {
     fireEvent.dragStart(handles[1]!, { dataTransfer });
     fireEvent.dragOver(firstRow);
     fireEvent.drop(firstRow, { dataTransfer });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
 
     await waitFor(() => expect(slot.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveTemplate" })));
     const saveCall = slot.rpcCalls.find((call) => call.method === "saveTemplate") as {
@@ -277,7 +279,7 @@ describe("Agent Checklists app", () => {
     );
 
     await slot.findByRole("textbox", { name: "Name" });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
     await waitFor(() => expect(slot.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveTemplate" })));
     const saveCall = slot.rpcCalls.find((call) => call.method === "saveTemplate") as {
       input: { expectedUpdatedAt: number };
@@ -306,10 +308,10 @@ describe("Agent Checklists app", () => {
     );
 
     const name = await slot.findByRole("textbox", { name: "Name" });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
     await waitFor(() => expect(saveCount).toBe(1));
     fireEvent.change(name, { target: { value: "Second edit" } });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
     await waitFor(() => expect(saveCount).toBe(2));
 
     const saveCalls = slot.rpcCalls.filter((call) => call.method === "saveTemplate") as Array<{
@@ -358,7 +360,7 @@ describe("Agent Checklists app", () => {
     fireEvent.pointerDown(handles[1]!, { pointerId: 7, pointerType: "touch" });
     fireEvent.pointerMove(handles[1]!, { pointerId: 7, pointerType: "touch", clientX: 1, clientY: 1 });
     fireEvent.pointerUp(handles[1]!, { pointerId: 7, pointerType: "touch", clientX: 1, clientY: 1 });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
 
     await waitFor(() => expect(slot.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveTemplate" })));
     const saveCall = slot.rpcCalls.find((call) => call.method === "saveTemplate") as {
@@ -388,7 +390,7 @@ describe("Agent Checklists app", () => {
     fireEvent.change(slot.getByRole("textbox", { name: "Agent step 1 title" }), {
       target: { value: "Start" },
     });
-    fireEvent.click(slot.getByRole("button", { name: "Save Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
     await waitFor(() => expect((name as HTMLInputElement).disabled).toBe(true));
     resolveSave?.(template);
   });
@@ -400,11 +402,11 @@ describe("Agent Checklists app", () => {
       { rpc: { getForThread: () => ({ checklist: attachedChecklist }) } },
     );
 
-    await slot.findByText("Release Agent Checklist");
+    await slot.findByText("Release Checklist");
     expect(slot.getByText("Prepare handoff")).toBeTruthy();
     expect(slot.getByText("The suite passed locally.")).toBeTruthy();
     expect(slot.getByText("Keep the handoff concise.")).toBeTruthy();
-    expect(slot.getByRole("toolbar", { name: "Agent Checklist controls" })).toBeTruthy();
+    expect(slot.getByRole("toolbar", { name: "Checklist controls" })).toBeTruthy();
     expect(slot.getByRole("button", { name: "Automatic" }).getAttribute("aria-pressed")).toBe("true");
     expect(slot.getByRole("button", { name: "Approval" }).getAttribute("aria-pressed")).toBe("false");
     expect(slot.getByRole("button", { name: "Tracking only" }).getAttribute("aria-pressed")).toBe("false");
@@ -441,7 +443,7 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("toolbar", { name: "Agent Checklist controls" });
+    await slot.findByRole("toolbar", { name: "Checklist controls" });
     fireEvent.click(slot.getByRole("button", { name: "Approval" }));
     await waitFor(() => expect(slot.getByRole("button", { name: "Approval" }).getAttribute("aria-pressed")).toBe("true"));
     expect(slot.rpcCalls).toContainEqual({
@@ -475,7 +477,7 @@ describe("Agent Checklists app", () => {
     expect(slot.getAllByRole("img", { name: /^Completed:/u })).toHaveLength(4);
     expect(slot.getByText("Run checks").className).toContain("line-through");
     expect(slot.queryByRole("button", { name: "Pause agent continuation" })).toBeNull();
-    expect(slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" })).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Close Checklist lifecycle for Release Checklist" })).toBeTruthy();
     expect((slot.getByRole("button", { name: "Automatic" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -496,14 +498,14 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" });
-    fireEvent.click(slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" }));
+    await slot.findByRole("button", { name: "Close Checklist lifecycle for Release Checklist" });
+    fireEvent.click(slot.getByRole("button", { name: "Close Checklist lifecycle for Release Checklist" }));
     await waitFor(() => expect(slot.getByText("Closed")).toBeTruthy());
     expect(slot.rpcCalls).toContainEqual({ method: "close", input: { checklistId: attachedChecklist.id } });
     expect(slot.getByRole("button", { name: "Detach" })).toBeTruthy();
   });
 
-  it("shows the approval action while an Agent Checklist is awaiting approval", async () => {
+  it("shows the approval action while a checklist is awaiting approval", async () => {
     const awaiting = {
       ...attachedChecklist,
       status: "awaiting_approval" as const,
@@ -565,18 +567,18 @@ describe("Agent Checklists app", () => {
 
     await slot.findByRole("button", { name: "Detach" });
     fireEvent.click(slot.getByRole("button", { name: "Detach" }));
-    await waitFor(() => expect(slot.getByText("No Agent Checklist attached")).toBeTruthy());
+    await waitFor(() => expect(slot.getByText("No Checklist attached")).toBeTruthy());
     expect(slot.rpcCalls).toContainEqual({ method: "detach", input: { checklistId: attachedChecklist.id } });
   });
 
-  it("explains how to attach when the thread has no Agent Checklist", async () => {
+  it("explains how to attach when the thread has no Checklist", async () => {
     const slot = renderSlot(
       app.threadPanelActions[0]!,
       { threadId: "thread-empty", params: null },
       { rpc: { getForThread: () => ({ checklist: null }) } },
     );
 
-    await slot.findByText("No Agent Checklist attached");
+    await slot.findByText("No Checklist attached");
     expect(slot.getByText(/composer’s/u)).toBeTruthy();
     expect(slot.rpcCalls.some((call) => call.method === "listTemplates")).toBe(false);
   });
@@ -593,16 +595,16 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("region", { name: "Agent Checklist status" });
+    await slot.findByRole("region", { name: "Checklist status" });
     expect(slot.getByText("Prepare handoff")).toBeTruthy();
     expect(slot.getByText("1 of 4")).toBeTruthy();
     expect(slot.getByText("Up next:")).toBeTruthy();
     expect(slot.queryByText("Run checks")).toBeNull();
     expect(slot.queryByRole("checkbox")).toBeNull();
-    fireEvent.click(slot.getByRole("button", { name: "Open Agent Checklist details for Release Agent Checklist" }));
+    fireEvent.click(slot.getByRole("button", { name: "Open Checklist details for Release Checklist" }));
     expect(slot.inspection.navigateCalls).toContainEqual({
       method: "openThreadPanel",
-      options: { actionId: "agent-checklist", title: "Agent Checklist · Release Agent Checklist" },
+      options: { actionId: "agent-checklist", title: "Checklist · Release Checklist" },
     });
   });
 
@@ -624,11 +626,11 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByRole("region", { name: "Agent Checklist status" });
+    await slot.findByRole("region", { name: "Checklist status" });
     fireEvent.click(
-      slot.getByRole("button", { name: "Close Agent Checklist lifecycle for Release Agent Checklist" }),
+      slot.getByRole("button", { name: "Close Checklist lifecycle for Release Checklist" }),
     );
-    await waitFor(() => expect(slot.queryByRole("region", { name: "Agent Checklist status" })).toBeNull());
+    await waitFor(() => expect(slot.queryByRole("region", { name: "Checklist status" })).toBeNull());
     expect(slot.rpcCalls).toContainEqual({ method: "close", input: { checklistId: completed.id } });
   });
 
@@ -665,7 +667,7 @@ describe("Agent Checklists app", () => {
       ...attachedChecklist,
       id: "checklist-2",
       threadId: "thread-2",
-      name: "Other Agent Checklist",
+      name: "Other Checklist",
     };
     const resumeResult = { ...paused, status: "active" as const };
     let resolveResume: ((value: typeof resumeResult) => void) | undefined;
@@ -687,21 +689,21 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    await slot.findByText("Release Agent Checklist");
+    await slot.findByText("Release Checklist");
     fireEvent.click(slot.getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(slot.rpcCalls).toContainEqual({
       method: "updateSettings",
       input: { checklistId: paused.id, status: "active" },
     }));
     await slot.behavior.setComposerScope({ kind: "thread", threadId: "thread-2" });
-    await slot.findByText("Other Agent Checklist");
+    await slot.findByText("Other Checklist");
 
     resolveResume?.(resumeResult);
-    await waitFor(() => expect(slot.getByText("Other Agent Checklist")).toBeTruthy());
-    expect(slot.queryByText("Release Agent Checklist")).toBeNull();
+    await waitFor(() => expect(slot.getByText("Other Checklist")).toBeTruthy());
+    expect(slot.queryByText("Release Checklist")).toBeNull();
   });
 
-  it("renders the composer attachment picker as a compact Agent Checklist dropdown", async () => {
+  it("renders the composer attachment picker as a compact Checklist dropdown", async () => {
     let submitted: unknown = null;
     const slot = renderSlot(
       app.pendingInteractions[0]!,
@@ -709,7 +711,7 @@ describe("Agent Checklists app", () => {
         interaction: {
           id: "interaction-1",
           threadId: "thread-1",
-          title: "Agent Checklist",
+          title: "Checklist",
           payload: {
             templates: [
               {
@@ -728,10 +730,10 @@ describe("Agent Checklists app", () => {
       },
     );
 
-    const picker = await slot.findByRole("combobox", { name: "Agent Checklist" });
-    expect(slot.getByRole("option", { name: "Release Agent Checklist" })).toBeTruthy();
+    const picker = await slot.findByRole("combobox", { name: "Checklist" });
+    expect(slot.getByRole("option", { name: "Release Checklist" })).toBeTruthy();
     expect(slot.queryByText("Choose the saved steps the agent should follow in this conversation.")).toBeNull();
-    expect(slot.queryByRole("button", { name: "Attach Release Agent Checklist" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Attach Release Checklist" })).toBeNull();
     fireEvent.change(picker, { target: { value: template.id } });
     await waitFor(() => expect(submitted).toEqual({ templateId: template.id }));
   });

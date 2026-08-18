@@ -8,8 +8,8 @@
     "bbPluginSdk": "^0.4.1"
   },
   "bb": {
-    "name": "Agent Checklists",
-    "description": "Persisted agent checklists with workbench progress and automatic continuation.",
+    "name": "Checklists",
+    "description": "Persisted checklists with workbench progress and automatic continuation.",
     "branding": {
       "icon": "ClipboardCheck"
     },

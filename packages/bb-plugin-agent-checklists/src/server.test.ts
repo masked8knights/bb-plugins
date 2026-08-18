@@ -68,8 +68,8 @@ afterEach(async () => {
   await Promise.all(hosts.splice(0).map((host) => host.harness.lifecycle.dispose()));
 });
 
-describe("Agent Checklists server", () => {
-  it("does not seed reusable Agent Checklists", async () => {
+describe("Checklists server", () => {
+  it("does not seed reusable Checklists", async () => {
     const host = createHost();
     await plugin(host.bb);
 
@@ -164,14 +164,14 @@ describe("Agent Checklists server", () => {
     expect(current.checklist.notes).toHaveLength(0);
   });
 
-  it("round trips the Agent Checklist picker and cancellation through the host interaction", async () => {
+  it("round trips the Checklist picker and cancellation through the host interaction", async () => {
     const host = await startHost();
     const picking = host.harness.callRpc("pickTemplate", { threadId: "thread-1" });
     await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
     const interaction = host.harness.pendingInteractions[0]!;
     expect(interaction).toMatchObject({
       rendererId: "agent-checklist-picker",
-      title: "Agent Checklist",
+      title: "Checklist",
       threadId: "thread-1",
     });
     host.harness.submitInteraction(interaction.id, { templateId: researchTemplateId(host) });
@@ -195,7 +195,7 @@ describe("Agent Checklists server", () => {
         threadId: "thread-1",
         templateId: researchTemplateId(host),
       }),
-    ).rejects.toThrow("Detach the current Agent Checklist before attaching another");
+    ).rejects.toThrow("Detach the current Checklist before attaching another");
 
     await expect(host.harness.callRpc("detach", { checklistId: first.id })).resolves.toEqual({
       detached: true,
@@ -240,7 +240,7 @@ describe("Agent Checklists server", () => {
     await host.harness.callRpc("close", { checklistId: attached.id });
 
     await expect(host.harness.callRpc("continue", { checklistId: attached.id })).rejects.toThrow(
-      "This Agent Checklist is closed",
+      "This Checklist is closed",
     );
   });
 
@@ -329,9 +329,9 @@ describe("Agent Checklists server", () => {
       input: [expect.objectContaining({ type: "text", visibility: "agent-only" })],
     });
     const notice = (sent?.input?.[0] as { text?: string } | undefined)?.text ?? "";
-    expect(notice).toContain("Agent Checklist continuation");
+    expect(notice).toContain("Checklist continuation");
     expect(notice).toContain(
-      'BB resumed this thread because the attached Agent Checklist "Software delivery" is still incomplete (0 of 8 steps complete; 8 remaining).',
+      'BB resumed this thread because the attached Checklist "Software delivery" is still incomplete (0 of 8 steps complete; 8 remaining).',
     );
     expect(notice).toContain('Continue the current task from the next unchecked step: "Delivery step 1".');
     expect(notice).toContain("Call agent_checklist_get");
@@ -1051,7 +1051,7 @@ describe("Agent Checklists server", () => {
         { stepId: lastStep.id, checked: true, status: "active" },
         { threadId: "thread-1", projectId: "project-1" },
       ),
-    ).rejects.toThrow("completed Agent Checklist");
+    ).rejects.toThrow("completed Checklist");
 
     const after = (await host.harness.callRpc("getForThread", { threadId: "thread-1" })) as {
       checklist: Checklist;

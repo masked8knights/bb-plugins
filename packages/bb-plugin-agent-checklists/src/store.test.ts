@@ -67,7 +67,7 @@ describe("ChecklistStore", () => {
     expect(researchId).not.toBe(softwareDeliveryId);
   });
 
-  it("creates and edits saved Agent Checklists", () => {
+  it("creates and edits saved Checklists", () => {
     const store = createStore();
     const custom = store.saveTemplate({
       name: "Release todo",
@@ -102,7 +102,7 @@ describe("ChecklistStore", () => {
       templateId: softwareDelivery.id,
       expectedUpdatedAt: softwareDelivery.updatedAt,
       name: "Edited delivery",
-      description: "A user-owned Agent Checklist.",
+      description: "A user-owned Checklist.",
       defaultMode: "tracking",
       steps: [{ title: "Do the work", description: "" }],
     });
@@ -153,13 +153,13 @@ describe("ChecklistStore", () => {
     };
 
     expect(() => store.saveTemplate({ ...input, templateId: "software-delivery" })).toThrow(
-      "Agent Checklist definition not found",
+      "Checklist definition not found",
     );
     expect(() => store.saveTemplate({ ...input, templateId: " ", expectedUpdatedAt: 0 })).toThrow(
       "definition ID cannot be empty",
     );
     expect(() => store.saveTemplate({ ...input, templateId: "missing-definition" })).toThrow(
-      "Agent Checklist definition not found",
+      "Checklist definition not found",
     );
     expect(store.listTemplates()).toEqual([]);
   });
@@ -262,7 +262,7 @@ describe("ChecklistStore", () => {
     const researchId = templateId(store, "Research to technical document");
     const first = store.createChecklist("thread-1", softwareDeliveryId, undefined, 8);
     expect(() => store.createChecklist("thread-1", researchId, undefined, 8)).toThrow(
-      "Detach the current Agent Checklist before attaching another",
+      "Detach the current Checklist before attaching another",
     );
     store.detachChecklist(first.id);
     expect(
@@ -344,10 +344,10 @@ describe("ChecklistStore", () => {
     store.completeContinuationClaim(checklist.id, first.lastReminderAt);
     expect(store.claimContinuation(checklist.id, false)?.status).toBe("limit_reached");
     expect(() => store.updateSettings(checklist.id, { status: "active" })).toThrow(
-      "Resume a limited Agent Checklist",
+      "Resume a limited Checklist",
     );
     expect(() => store.applyAgentUpdate(checklist.id, { status: "active" })).toThrow(
-      "Resume a limited Agent Checklist",
+      "Resume a limited Checklist",
     );
     expect(store.getChecklist(checklist.id)?.status).toBe("limit_reached");
   });
