@@ -20,10 +20,16 @@ By default the indexer checks:
 Additional JSONL roots and workspace roots can be added in plugin settings, one
 absolute path per line.
 
-The scanner is append-aware for JSONL and periodically refreshes while BB is
-running. Original files are never rewritten, uploaded, or forwarded. The
-plugin database contains normalized metadata, searchable summaries, and bounded
-payload previews; the source files remain the complete record.
+The scanner is append-aware for JSONL and keeps normalized sessions in a durable
+SQLite database. Completed files are skipped from the parser; a metadata-only
+touch is checked with a persisted SHA-256 fingerprint, and filesystem changes
+trigger a debounced refresh. A slower safety sweep hashes fingerprinted files
+without reparsing them, catching changes that the platform watcher cannot
+report. Files from an older index without a fingerprint are parsed once to
+establish a trustworthy baseline. Original files are never rewritten, uploaded,
+or forwarded. The plugin database contains normalized metadata, searchable
+summaries, and bounded payload previews; the source files remain the complete
+record.
 
 ## UI model
 

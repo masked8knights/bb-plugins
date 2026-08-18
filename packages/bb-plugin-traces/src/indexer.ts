@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -612,6 +612,50 @@ async function* fileLines(
   if (result.code !== 0) throw new Error(stderr.trim() || "zstd could not decompress " + filePath);
 }
 
+async function fileFingerprint(filePath: string, byteLength: number, signal?: AbortSignal): Promise<string | null> {
+  if (signal?.aborted) return null;
+  const hash = createHash("sha256");
+  if (byteLength === 0) return hash.digest("hex");
+  const stream = createReadStream(filePath, { start: 0, end: byteLength - 1 });
+  try {
+    for await (const chunk of stream) {
+      if (signal?.aborted) return null;
+      hash.update(chunk);
+    }
+    return signal?.aborted ? null : hash.digest("hex");
+  } finally {
+    stream.destroy();
+  }
+}
+
+async function fingerprintAndPreview(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<{ hash: string; preview: string } | null> {
+  if (signal?.aborted) return null;
+  const hash = createHash("sha256");
+  const previewChunks: Buffer[] = [];
+  let previewBytes = 0;
+  const stream = createReadStream(filePath);
+  try {
+    for await (const chunk of stream) {
+      if (signal?.aborted) return null;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      hash.update(bytes);
+      if (previewBytes < MAX_ARTIFACT_PREVIEW) {
+        const previewChunk = bytes.subarray(0, MAX_ARTIFACT_PREVIEW - previewBytes);
+        previewChunks.push(previewChunk);
+        previewBytes += previewChunk.length;
+      }
+    }
+    if (signal?.aborted) return null;
+    const preview = clip(Buffer.concat(previewChunks).toString("utf8").replace(/\0/g, ""), MAX_ARTIFACT_PREVIEW);
+    return { hash: hash.digest("hex"), preview };
+  } finally {
+    stream.destroy();
+  }
+}
+
 function sourceFromRow(row: DbRow): TraceSourceId {
   return String(row.source_id) as TraceSourceId;
 }
@@ -721,7 +765,7 @@ export function ensureSchema(db: SqliteDb): boolean {
       ");" +
       "CREATE TABLE IF NOT EXISTS trace_files (" +
       "path TEXT PRIMARY KEY, root_id TEXT NOT NULL, source_id TEXT NOT NULL, format TEXT NOT NULL, size_bytes INTEGER NOT NULL, " +
-      "mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0, indexed_lines INTEGER NOT NULL DEFAULT 0, parser_version INTEGER NOT NULL DEFAULT 1, " +
+      "mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0, indexed_lines INTEGER NOT NULL DEFAULT 0, parser_version INTEGER NOT NULL DEFAULT 1, content_hash TEXT, " +
       "session_id TEXT NOT NULL, indexed_at INTEGER NOT NULL, parse_error TEXT" +
       ");" +
       "CREATE TABLE IF NOT EXISTS trace_sessions (" +
@@ -738,7 +782,7 @@ export function ensureSchema(db: SqliteDb): boolean {
       ");" +
       "CREATE TABLE IF NOT EXISTS trace_artifacts (" +
       "id TEXT PRIMARY KEY, root_id TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, title TEXT NOT NULL, " +
-      "updated_at INTEGER NOT NULL, size_bytes INTEGER NOT NULL, preview TEXT NOT NULL" +
+      "updated_at INTEGER NOT NULL, size_bytes INTEGER NOT NULL, content_hash TEXT, preview TEXT NOT NULL" +
       ");" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);" +
@@ -746,10 +790,20 @@ export function ensureSchema(db: SqliteDb): boolean {
       "CREATE INDEX IF NOT EXISTS trace_events_timestamp ON trace_events(timestamp);" +
       "CREATE INDEX IF NOT EXISTS trace_artifacts_updated ON trace_artifacts(updated_at DESC);",
   );
-  try {
+  const traceFileColumns = new Set(
+    (db.prepare("PRAGMA table_info(trace_files)").all() as DbRow[]).map((row) => String(row.name)),
+  );
+  if (!traceFileColumns.has("parser_version")) {
     db.exec("ALTER TABLE trace_files ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 1;");
-  } catch {
-    // Existing databases already have the migration column.
+  }
+  if (!traceFileColumns.has("content_hash")) {
+    db.exec("ALTER TABLE trace_files ADD COLUMN content_hash TEXT;");
+  }
+  const artifactColumns = new Set(
+    (db.prepare("PRAGMA table_info(trace_artifacts)").all() as DbRow[]).map((row) => String(row.name)),
+  );
+  if (!artifactColumns.has("content_hash")) {
+    db.exec("ALTER TABLE trace_artifacts ADD COLUMN content_hash TEXT;");
   }
   try {
     db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS trace_event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content);");
@@ -770,7 +824,17 @@ export class TraceIndexer {
     this.log = log;
   }
 
-  async scan(roots: RootSpec[], artifactRoots: RootSpec[], signal?: AbortSignal): Promise<void> {
+  async scan(
+    roots: RootSpec[],
+    artifactRoots: RootSpec[],
+    signal?: AbortSignal,
+    options: {
+      forceFingerprintPaths?: ReadonlySet<string>;
+      forceFingerprintAll?: boolean;
+      failedSessionPaths?: Set<string>;
+    } = {},
+  ): Promise<boolean> {
+    let changed = false;
     for (const root of roots) this.ensureRoot(root);
     for (const root of artifactRoots) this.ensureRoot(root);
     this.pruneInactiveRoots(roots, artifactRoots);
@@ -778,9 +842,9 @@ export class TraceIndexer {
     const seenSessionFiles = new Set<string>();
     const unavailableSessionRoots = new Set<string>();
     for (const root of roots) {
-      if (signal?.aborted) return;
+      if (signal?.aborted) return changed;
       const discovery = await discoverSessionFilesWithStatus(root, signal);
-      if (signal?.aborted) return;
+      if (signal?.aborted) return changed;
       const files = discovery.files;
       let bytes = 0;
       let rootError = !discovery.accessible
@@ -789,13 +853,16 @@ export class TraceIndexer {
           ? "Discovery limit reached; cached rows were preserved"
           : null;
       for (const [fileIndex, filePath] of files.entries()) {
-        if (signal?.aborted) return;
+        if (signal?.aborted) return changed;
         if (fileIndex % 16 === 0) await yieldToEventLoop();
         seenSessionFiles.add(filePath);
         try {
           bytes += (await stat(filePath)).size;
-          await this.indexSessionFile(root, filePath, signal);
+          const forceFingerprintFromPath = options.forceFingerprintPaths?.has(filePath) === true;
+          const forceFingerprint = options.forceFingerprintAll === true || forceFingerprintFromPath;
+          changed = (await this.indexSessionFile(root, filePath, signal, forceFingerprint)) || changed;
         } catch (error) {
+          options.failedSessionPaths?.add(filePath);
           const message = error instanceof Error ? error.message : String(error);
           rootError = rootError ?? message;
           this.log("Could not index " + filePath + ": " + message);
@@ -812,9 +879,9 @@ export class TraceIndexer {
     const seenArtifacts = new Set<string>();
     const unavailableArtifactRoots = new Set<string>();
     for (const root of artifactRoots) {
-      if (signal?.aborted) return;
+      if (signal?.aborted) return changed;
       const discovery = await discoverArtifactFilesWithStatus(root, signal);
-      if (signal?.aborted) return;
+      if (signal?.aborted) return changed;
       const files = discovery.files;
       let bytes = 0;
       let rootError = !discovery.accessible
@@ -823,13 +890,13 @@ export class TraceIndexer {
           ? "Discovery limit reached; cached rows were preserved"
           : null;
       for (const [fileIndex, filePath] of files.entries()) {
-        if (signal?.aborted) return;
+        if (signal?.aborted) return changed;
         if (fileIndex % 16 === 0) await yieldToEventLoop();
         seenArtifacts.add(filePath);
         try {
           const fileStat = await stat(filePath);
           bytes += fileStat.size;
-          await this.indexArtifact(root, filePath, fileStat.mtimeMs, fileStat.size);
+          changed = (await this.indexArtifact(root, filePath, fileStat.mtimeMs, fileStat.size, options.forceFingerprintAll === true, signal)) || changed;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           rootError = rootError ?? message;
@@ -843,6 +910,7 @@ export class TraceIndexer {
       artifactRoots.filter((root) => !unavailableArtifactRoots.has(root.id)),
       seenArtifacts,
     );
+    return changed;
   }
 
   listSessions(input: { query?: string; source?: string; sort?: "updated" | "started" | "events" | "duration"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
@@ -965,7 +1033,12 @@ export class TraceIndexer {
     }));
   }
 
-  private async indexSessionFile(root: RootSpec, filePath: string, signal?: AbortSignal): Promise<void> {
+  private async indexSessionFile(
+    root: RootSpec,
+    filePath: string,
+    signal?: AbortSignal,
+    forceFingerprint = false,
+  ): Promise<boolean> {
     const fileStat = await stat(filePath);
     const existingFile = this.db.prepare("SELECT * FROM trace_files WHERE path = ?").get(filePath) as DbRow | undefined;
     const sessionId = String(existingFile?.session_id ?? sessionIdForPath(root.source as TraceSourceId, filePath));
@@ -974,29 +1047,49 @@ export class TraceIndexer {
     const format = root.format ?? "jsonl";
     const mtimeKey = Math.round(fileStat.mtimeMs);
     const existingMtime = numberValue(existingFile?.mtime_ms);
+    const existingSize = numberValue(existingFile?.size_bytes) ?? 0;
+    const existingIndexedBytes = numberValue(existingFile?.indexed_bytes) ?? 0;
     const existingParserVersion = numberValue(existingFile?.parser_version);
     const parserChanged = Boolean(existingFile) && existingParserVersion !== null && !COMPATIBLE_PARSER_VERSIONS.has(existingParserVersion);
-    const unchanged =
-      existingFile &&
-      !parserChanged &&
-      (numberValue(existingFile.size_bytes) ?? 0) === fileStat.size &&
-      existingMtime !== null &&
-      Math.round(existingMtime) === mtimeKey &&
-      (numberValue(existingFile.indexed_bytes) ?? 0) >= fileStat.size;
+    const sameSize = existingSize === fileStat.size;
+    const mtimeChanged = existingMtime === null || Math.round(existingMtime) !== mtimeKey;
+    const existingComplete = Boolean(existingFile) && !parserChanged && existingIndexedBytes >= existingSize;
+    const unchanged = existingComplete && sameSize && !mtimeChanged && !forceFingerprint;
     // A complete file does not need to be opened again until its size or mtime
     // changes. This is especially important for compressed JSONL, which cannot
     // be resumed at a byte offset and would otherwise be decompressed on every
     // background pass.
-    if (unchanged) return;
+    if (unchanged) return false;
+    const existingHash = stringValue(existingFile?.content_hash);
+    let existingPrefixMatches: boolean | null = null;
+    if (existingFile && !parserChanged && (mtimeChanged || forceFingerprint) && existingHash) {
+      const fingerprint = await fileFingerprint(filePath, existingSize, signal);
+      if (signal?.aborted) return false;
+      const currentStat = await stat(filePath);
+      existingPrefixMatches = currentStat.size >= existingSize && fingerprint === existingHash;
+      const metadataStillMatches = currentStat.size === fileStat.size && Math.round(currentStat.mtimeMs) === mtimeKey;
+      if (existingComplete && sameSize && metadataStillMatches && existingPrefixMatches) {
+        // A metadata-only touch does not represent a new parse. Persist the
+        // new mtime so the same file is not hashed on every safety sweep.
+        this.db.prepare("UPDATE trace_files SET mtime_ms = ? WHERE path = ?").run(mtimeKey, filePath);
+        return false;
+      }
+    } else if (existingFile && !parserChanged && (mtimeChanged || forceFingerprint) && !existingHash) {
+      // Rows from the pre-fingerprint schema cannot prove that a growing file
+      // is an append, or that the file was not rewritten before the first
+      // fingerprint sweep. Reparse once rather than risk retaining stale
+      // events; the replacement stores a hash for all later scans.
+      existingPrefixMatches = false;
+    }
     const reset =
       format === "zstd" ||
       !existingFile ||
-      (numberValue(existingFile.size_bytes) ?? 0) > fileStat.size ||
-      (numberValue(existingFile.indexed_bytes) ?? 0) > fileStat.size ||
+      existingSize > fileStat.size ||
+      existingIndexedBytes > fileStat.size ||
       parserChanged ||
-      ((numberValue(existingFile.size_bytes) ?? 0) === fileStat.size &&
-        (existingMtime === null || Math.round(existingMtime) !== mtimeKey));
-    const startByte = reset ? 0 : numberValue(existingFile?.indexed_bytes) ?? 0;
+      (sameSize && mtimeChanged) ||
+      (existingFile && !parserChanged && (mtimeChanged || forceFingerprint) && existingPrefixMatches === false);
+    const startByte = reset ? 0 : existingIndexedBytes;
     const startLine = reset ? 0 : numberValue(existingFile?.indexed_lines) ?? 0;
     let aggregate = reset ? emptySession(sessionId, root.source as TraceSourceId, filePath, fileStat.size) : current;
     let indexedBytes = startByte;
@@ -1011,7 +1104,8 @@ export class TraceIndexer {
     this.db.exec("BEGIN");
     try {
       if (reset) {
-        this.db.prepare("DELETE FROM trace_events WHERE session_id = ?").run(sessionId);
+        // Keep the old rows inside this transaction. A failed or cancelled
+        // replacement must leave the last complete session readable.
         if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
         aggregate = emptySession(sessionId, root.source as TraceSourceId, filePath, fileStat.size);
       }
@@ -1027,6 +1121,9 @@ export class TraceIndexer {
           "turn = excluded.turn, step = excluded.step, depth = excluded.depth, model = excluded.model, cwd = excluded.cwd, raw_json = excluded.raw_json, raw_truncated = excluded.raw_truncated",
       );
       const insertFts = this.ftsEnabled ? this.db.prepare("INSERT INTO trace_event_fts (event_id, session_id, content) VALUES (?, ?, ?)") : null;
+      const deleteFtsEvent = this.ftsEnabled && !reset
+        ? this.db.prepare("DELETE FROM trace_event_fts WHERE event_id = ? AND session_id = ?")
+        : null;
       for await (const line of fileLines(filePath, format, startByte, startLine, fileStat.size, signal)) {
         if (signal?.aborted) break;
         const relativeLine = line.line - startLine;
@@ -1036,6 +1133,11 @@ export class TraceIndexer {
         if (signal?.aborted) break;
         indexedBytes = line.endByte;
         indexedLines = line.line + 1;
+        if (reset) {
+          // Replacements are line-addressed. Remove the previous value before
+          // handling blank or malformed lines, then trim any old tail below.
+          this.db.prepare("DELETE FROM trace_events WHERE session_id = ? AND line_number = ?").run(sessionId, line.line);
+        }
         if (!line.text.trim()) continue;
         let parsed: unknown;
         try {
@@ -1070,6 +1172,7 @@ export class TraceIndexer {
           storedRaw.length < line.text.length ? 1 : 0,
         );
         if (this.ftsEnabled) {
+          deleteFtsEvent?.run(eventId, sessionId);
           insertFts?.run(eventId, sessionId, event.type + " " + event.title + " " + event.summary);
         }
         aggregate.eventCount += 1;
@@ -1094,6 +1197,23 @@ export class TraceIndexer {
           if (event.outputTokens !== null) totalOutput = (totalOutput ?? 0) + event.outputTokens;
         }
       }
+      if (signal?.aborted) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (reset) {
+        this.db.prepare("DELETE FROM trace_events WHERE session_id = ? AND line_number >= ?").run(sessionId, indexedLines);
+      }
+      let contentHash = await fileFingerprint(filePath, fileStat.size, signal);
+      if (signal?.aborted) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      // The file may have been appended or rewritten while it was being
+      // parsed. Do not persist a hash for bytes that the transaction did not
+      // consume; the next watcher/safety scan must revisit it.
+      const finalStat = await stat(filePath);
+      if (finalStat.size !== fileStat.size || Math.round(finalStat.mtimeMs) !== mtimeKey) contentHash = null;
       aggregate.title = firstUserTitle ?? aggregate.title;
       aggregate.startedAt = firstTimestamp;
       aggregate.updatedAt = lastTimestamp ?? fileStat.mtimeMs;
@@ -1132,10 +1252,11 @@ export class TraceIndexer {
         sessionId,
       );
       this.db.prepare(
-        "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines, parser_version, session_id, indexed_at, parse_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, source_id = excluded.source_id, format = excluded.format, size_bytes = excluded.size_bytes, mtime_ms = excluded.mtime_ms, indexed_bytes = excluded.indexed_bytes, indexed_lines = excluded.indexed_lines, parser_version = excluded.parser_version, session_id = excluded.session_id, indexed_at = excluded.indexed_at, parse_error = excluded.parse_error",
-      ).run(filePath, root.id, root.source, format, fileStat.size, mtimeKey, format === "zstd" ? fileStat.size : indexedBytes, indexedLines, INDEXER_VERSION, sessionId, Date.now(), parseError);
+        "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines, parser_version, content_hash, session_id, indexed_at, parse_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, source_id = excluded.source_id, format = excluded.format, size_bytes = excluded.size_bytes, mtime_ms = excluded.mtime_ms, indexed_bytes = excluded.indexed_bytes, indexed_lines = excluded.indexed_lines, parser_version = excluded.parser_version, content_hash = excluded.content_hash, session_id = excluded.session_id, indexed_at = excluded.indexed_at, parse_error = excluded.parse_error",
+      ).run(filePath, root.id, root.source, format, fileStat.size, mtimeKey, format === "zstd" ? fileStat.size : indexedBytes, indexedLines, INDEXER_VERSION, contentHash, sessionId, Date.now(), parseError);
       this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       try {
         this.db.exec("ROLLBACK");
@@ -1146,13 +1267,29 @@ export class TraceIndexer {
     }
   }
 
-  private async indexArtifact(root: RootSpec, filePath: string, mtimeMs: number, sizeBytes: number): Promise<void> {
-    const preview = clip((await readFile(filePath, "utf8")).replace(/\0/g, ""), MAX_ARTIFACT_PREVIEW);
+  private async indexArtifact(
+    root: RootSpec,
+    filePath: string,
+    mtimeMs: number,
+    sizeBytes: number,
+    forceFingerprint = false,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const existing = this.db.prepare("SELECT root_id, updated_at, size_bytes, content_hash FROM trace_artifacts WHERE file_path = ?").get(filePath) as DbRow | undefined;
+    const sameMetadata = existing && numberValue(existing.updated_at) === mtimeMs && numberValue(existing.size_bytes) === sizeBytes;
+    const existingHash = stringValue(existing?.content_hash);
+    if (sameMetadata && existingHash && !forceFingerprint) return false;
+    const content = await fingerprintAndPreview(filePath, signal);
+    if (!content) return false;
+    if (sameMetadata && existingHash && content.hash === existingHash) return false;
+    const contentHash = content.hash;
+    const preview = content.preview;
     const id = createHash("sha1").update(filePath).digest("hex").slice(0, 24);
     this.db.prepare(
-      "INSERT INTO trace_artifacts (id, root_id, file_path, kind, title, updated_at, size_bytes, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(file_path) DO UPDATE SET root_id = excluded.root_id, kind = excluded.kind, title = excluded.title, updated_at = excluded.updated_at, size_bytes = excluded.size_bytes, preview = excluded.preview",
-    ).run(id, root.id, filePath, artifactKind(filePath), artifactTitle(filePath, preview), mtimeMs, sizeBytes, preview);
+      "INSERT INTO trace_artifacts (id, root_id, file_path, kind, title, updated_at, size_bytes, content_hash, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(file_path) DO UPDATE SET root_id = excluded.root_id, kind = excluded.kind, title = excluded.title, updated_at = excluded.updated_at, size_bytes = excluded.size_bytes, content_hash = excluded.content_hash, preview = excluded.preview",
+    ).run(id, root.id, filePath, artifactKind(filePath), artifactTitle(filePath, preview), mtimeMs, sizeBytes, contentHash, preview);
+    return true;
   }
 
   private updateRoot(root: RootSpec, fileCount: number, byteCount: number, error: string | null): void {

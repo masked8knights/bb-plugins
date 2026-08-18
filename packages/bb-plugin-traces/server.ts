@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { existsSync, watch, type FSWatcher } from "node:fs";
+import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -169,7 +171,7 @@ function errorText(error: unknown): string {
 
 function parseInterval(value: string): number {
   const parsed = Number(value.trim());
-  if (!Number.isFinite(parsed)) return 5_000;
+  if (!Number.isFinite(parsed)) return 60_000;
   return Math.min(60_000, Math.max(1_000, Math.round(parsed * 1_000)));
 }
 
@@ -204,9 +206,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     scanIntervalSeconds: {
       type: "string",
-      label: "Scan interval (seconds)",
-      description: "How often the local index checks append-only session files for new events.",
-      default: "5",
+      label: "Safety scan interval (seconds)",
+      description: "How often the local index performs a full discovery sweep. File changes trigger faster refreshes.",
+      default: "60",
     },
     additionalSessionRoots: {
       type: "string",
@@ -230,6 +232,14 @@ export default async function plugin(bb: BbPluginApi) {
   let lastError: string | null = null;
   let scanRequested = false;
   let activeScan: Promise<void> | null = null;
+  let autoIndexEnabled = true;
+  let rootWatchers: FSWatcher[] = [];
+  let watchedRootKey = "";
+  let watcherScanTimer: ReturnType<typeof setTimeout> | null = null;
+  let nextSafetyScanAt = 0;
+  let dirtySessionPaths = new Set<string>();
+  let forceFingerprintAll = false;
+  let watcherGeneration = 0;
 
   async function roots(): Promise<{ sessions: RootSpec[]; artifacts: RootSpec[] }> {
     const current = await settings.get();
@@ -244,6 +254,71 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish("traces", { type: "index-updated", at: Date.now() });
     } catch {
       // Realtime is an acceleration; the panel can always refetch durable state.
+    }
+  }
+
+  function closeRootWatchers(): void {
+    watcherGeneration += 1;
+    if (watcherScanTimer) {
+      clearTimeout(watcherScanTimer);
+      watcherScanTimer = null;
+    }
+    for (const watcher of rootWatchers) watcher.close();
+    rootWatchers = [];
+    watchedRootKey = "";
+  }
+
+  function requestScanFromWatcher(generation: number, rootPath: string, filename: string | Buffer | null): void {
+    if (generation !== watcherGeneration) return;
+    if (!autoIndexEnabled) return;
+    if (filename === null || String(filename).length === 0) {
+      forceFingerprintAll = true;
+    } else {
+      dirtySessionPaths.add(join(rootPath, String(filename)));
+    }
+    if (watcherScanTimer) clearTimeout(watcherScanTimer);
+    watcherScanTimer = setTimeout(() => {
+      watcherScanTimer = null;
+      if (autoIndexEnabled) scanRequested = true;
+    }, 250);
+  }
+
+  function configureRootWatchers(configured: { sessions: RootSpec[]; artifacts: RootSpec[] }): void {
+    if (!autoIndexEnabled) {
+      closeRootWatchers();
+      return;
+    }
+    // Session roots are the high-frequency source. Artifact roots can include
+    // a whole workspace tree, so they stay on the slower safety sweep.
+    const rootsToWatch = configured.sessions;
+    const key = rootsToWatch
+      .map((root) => root.kind + "\0" + root.path + "\0" + (existsSync(root.path) ? "1" : "0"))
+      .sort()
+      .join("\n");
+    if (key === watchedRootKey) return;
+    closeRootWatchers();
+    watchedRootKey = key;
+    const generation = watcherGeneration;
+    for (const root of rootsToWatch) {
+      if (!existsSync(root.path)) continue;
+      try {
+        const watcher = watch(root.path, { recursive: true }, (_eventType, filename) => requestScanFromWatcher(generation, root.path, filename));
+        watcher.on("error", (error) => {
+          if (generation !== watcherGeneration) return;
+          watcher.close();
+          if (watchedRootKey === key) {
+            watchedRootKey = "";
+            forceFingerprintAll = true;
+            scanRequested = true;
+          }
+          bb.log.warn("Trace watcher failed for " + root.path + ": " + errorText(error));
+        });
+        rootWatchers.push(watcher);
+      } catch (error) {
+        // Some platforms do not support recursive watchers. The safety sweep
+        // remains the fallback, and a later root existence change retries it.
+        bb.log.warn("Could not watch trace root " + root.path + ": " + errorText(error));
+      }
     }
   }
 
@@ -271,17 +346,41 @@ export default async function plugin(bb: BbPluginApi) {
       indexing = true;
       lastError = null;
       let changed = false;
+      let drainedDirtySessionPaths = new Set<string>();
+      let drainedForceFingerprintAll = false;
+      let scanDrainedWatcherState = false;
+      let scanCompleted = false;
+      const restoreWatcherState = () => {
+        if (!scanDrainedWatcherState || scanCompleted) return;
+        if (drainedForceFingerprintAll) forceFingerprintAll = true;
+        for (const path of drainedDirtySessionPaths) dirtySessionPaths.add(path);
+      };
       try {
         const configured = await roots();
         const before = indexer.stats(null, false, null);
-        await indexer.scan(configured.sessions, configured.artifacts, signal);
+        drainedDirtySessionPaths = dirtySessionPaths;
+        drainedForceFingerprintAll = forceFingerprintAll;
+        const failedSessionPaths = new Set<string>();
+        dirtySessionPaths = new Set();
+        forceFingerprintAll = false;
+        scanDrainedWatcherState = true;
+        changed = (await indexer.scan(configured.sessions, configured.artifacts, signal, {
+          forceFingerprintPaths: drainedDirtySessionPaths,
+          forceFingerprintAll: drainedForceFingerprintAll,
+          failedSessionPaths,
+        })) || changed;
+        for (const path of failedSessionPaths) dirtySessionPaths.add(path);
+        changed = changed || failedSessionPaths.size > 0;
+        scanCompleted = !signal?.aborted;
         const after = indexer.stats(null, false, null);
-        changed = before.sessions !== after.sessions || before.events !== after.events || before.artifacts !== after.artifacts || before.bytes !== after.bytes;
+        changed = changed || before.sessions !== after.sessions || before.events !== after.events || before.artifacts !== after.artifacts || before.bytes !== after.bytes;
         if (!signal?.aborted) lastScanAt = Date.now();
       } catch (error) {
+        restoreWatcherState();
         lastError = errorText(error);
         bb.log.warn("Trace index scan failed: " + lastError);
       } finally {
+        restoreWatcherState();
         indexing = false;
         activeScan = null;
         if (changed || lastError) publish();
@@ -308,40 +407,66 @@ export default async function plugin(bb: BbPluginApi) {
       return indexer.rawEvent(id);
     },
     async rescan() {
+      const scanAlreadyInFlight = activeScan !== null;
       scanRequested = false;
+      forceFingerprintAll = true;
       await scanNow();
+      if (scanAlreadyInFlight) {
+        forceFingerprintAll = true;
+        scanRequested = true;
+      }
+      const current = await settings.get();
+      nextSafetyScanAt = Date.now() + parseInterval(current.scanIntervalSeconds);
       return status();
     },
   });
 
   settings.onChange((next, previous) => {
-    scanRequested = shouldScanAfterSettingsChange(next, previous);
+    autoIndexEnabled = next.autoIndex;
+    const rootsChanged = next.additionalSessionRoots !== previous.additionalSessionRoots || next.workspaceRoots !== previous.workspaceRoots;
+    if (!next.autoIndex && !rootsChanged) scanRequested = false;
+    else scanRequested = scanRequested || shouldScanAfterSettingsChange(next, previous);
+    if (next.scanIntervalSeconds !== previous.scanIntervalSeconds) nextSafetyScanAt = 0;
+    if (!next.autoIndex) closeRootWatchers();
     publish();
   });
 
   bb.background.service("indexer", {
     async start(signal) {
-      let nextScanAt = 0;
-      while (!signal.aborted) {
-        try {
-          const current = await settings.get();
-          if (current.autoIndex && Date.now() >= nextScanAt) scanRequested = true;
-          if (scanRequested) {
-            scanRequested = false;
-            await scanNow(signal);
-            nextScanAt = Date.now() + parseInterval(current.scanIntervalSeconds);
+      try {
+        while (!signal.aborted) {
+          try {
+            const current = await settings.get();
+            autoIndexEnabled = current.autoIndex;
+            const configured = await roots();
+            configureRootWatchers(configured);
+            if (current.autoIndex && Date.now() >= nextSafetyScanAt) {
+              scanRequested = true;
+              forceFingerprintAll = true;
+            }
+            if (scanRequested) {
+              scanRequested = false;
+              await scanNow(signal);
+              nextSafetyScanAt = Date.now() + parseInterval(current.scanIntervalSeconds);
+            }
+          } catch (error) {
+            lastError = errorText(error);
+            bb.log.warn("Trace indexer loop failed: " + lastError);
           }
-        } catch (error) {
-          lastError = errorText(error);
-          bb.log.warn("Trace indexer loop failed: " + lastError);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 1_000);
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            }, { once: true });
+          });
         }
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 1_000);
-          signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve();
-          }, { once: true });
-        });
+      } finally {
+        closeRootWatchers();
+        // Do not let a reload unload this service while its SQLite transaction
+        // is still active. The next plugin instance must be able to acquire
+        // the same durable database without racing the previous scan.
+        if (activeScan) await activeScan;
       }
     },
   });
