@@ -1081,6 +1081,21 @@ export class TraceIndexer {
       // events; the replacement stores a hash for all later scans.
       existingPrefixMatches = false;
     }
+    // The first prefix probe can race with the full pre-parse snapshot. Check
+    // the old indexed prefix again after that snapshot so an in-place rewrite
+    // cannot be mistaken for a safe append to the old event rows.
+    const parseStartHash = await fileFingerprint(filePath, fileStat.size, signal);
+    if (signal?.aborted) return false;
+    if (!parseStartHash) return false;
+    const parseStartStat = await stat(filePath);
+    if (parseStartStat.size !== fileStat.size || Math.round(parseStartStat.mtimeMs) !== mtimeKey) {
+      throw new Error("Trace file changed while preparing to index; retrying");
+    }
+    if (existingFile && !parserChanged && format !== "zstd" && existingHash && existingSize <= fileStat.size) {
+      const parseStartPrefixHash = await fileFingerprint(filePath, existingSize, signal);
+      if (signal?.aborted) return false;
+      if (parseStartPrefixHash !== existingHash) existingPrefixMatches = false;
+    }
     const reset =
       format === "zstd" ||
       !existingFile ||
@@ -1088,7 +1103,7 @@ export class TraceIndexer {
       existingIndexedBytes > fileStat.size ||
       parserChanged ||
       (sameSize && mtimeChanged) ||
-      (existingFile && !parserChanged && (mtimeChanged || forceFingerprint) && existingPrefixMatches === false);
+      (existingFile && !parserChanged && existingPrefixMatches === false);
     const startByte = reset ? 0 : existingIndexedBytes;
     const startLine = reset ? 0 : numberValue(existingFile?.indexed_lines) ?? 0;
     let aggregate = reset ? emptySession(sessionId, root.source as TraceSourceId, filePath, fileStat.size) : current;
@@ -1100,18 +1115,6 @@ export class TraceIndexer {
     let firstUserTitle: string | null = reset || aggregate.title === basename(filePath) ? null : aggregate.title;
     let totalInput = reset ? null : aggregate.inputTokens;
     let totalOutput = reset ? null : aggregate.outputTokens;
-    // A file can be rewritten in place while it is being parsed and retain
-    // the same size and mtime. Keep a content snapshot at both sides of the
-    // parse so events and the persisted hash can never describe different
-    // versions of the file. If the bytes change, the transaction is rolled
-    // back and the caller requeues the path for a later stable read.
-    const parseStartHash = await fileFingerprint(filePath, fileStat.size, signal);
-    if (signal?.aborted) return false;
-    if (!parseStartHash) return false;
-    const parseStartStat = await stat(filePath);
-    if (parseStartStat.size !== fileStat.size || Math.round(parseStartStat.mtimeMs) !== mtimeKey) {
-      throw new Error("Trace file changed while preparing to index; retrying");
-    }
 
     this.db.exec("BEGIN");
     try {
