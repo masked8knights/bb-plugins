@@ -51,6 +51,19 @@ describe("normalizeRecord", () => {
     expect(event.depth).toBe(1);
     expect(event.summary).toContain("pwd");
   });
+
+  it("only uses values from the requested metadata keys", () => {
+    const event = normalizeRecord({
+      type: "assistant/message",
+      timestamp: "2026-08-17T12:00:00.000Z",
+      model: "gpt-5",
+      cwd: "/Users/test/project",
+      data: { content: "A response" },
+    });
+
+    expect(event.model).toBe("gpt-5");
+    expect(event.cwd).toBe("/Users/test/project");
+  });
 });
 
 describe("completeLines", () => {

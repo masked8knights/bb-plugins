@@ -7,6 +7,7 @@ import {
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, TraceArtifact, TraceEvent, TraceSession, TraceStatus } from "./server";
+import { listArtifactsInput, listSessionsInput } from "./src/rpc-input";
 
 const buttonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -402,8 +403,8 @@ function TracesPanel(_props: PluginNavPanelProps) {
     try {
       const [nextStatus, nextSessions, nextArtifacts] = await Promise.all([
         rpc.call("status", null),
-        rpc.call("listSessions", { query: query || undefined, source: source || undefined, limit: 100, offset: 0 }),
-        rpc.call("listArtifacts", { query: query || undefined, limit: 100, offset: 0 }),
+        rpc.call("listSessions", listSessionsInput(query, source)),
+        rpc.call("listArtifacts", listArtifactsInput(query)),
       ]);
       setStatus(nextStatus);
       setSessions(nextSessions.sessions);

@@ -110,6 +110,7 @@ const MAX_RAW_JSON = 200_000;
 const MAX_ARTIFACT_PREVIEW = 40_000;
 const MAX_DISCOVERED_FILES = 20_000;
 const MAX_ARTIFACT_DEPTH = 9;
+const INDEXER_VERSION = 2;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   "node_modules",
@@ -169,7 +170,6 @@ function normalizeText(value: string): string {
 
 function findString(value: unknown, keys: string[], depth = 0): string | null {
   if (depth > 6 || value === null || value === undefined) return null;
-  if (typeof value === "string" && value.trim()) return value;
   if (Array.isArray(value)) {
     for (const item of value) {
       const found = findString(item, keys, depth + 1);
@@ -678,7 +678,7 @@ export function ensureSchema(db: SqliteDb): boolean {
       ");" +
       "CREATE TABLE IF NOT EXISTS trace_files (" +
       "path TEXT PRIMARY KEY, root_id TEXT NOT NULL, source_id TEXT NOT NULL, format TEXT NOT NULL, size_bytes INTEGER NOT NULL, " +
-      "mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0, indexed_lines INTEGER NOT NULL DEFAULT 0, " +
+      "mtime_ms INTEGER NOT NULL, indexed_bytes INTEGER NOT NULL DEFAULT 0, indexed_lines INTEGER NOT NULL DEFAULT 0, parser_version INTEGER NOT NULL DEFAULT 1, " +
       "session_id TEXT NOT NULL, indexed_at INTEGER NOT NULL, parse_error TEXT" +
       ");" +
       "CREATE TABLE IF NOT EXISTS trace_sessions (" +
@@ -703,6 +703,11 @@ export function ensureSchema(db: SqliteDb): boolean {
       "CREATE INDEX IF NOT EXISTS trace_events_timestamp ON trace_events(timestamp);" +
       "CREATE INDEX IF NOT EXISTS trace_artifacts_updated ON trace_artifacts(updated_at DESC);",
   );
+  try {
+    db.exec("ALTER TABLE trace_files ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 1;");
+  } catch {
+    // Existing databases already have the migration column.
+  }
   try {
     db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS trace_event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content);");
     return true;
@@ -907,8 +912,10 @@ export class TraceIndexer {
     const format = root.format ?? "jsonl";
     const mtimeKey = Math.round(fileStat.mtimeMs);
     const existingMtime = numberValue(existingFile?.mtime_ms);
+    const parserChanged = numberValue(existingFile?.parser_version) !== INDEXER_VERSION;
     const unchanged =
       existingFile &&
+      !parserChanged &&
       (numberValue(existingFile.size_bytes) ?? 0) === fileStat.size &&
       existingMtime !== null &&
       Math.round(existingMtime) === mtimeKey &&
@@ -923,6 +930,7 @@ export class TraceIndexer {
       !existingFile ||
       (numberValue(existingFile.size_bytes) ?? 0) > fileStat.size ||
       (numberValue(existingFile.indexed_bytes) ?? 0) > fileStat.size ||
+      parserChanged ||
       ((numberValue(existingFile.size_bytes) ?? 0) === fileStat.size &&
         (existingMtime === null || Math.round(existingMtime) !== mtimeKey));
     const startByte = reset ? 0 : numberValue(existingFile?.indexed_bytes) ?? 0;
@@ -1058,9 +1066,9 @@ export class TraceIndexer {
         sessionId,
       );
       this.db.prepare(
-        "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines, session_id, indexed_at, parse_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, source_id = excluded.source_id, format = excluded.format, size_bytes = excluded.size_bytes, mtime_ms = excluded.mtime_ms, indexed_bytes = excluded.indexed_bytes, indexed_lines = excluded.indexed_lines, session_id = excluded.session_id, indexed_at = excluded.indexed_at, parse_error = excluded.parse_error",
-      ).run(filePath, root.id, root.source, format, fileStat.size, mtimeKey, format === "zstd" ? fileStat.size : indexedBytes, indexedLines, sessionId, Date.now(), parseError);
+        "INSERT INTO trace_files (path, root_id, source_id, format, size_bytes, mtime_ms, indexed_bytes, indexed_lines, parser_version, session_id, indexed_at, parse_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(path) DO UPDATE SET root_id = excluded.root_id, source_id = excluded.source_id, format = excluded.format, size_bytes = excluded.size_bytes, mtime_ms = excluded.mtime_ms, indexed_bytes = excluded.indexed_bytes, indexed_lines = excluded.indexed_lines, parser_version = excluded.parser_version, session_id = excluded.session_id, indexed_at = excluded.indexed_at, parse_error = excluded.parse_error",
+      ).run(filePath, root.id, root.source, format, fileStat.size, mtimeKey, format === "zstd" ? fileStat.size : indexedBytes, indexedLines, INDEXER_VERSION, sessionId, Date.now(), parseError);
       this.db.exec("COMMIT");
     } catch (error) {
       try {
