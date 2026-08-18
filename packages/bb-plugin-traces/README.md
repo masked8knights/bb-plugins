@@ -13,8 +13,9 @@ By default the indexer checks:
 - Pi session JSONL under `~/.pi/agent/sessions`.
 - OMP session JSONL under `~/.omp/agent/sessions`.
 - DeepSeek Harness compressed JSONL under `~/.dsh/sessions`.
-- BB thread storage and personal workspaces for decision, plan, checkpoint,
-  handoff, review, state, and agent artifacts.
+- BB thread storage for decision, plan, checkpoint, handoff, review, state, and
+  agent artifacts. Additional workspace roots are opt-in so a large personal
+  workspace tree cannot hold session indexing hostage.
 
 Additional JSONL roots and workspace roots can be added in plugin settings, one
 absolute path per line.
@@ -28,8 +29,8 @@ payload previews; the source files remain the complete record.
 
 The explorer borrows the useful interaction model from DeepSeek Harness's
 open-source trajectory UI: a source-filterable session ledger, timing overview,
-nested tool rows, live-index state, and a payload inspector. The Decisions tab
-keeps planning and checkpoint artifacts beside sessions without mixing them into
-the trace timeline.
+nested tool rows, live-index state, and a payload inspector. The Artifacts tab
+is a separate collection of planning and context files; sessions are the model,
+message, and tool telemetry timeline.
 
 Reference: https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/client/ui-trajectory

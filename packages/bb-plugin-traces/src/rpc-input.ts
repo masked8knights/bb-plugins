@@ -1,6 +1,15 @@
-export function listSessionsInput(query: string, source: string): {
+const PAGE_SIZE = 100;
+
+export function listSessionsInput(
+  query: string,
+  source: string,
+  sort: "updated" | "started" | "events" | "duration" = "updated",
+  offset = 0,
+  limit = PAGE_SIZE,
+): {
   query?: string;
   source?: string;
+  sort?: "updated" | "started" | "events" | "duration";
   limit: number;
   offset: number;
 } {
@@ -9,20 +18,23 @@ export function listSessionsInput(query: string, source: string): {
   return {
     ...(normalizedQuery ? { query: normalizedQuery } : {}),
     ...(normalizedSource ? { source: normalizedSource } : {}),
-    limit: 100,
-    offset: 0,
+    ...(sort !== "updated" ? { sort } : {}),
+    limit,
+    offset,
   };
 }
 
-export function listArtifactsInput(query: string): {
+export function listArtifactsInput(query: string, kind?: "decision" | "context", offset = 0, limit = PAGE_SIZE): {
   query?: string;
+  kind?: "decision" | "context";
   limit: number;
   offset: number;
 } {
   const normalizedQuery = query.trim();
   return {
     ...(normalizedQuery ? { query: normalizedQuery } : {}),
-    limit: 100,
-    offset: 0,
+    ...(kind ? { kind } : {}),
+    limit,
+    offset,
   };
 }

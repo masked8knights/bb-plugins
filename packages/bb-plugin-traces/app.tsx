@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
+  useBbNavigate,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
@@ -8,7 +9,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, TraceArtifact, TraceEvent, TraceSession, TraceStatus } from "./server";
 import { listArtifactsInput, listSessionsInput } from "./src/rpc-input";
-import { conversationLabel, isConversationEvent } from "./src/view";
 
 const buttonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -16,6 +16,35 @@ const primaryButtonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const inputClass =
   "h-8 w-full rounded-md border border-border bg-background px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring";
+const toolbarButtonClass =
+  "inline-flex h-5 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+const toolbarButtonActiveClass = toolbarButtonClass + " bg-state-hover text-foreground";
+
+type TraceRoute =
+  | { kind: "sessions" }
+  | { kind: "artifacts" }
+  | { kind: "session"; id: string }
+  | { kind: "artifact"; id: string };
+
+type SessionSort = "updated" | "started" | "events" | "duration";
+type InspectorTab = "summary" | "preview" | "raw" | "payload" | "result" | "timing";
+type TimelineLane = "input" | "model" | "tools";
+
+function decodeRouteSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseTraceRoute(subPath: string): TraceRoute {
+  const parts = subPath.split("/").filter(Boolean).map(decodeRouteSegment);
+  if (parts[0] === "session" && parts[1]) return { kind: "session", id: parts[1] };
+  if ((parts[0] === "artifact" || parts[0] === "decision") && parts[1]) return { kind: "artifact", id: parts[1] };
+  if (parts[0] === "artifacts" || parts[0] === "decisions") return { kind: "artifacts" };
+  return { kind: "sessions" };
+}
 
 function formatTime(timestamp: number | null): string {
   if (!timestamp) return "—";
@@ -58,19 +87,20 @@ function formatDuration(value: number | null): string {
   return Math.floor(seconds / 60) + "m " + Math.round(seconds % 60) + "s";
 }
 
+function sourceLabel(source: string): string {
+  if (source === "dsh") return "DeepSeek";
+  if (source === "codex") return "Codex";
+  if (source === "claude") return "Claude";
+  if (source === "pi") return "Pi";
+  if (source === "omp") return "OMP";
+  return source;
+}
+
 function sourceClass(source: string): string {
   if (source === "dsh") return "border-primary/30 bg-primary/10 text-primary";
   if (source === "claude") return "border-warning/30 bg-warning/10 text-warning";
   if (source === "pi" || source === "omp") return "border-success/30 bg-success/10 text-success";
   return "border-border bg-muted text-muted-foreground";
-}
-
-function kindClass(kind: TraceEvent["kind"]): string {
-  if (kind === "tool") return "text-warning";
-  if (kind === "message") return "text-primary";
-  if (kind === "reasoning") return "text-muted-foreground";
-  if (kind === "telemetry") return "text-success";
-  return "text-foreground";
 }
 
 function shortText(value: string, max = 260): string {
@@ -79,6 +109,7 @@ function shortText(value: string, max = 260): string {
 }
 
 function StatusDot({ status }: { status: TraceStatus | null }) {
+  const hasCachedRows = (status?.sessions ?? 0) > 0 || (status?.events ?? 0) > 0;
   const color = !status
     ? "text-muted-foreground"
     : status.state === "indexing"
@@ -89,97 +120,356 @@ function StatusDot({ status }: { status: TraceStatus | null }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
       <span className={"size-2 rounded-full bg-current " + color} aria-hidden="true" />
-      {status?.state === "indexing" ? "Indexing locally" : status?.state === "error" ? "Index needs attention" : "Local index ready"}
+      {status?.state === "indexing"
+        ? hasCachedRows ? "Index ready · updating" : "Indexing local files"
+        : status?.state === "error"
+          ? "Index needs attention"
+          : "Local index ready"}
     </span>
   );
 }
 
 function SourceBadge({ source }: { source: string }) {
-  const label =
-    source === "dsh"
-      ? "DeepSeek"
-      : source === "codex"
-        ? "Codex"
-        : source === "claude"
-          ? "Claude"
-          : source === "pi"
-            ? "Pi"
-            : source === "omp"
-              ? "OMP"
-              : source;
   return (
-    <span className={"inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium " + sourceClass(source)}>
-      {label}
+    <span className={"inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-medium " + sourceClass(source)}>
+      {sourceLabel(source)}
     </span>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <span className="font-medium text-foreground">{value}</span>
-      {label}
-    </div>
-  );
+function eventKind(event: TraceEvent): string {
+  if (event.kind === "tool") return "TOOL";
+  if (event.role === "user") return "USER";
+  if (event.role === "assistant") return "ASSISTANT";
+  if (event.kind === "system") return "SYSTEM";
+  if (event.kind === "reasoning") return "CONTEXT";
+  if (event.kind === "step") return "STEP";
+  return event.type.toUpperCase().slice(0, 14);
 }
 
-function SessionRow({
-  session,
-  selected,
-  onSelect,
-}: {
-  session: TraceSession;
-  selected: boolean;
-  onSelect: () => void;
-}) {
+function eventKindClass(event: TraceEvent): string {
+  if (event.kind === "tool") return "text-warning";
+  if (event.role === "user") return "text-primary";
+  if (event.role === "assistant") return "text-violet-300";
+  if (event.kind === "system" || event.kind === "reasoning") return "text-muted-foreground";
+  return "text-success";
+}
+
+function eventTagClass(event: TraceEvent): string {
+  if (event.kind === "tool") return "bg-warning/15 text-warning";
+  if (event.role === "user") return "bg-primary/15 text-primary";
+  if (event.role === "assistant") return "bg-violet-500/15 text-violet-300";
+  if (event.kind === "system" || event.kind === "reasoning") return "bg-muted text-muted-foreground";
+  return "bg-success/15 text-success";
+}
+
+function eventLane(event: TraceEvent): TimelineLane {
+  if (event.kind === "tool") return "tools";
+  if (event.role === "user" || event.kind === "system" || event.kind === "reasoning") return "input";
+  return "model";
+}
+
+function timelineSegmentClass(event: TraceEvent): string {
+  if (event.kind === "tool") return "bg-warning";
+  if (event.role === "user" || event.kind === "system" || event.kind === "reasoning") return "bg-primary";
+  if (event.role === "assistant") return "bg-violet-400";
+  return "bg-success";
+}
+
+function conversationContent(event: TraceEvent): string {
+  if (event.kind === "tool") {
+    const detail = shortText(event.summary || event.rawJson, 240);
+    return detail ? event.title + "  " + detail : event.title;
+  }
+  return shortText(event.summary || event.title, 360);
+}
+
+function SessionRow({ session, onOpen }: { session: TraceSession; onOpen: () => void }) {
   return (
     <button
       type="button"
-      className={
-        "block w-full border-b border-border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " +
-        (selected ? "bg-primary/10" : "hover:bg-state-hover")
-      }
-      onClick={onSelect}
-      aria-pressed={selected}
+      className="flex min-h-9 w-full items-center gap-2 border-b border-border px-3 py-1.5 text-left transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+      onClick={onOpen}
     >
-      <div className="flex items-start gap-2">
-        <SourceBadge source={session.source} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{session.title}</span>
-        <span className="shrink-0 text-[11px] text-muted-foreground">{formatTime(session.updatedAt)}</span>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-        <span>{session.eventCount} events</span>
-        <span>{session.toolCount} tools</span>
-        <span>{formatDuration(session.durationMs)}</span>
-        {session.status === "active" ? <span className="text-success">active</span> : null}
-        {session.errorCount > 0 ? <span className="text-destructive">{session.errorCount} errors</span> : null}
-      </div>
-      {session.cwd ? <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{session.cwd}</div> : null}
+      <SourceBadge source={session.source} />
+      <span className="min-w-0 max-w-[min(42vw,34rem)] truncate text-xs font-medium text-foreground" title={session.title}>{session.title}</span>
+      {session.status === "active" ? <span className="shrink-0 text-[10px] text-success">active</span> : null}
+      <span className="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">{session.eventCount} events · {session.toolCount} tools · {formatDuration(session.durationMs)}</span>
+      {session.errorCount > 0 ? <span className="hidden shrink-0 text-[10px] text-destructive md:inline">{session.errorCount} errors</span> : null}
+      <span className="hidden min-w-0 max-w-[min(24vw,20rem)] truncate font-mono text-[10px] text-muted-foreground lg:inline" title={session.cwd ?? session.model ?? undefined}>{session.cwd ?? session.model ?? "local session"}</span>
+      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{formatTokens(session.inputTokens)}/{formatTokens(session.outputTokens)}</span>
+      <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">{formatTime(session.updatedAt)}</span>
     </button>
   );
 }
 
-function TimelineOverview({ events }: { events: TraceEvent[] }) {
+function ArtifactRow({ artifact, onOpen }: { artifact: TraceArtifact; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-border px-4 py-3 text-left transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+      onClick={onOpen}
+    >
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning">{artifact.kind}</span>
+          <span className="min-w-0 truncate text-sm font-medium text-foreground">{artifact.title}</span>
+        </div>
+        <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{artifact.filePath}</div>
+      </div>
+      <div className="whitespace-nowrap text-right text-[11px] text-muted-foreground">
+        <div>{formatTime(artifact.updatedAt)}</div>
+        <div>{formatBytes(artifact.sizeBytes)}</div>
+      </div>
+    </button>
+  );
+}
+
+function CollectionHeader({
+  mode,
+  status,
+  busy,
+  query,
+  source,
+  sourceFilters,
+  sort,
+  onQuery,
+  onSource,
+  onSort,
+  onMode,
+  onRescan,
+  error,
+}: {
+  mode: "sessions" | "artifacts";
+  status: TraceStatus | null;
+  busy: boolean;
+  query: string;
+  source: string;
+  sourceFilters: string[];
+  sort: SessionSort;
+  onQuery: (value: string) => void;
+  onSource: (value: string) => void;
+  onSort: (value: SessionSort) => void;
+  onMode: (value: "sessions" | "artifacts") => void;
+  onRescan: () => void;
+  error: string | null;
+}) {
+  const sourceErrors = (status?.sources ?? []).filter((root) => root.error && root.exists);
+  return (
+    <header className="shrink-0 border-b border-border bg-muted/20 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="text-sm font-semibold">{mode === "sessions" ? "Sessions" : "Artifacts"}</span>
+          <StatusDot status={status} />
+          {mode === "artifacts" ? <span className="hidden text-xs text-muted-foreground md:inline">Plans, checkpoints, and context files</span> : null}
+        </div>
+        <div className="flex items-center gap-2">
+          {status ? <span className="text-[11px] text-muted-foreground">{mode === "sessions" ? `${status.sessions} sessions · ${status.events} events · ${formatBytes(status.bytes)}` : `${status.artifacts} artifacts`}</span> : null}
+          <button type="button" className={buttonClass} disabled={busy} onClick={onRescan}>
+            {busy ? "Re-scanning…" : "Re-scan"}
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="min-w-56 flex-1">
+          <input
+            className={inputClass}
+            value={query}
+            onChange={(event) => onQuery(event.target.value)}
+            maxLength={500}
+            placeholder={mode === "sessions" ? "Search sessions, tools, prompts, and models" : "Search indexed artifacts"}
+            aria-label={mode === "sessions" ? "Search local sessions" : "Search indexed artifacts"}
+          />
+        </div>
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+          <button type="button" className={mode === "sessions" ? primaryButtonClass : buttonClass} onClick={() => onMode("sessions")}>Sessions</button>
+          <button type="button" className={mode === "artifacts" ? primaryButtonClass : buttonClass} onClick={() => onMode("artifacts")}>Artifacts</button>
+        </div>
+        {mode === "sessions" ? (
+          <>
+            <div className="flex max-w-full items-center gap-1 overflow-auto">
+              <button type="button" className={source === "" ? "rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary" : "rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-state-hover"} onClick={() => onSource("")}>All</button>
+              {sourceFilters.map((item) => (
+                <button key={item} type="button" className={source === item ? "rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary" : "rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-state-hover"} onClick={() => onSource(item)}>
+                  {sourceLabel(item)}
+                </button>
+              ))}
+            </div>
+            <label className="flex h-8 items-center gap-2 rounded-md border border-border px-2.5 text-xs text-muted-foreground">
+              <span>Sort</span>
+              <select className="bg-transparent text-xs text-foreground outline-none" value={sort} onChange={(event) => onSort(event.target.value as SessionSort)} aria-label="Sort sessions">
+                <option value="updated">Recently updated</option>
+                <option value="started">Recently started</option>
+                <option value="events">Most events</option>
+                <option value="duration">Longest duration</option>
+              </select>
+            </label>
+          </>
+        ) : null}
+      </div>
+      {status?.lastError ? <div className="mt-2 text-xs text-destructive" role="alert">{status.lastError}</div> : null}
+      {sourceErrors.length ? <div className="mt-2 text-xs text-warning" role="status">{sourceErrors.length} local source{sourceErrors.length === 1 ? "" : "s"} need attention: {sourceErrors.map((root) => root.label + " — " + root.error).join("; ")}</div> : null}
+      {error ? <div className="mt-2 text-xs text-destructive" role="alert">{error}</div> : null}
+    </header>
+  );
+}
+
+function SessionCollection({
+  sessions,
+  total,
+  status,
+  loading,
+  hasMore,
+  hasFilter,
+  onOpen,
+  onLoadMore,
+}: {
+  sessions: TraceSession[];
+  total: number;
+  status: TraceStatus | null;
+  loading: boolean;
+  hasMore: boolean;
+  hasFilter: boolean;
+  onOpen: (session: TraceSession) => void;
+  onLoadMore: () => void;
+}) {
+  const listRef = useRef<HTMLElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasMore || loading || typeof IntersectionObserver === "undefined") return;
+    const list = listRef.current;
+    const marker = loadMoreRef.current;
+    if (!list || !marker) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMore();
+      },
+      { root: list, rootMargin: "240px 0px" },
+    );
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [hasMore, loading, onLoadMore]);
+
+  return (
+    <main ref={listRef} className="min-h-0 flex-1 overflow-auto">
+      <div className="flex items-center justify-between border-b border-border px-4 py-2 text-[11px] text-muted-foreground">
+        <span>{total} matching sessions{total > sessions.length ? ` · showing ${sessions.length}` : ""}</span>
+        <span>{status?.sources.filter((root) => root.kind === "session" && root.exists).length ?? 0} sources detected</span>
+      </div>
+      {sessions.length ? sessions.map((session) => <SessionRow key={session.id} session={session} onOpen={() => onOpen(session)} />) : (
+        <div className="flex min-h-48 items-center justify-center px-4 text-sm text-muted-foreground">{hasFilter ? "No sessions match the current filters." : loading || status?.state === "indexing" ? "Indexing local session files…" : "No sessions found in the detected roots."}</div>
+      )}
+      {sessions.length && hasMore ? (
+        <div ref={loadMoreRef} className="flex justify-center border-t border-border px-3 py-3">
+          <button type="button" className={buttonClass} disabled={loading} onClick={onLoadMore}>
+            {loading ? "Loading…" : `Load more · ${Math.max(0, total - sessions.length)} remaining`}
+          </button>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function ArtifactCollection({ artifacts, total, loading, hasMore, onOpen, onLoadMore }: { artifacts: TraceArtifact[]; total: number; loading: boolean; hasMore: boolean; onOpen: (artifact: TraceArtifact) => void; onLoadMore: () => void }) {
+  const listRef = useRef<HTMLElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasMore || loading || typeof IntersectionObserver === "undefined") return;
+    const list = listRef.current;
+    const marker = loadMoreRef.current;
+    if (!list || !marker) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMore();
+      },
+      { root: list, rootMargin: "240px 0px" },
+    );
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [hasMore, loading, onLoadMore]);
+
+  return (
+    <main ref={listRef} className="min-h-0 flex-1 overflow-auto">
+      <div className="border-b border-border px-4 py-2 text-[11px] text-muted-foreground">{total} indexed files{total > artifacts.length ? ` · showing ${artifacts.length}` : ""}</div>
+      {artifacts.length ? artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} onOpen={() => onOpen(artifact)} />) : <div className="flex min-h-48 items-center justify-center px-4 text-sm text-muted-foreground">No artifacts found in the configured roots.</div>}
+      {artifacts.length && hasMore ? (
+        <div ref={loadMoreRef} className="flex justify-center border-t border-border px-3 py-3">
+          <button type="button" className={buttonClass} disabled={loading} onClick={onLoadMore}>
+            {loading ? "Loading…" : `Load more · ${Math.max(0, total - artifacts.length)} remaining`}
+          </button>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
+function TrajectoryToolbar({
+  query,
+  showDuration,
+  showTurns,
+  showCalls,
+  onQuery,
+  onDuration,
+  onTurns,
+  onCalls,
+}: {
+  query: string;
+  showDuration: boolean;
+  showTurns: boolean;
+  showCalls: boolean;
+  onQuery: (value: string) => void;
+  onDuration: () => void;
+  onTurns: () => void;
+  onCalls: () => void;
+}) {
+  return (
+    <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-border bg-muted/20 px-2">
+      <button type="button" className={showDuration ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onDuration} aria-pressed={showDuration}>Duration</button>
+      <button type="button" className={showTurns ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onTurns} aria-pressed={showTurns}>Turns</button>
+      <button type="button" className={showCalls ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onCalls} aria-pressed={showCalls}>Calls</button>
+      <label className="ml-auto flex h-[22px] w-44 items-center rounded border border-border bg-muted/30 px-1.5 focus-within:border-ring focus-within:bg-background">
+        <span className="sr-only">Search trajectory</span>
+        <input className="min-w-0 w-full bg-transparent px-0.5 text-[11px] text-foreground outline-none placeholder:text-muted-foreground" value={query} onChange={(event) => onQuery(event.target.value)} maxLength={500} placeholder="Search" aria-label="Search trajectory" />
+      </label>
+    </div>
+  );
+}
+
+function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
   const timed = events.filter((event) => event.timestamp !== null);
   const start = timed.length ? Math.min(...timed.map((event) => event.timestamp ?? 0)) : 0;
   const end = timed.length ? Math.max(...timed.map((event) => (event.timestamp ?? 0) + (event.durationMs ?? 1))) : 1;
   const span = Math.max(1, end - start);
+  const lanes: TimelineLane[] = ["input", "model", "tools"];
+  const labels: Record<TimelineLane, string> = { input: "Input", model: "Model", tools: "Tools" };
+  const turnBoundaries = showTurns ? events.filter((event, index) => event.turn !== null && event.turn !== events[index - 1]?.turn) : [];
   return (
-    <div className="rounded-md border border-border bg-muted/20 p-2">
-      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>Timing overview</span>
-        <span>{formatDuration(end - start)}</span>
+    <div className="grid h-[50px] shrink-0 grid-cols-[44px_minmax(0,1fr)] border-b border-border bg-background">
+      <div className="grid grid-rows-3 border-r border-border text-[9px] uppercase leading-none text-muted-foreground">
+        {lanes.map((lane) => <div key={lane} className="flex items-center justify-end border-b border-border/60 pr-1 last:border-b-0">{labels[lane]}</div>)}
       </div>
-      <div className="relative h-7 overflow-hidden rounded-sm bg-muted">
-        {events.slice(-160).map((event, index) => {
-          const position = event.timestamp === null ? index / Math.max(1, events.length) : ((event.timestamp - start) / span);
-          const width = event.durationMs ? Math.max(0.004, event.durationMs / span) : 0.008;
+      <div className="relative min-w-0 overflow-hidden">
+        {lanes.map((lane, index) => <div key={lane} className="absolute inset-x-0 border-b border-border/60 last:border-b-0" style={{ top: index * 16.66, height: 16.66 }} />)}
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((line) => <span key={line} className="absolute inset-y-0 border-l border-border/30" style={{ left: `${line * 10}%` }} aria-hidden="true" />)}
+        {turnBoundaries.map((event, index) => {
+          const position = event.timestamp === null ? events.indexOf(event) / Math.max(1, events.length) : (event.timestamp - start) / span;
+          return <span key={`${event.id}-turn-${index}`} className="absolute inset-y-0 border-l border-primary/25" style={{ left: `${Math.min(99.5, Math.max(0, position * 100))}%` }} aria-hidden="true" />;
+        })}
+        {events.map((event, index) => {
+          const position = event.timestamp === null ? index / Math.max(1, events.length) : (event.timestamp - start) / span;
+          const width = event.durationMs === null ? 0.008 : Math.max(0.006, event.durationMs / span);
+          const laneIndex = lanes.indexOf(eventLane(event));
           return (
-            <span
+            <button
               key={event.id}
-              className={"absolute top-1 h-5 rounded-sm opacity-80 " + (event.kind === "tool" ? "bg-warning" : event.kind === "message" ? "bg-primary" : "bg-success")}
-              style={{ left: Math.min(0.99, Math.max(0, position)) * 100 + "%", width: Math.min(0.2, width) * 100 + "%" }}
-              title={event.title + " · " + formatClock(event.timestamp)}
+              type="button"
+              className={"absolute h-2 min-w-[3px] rounded-sm opacity-90 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " + timelineSegmentClass(event) + (selectedId === event.id ? " ring-1 ring-foreground" : "")}
+              style={{ left: `${Math.min(99.5, Math.max(0, position * 100))}%`, top: `${laneIndex * 16.66 + 4}px`, width: `${Math.min(20, width * 100)}%` }}
+              onClick={() => onSelect(event)}
+              title={`${eventKind(event)} · ${event.title} · ${formatClock(event.timestamp)}`}
+              aria-label={`Select ${eventKind(event)} event ${event.line}`}
             />
           );
         })}
@@ -188,343 +478,372 @@ function TimelineOverview({ events }: { events: TraceEvent[] }) {
   );
 }
 
-function EventLedger({
-  events,
-  selectedId,
-  onSelect,
-  mode,
-}: {
-  events: TraceEvent[];
-  selectedId: string | null;
-  onSelect: (event: TraceEvent) => void;
-  mode: "conversation" | "all";
-}) {
-  const visibleEvents = mode === "conversation" ? events.filter(isConversationEvent) : events;
-  if (!visibleEvents.length) {
-    return <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">{mode === "conversation" ? "No user, assistant, or tool messages in this session yet." : "No indexed events in this session yet."}</div>;
-  }
+function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showDuration: boolean; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
+  if (!events.length) return <div className="flex min-h-40 flex-1 items-center justify-center text-sm text-muted-foreground">No events match this trajectory filter.</div>;
+  let previousTurn: number | null = null;
   return (
-    <div className="min-h-0 overflow-auto rounded-md border border-border">
-      {visibleEvents.map((event) => (
-        <button
-          type="button"
-          key={event.id}
-          className={
-            "block w-full border-b border-border px-3 py-2 text-left last:border-b-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " +
-            (selectedId === event.id ? "bg-primary/10" : "hover:bg-state-hover")
-          }
-          style={{ paddingLeft: 12 + Math.min(event.depth, 4) * 18 }}
-          onClick={() => onSelect(event)}
-          aria-pressed={selectedId === event.id}
-        >
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span className="w-12 shrink-0 font-mono">#{event.line}</span>
-            {mode === "conversation" ? <span className={"font-semibold " + kindClass(event.kind)}>{conversationLabel(event)}</span> : null}
-            <span className={"font-medium " + kindClass(event.kind)}>{event.type}</span>
-            <span className="ml-auto shrink-0">{formatClock(event.timestamp)}</span>
-          </div>
-          <div className="mt-1 flex items-baseline gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{event.title}</span>
-            {event.durationMs !== null ? <span className="shrink-0 text-[10px] text-muted-foreground">{formatDuration(event.durationMs)}</span> : null}
-          </div>
-          <div className={mode === "conversation" ? "mt-2 line-clamp-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground" : "mt-1 line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground"}>
-            {mode === "conversation" ? shortText(event.summary, 520) : shortText(event.summary)}
-          </div>
-          {event.inputTokens !== null || event.outputTokens !== null ? (
-            <div className="mt-1 flex gap-3 text-[10px] text-muted-foreground">
-              <span>in {formatTokens(event.inputTokens)}</span>
-              <span>out {formatTokens(event.outputTokens)}</span>
+    <div className="min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
+      {events.map((event) => {
+        const turnStart = showTurns && event.turn !== null && event.turn !== previousTurn;
+        previousTurn = event.turn;
+        return (
+          <div key={event.id}>
+            {turnStart ? <div className="flex h-5 items-center border-t-2 border-border bg-muted/20 px-2 text-[9px] uppercase tracking-wide text-muted-foreground">Turn {event.turn}</div> : null}
+            <div className="relative">
+              {event.turn !== null ? <span className={"pointer-events-none absolute inset-y-0 left-0 z-[1] w-px " + (selectedId === event.id ? "bg-primary" : "bg-primary/20")} aria-hidden="true" /> : null}
+              <button
+                type="button"
+                className={"group grid min-h-[30px] w-full grid-cols-[118px_minmax(0,1fr)_auto] items-center gap-2 border-b border-border/80 px-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " + (selectedId === event.id ? "bg-primary/10" : "hover:bg-state-hover")}
+                onClick={() => onSelect(event)}
+                aria-pressed={selectedId === event.id}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="w-8 shrink-0 text-right font-mono text-[9px] text-muted-foreground">#{event.line}</span>
+                  <span className={"inline-flex h-[19px] max-w-[76px] items-center truncate rounded-[3px] px-1.5 text-[10px] font-semibold tracking-[0.035em] " + eventTagClass(event)}>{eventKind(event)}</span>
+                </div>
+                <div className={"min-w-0 truncate text-[11px] text-foreground " + (event.kind === "tool" ? "font-mono" : "")} title={event.summary || event.title} style={{ paddingLeft: Math.min(event.depth, 4) * 12 }}>
+                  {conversationContent(event)}
+                </div>
+                <div className="flex shrink-0 items-center gap-2 text-[9px] text-muted-foreground">
+                  <span>{formatClock(event.timestamp)}</span>
+                  {showDuration && event.durationMs !== null ? <span>{formatDuration(event.durationMs)}</span> : null}
+                </div>
+              </button>
             </div>
-          ) : null}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function SessionInspector({ event, raw }: { event: TraceEvent | null; raw: string | null }) {
-  const [tab, setTab] = useState<"summary" | "payload" | "timing">("summary");
-
-  useEffect(() => {
-    setTab("summary");
-  }, [event?.id]);
-
-  if (!event) {
-    return (
-      <div className="flex min-h-28 items-center justify-center px-4 text-center text-xs text-muted-foreground">
-        Select a row to inspect its payload and timing.
-      </div>
-    );
-  }
-  return (
-    <div className="min-h-full bg-muted/10">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={"rounded-full border px-2 py-0.5 text-[11px] font-medium " + (event.kind === "tool" ? "border-warning/30 bg-warning/10 text-warning" : "border-primary/30 bg-primary/10 text-primary")}>
-              {conversationLabel(event)}
-            </span>
-            <div className="truncate text-sm font-medium text-foreground">{event.title}</div>
           </div>
-          <div className="mt-1 text-[11px] text-muted-foreground">{event.type} · line {event.line}</div>
-        </div>
-        <div className="flex gap-3 text-[10px] text-muted-foreground">
-          <span>{formatClock(event.timestamp)}</span>
-          <span>{formatDuration(event.durationMs)}</span>
-        </div>
-      </div>
-      <div className="flex items-center gap-1 border-b border-border px-3 py-2">
-        {(["summary", "payload", "timing"] as const).map((item) => (
-          <button
-            key={item}
-            type="button"
-            className={tab === item ? primaryButtonClass : buttonClass}
-            onClick={() => setTab(item)}
-          >
-            {item[0]!.toUpperCase() + item.slice(1)}
-          </button>
-        ))}
-      </div>
-      {tab === "summary" ? (
-        <div className="whitespace-pre-wrap break-words p-3 text-sm leading-relaxed text-foreground">{event.summary}</div>
-      ) : null}
-      {tab === "payload" ? (
-        <>
-          <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-            {raw ?? event.rawJson}
-          </pre>
-          {event.rawTruncated ? <div className="border-t border-border px-3 py-2 text-[10px] text-warning">Payload preview is truncated; the source session file remains unchanged.</div> : null}
-        </>
-      ) : null}
-      {tab === "timing" ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 p-3 text-xs">
-          <dt className="text-muted-foreground">Timestamp</dt><dd className="text-foreground">{formatTime(event.timestamp)}</dd>
-          <dt className="text-muted-foreground">Duration</dt><dd className="text-foreground">{formatDuration(event.durationMs)}</dd>
-          <dt className="text-muted-foreground">Input tokens</dt><dd className="text-foreground">{formatTokens(event.inputTokens)}</dd>
-          <dt className="text-muted-foreground">Output tokens</dt><dd className="text-foreground">{formatTokens(event.outputTokens)}</dd>
-          <dt className="text-muted-foreground">Model</dt><dd className="break-all font-mono text-foreground">{event.model ?? "—"}</dd>
-          <dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono text-foreground">{event.cwd ?? "—"}</dd>
-        </dl>
-      ) : null}
+        );
+      })}
     </div>
   );
 }
 
-function SessionDetail({
-  session,
-  events,
-  totalEvents,
-  selectedEvent,
-  raw,
-  onSelectEvent,
-}: {
-  session: TraceSession | null;
-  events: TraceEvent[];
-  totalEvents: number;
-  selectedEvent: TraceEvent | null;
-  raw: string | null;
-  onSelectEvent: (event: TraceEvent) => void;
-}) {
-  const [ledgerMode, setLedgerMode] = useState<"conversation" | "all">("conversation");
-  if (!session) {
-    return (
-      <div className="flex min-h-[20rem] flex-1 items-center justify-center p-8 text-center lg:min-h-0">
-        <div>
-          <div className="text-sm font-medium text-foreground">Select a session</div>
-          <p className="mt-1 max-w-sm text-xs text-muted-foreground">The index is local-only. Choose a session to inspect its turns, tools, timing, and raw event payloads.</p>
-        </div>
-      </div>
-    );
-  }
-  const conversationCount = events.filter(isConversationEvent).length;
+function inspectorTabs(event: TraceEvent): Array<{ id: InspectorTab; label: string }> {
+  if (event.kind === "tool") return [{ id: "summary", label: "Summary" }, { id: "payload", label: "Payload" }, { id: "result", label: "Result" }, { id: "timing", label: "Timing" }];
+  if (event.kind === "system") return [{ id: "summary", label: "System Prompt" }, { id: "raw", label: "Raw" }, { id: "timing", label: "Timing" }];
+  return [{ id: "summary", label: "Summary" }, { id: "preview", label: "Preview" }, { id: "raw", label: "Raw" }, { id: "timing", label: "Timing" }];
+}
+
+function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: string | null; onClose: () => void }) {
+  const tabs = inspectorTabs(event);
+  const [tab, setTab] = useState<InspectorTab>(tabs[0]!.id);
+  useEffect(() => setTab(tabs[0]!.id), [event.id]);
   return (
-    <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3 overflow-auto p-3 lg:min-h-0 lg:overflow-hidden">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <SourceBadge source={session.source} />
-            <h2 className="truncate text-base font-semibold text-foreground">{session.title}</h2>
-            {session.status === "active" ? <span className="text-xs text-success">live</span> : null}
-          </div>
-          <div className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{session.filePath}</div>
-        </div>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-right">
-          <Stat label="events" value={String(totalEvents)} />
-          <Stat label="tools" value={String(session.toolCount)} />
-          <Stat label="input" value={formatTokens(session.inputTokens)} />
-          <Stat label="output" value={formatTokens(session.outputTokens)} />
-        </div>
+    <aside className="flex h-full min-h-0 flex-col border-l border-border bg-muted/10" aria-label="Selected event inspector">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+        <span className={"text-[10px] font-semibold " + eventKindClass(event)}>{eventKind(event)}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">{event.type} · line {event.line}</span>
+        <button type="button" className="size-6 rounded text-sm text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" onClick={onClose} aria-label="Close event inspector">×</button>
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 border-y border-border py-2 text-[11px] text-muted-foreground">
-        <span>started {formatTime(session.startedAt)}</span>
-        <span>updated {formatTime(session.updatedAt)}</span>
-        <span>duration {formatDuration(session.durationMs)}</span>
-        <span>{formatBytes(session.fileSizeBytes)} source</span>
-        {session.model ? <span className="font-mono">{session.model}</span> : null}
+      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2">
+        {tabs.map((item) => <button key={item.id} type="button" className={(tab === item.id ? "border-b-2 border-primary text-primary " : "border-b-2 border-transparent text-muted-foreground ") + "h-8 shrink-0 px-2 text-[10px] font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"} onClick={() => setTab(item.id)}>{item.label}</button>)}
       </div>
-      <TimelineOverview events={events} />
-      {totalEvents > events.length ? <div className="text-[11px] text-muted-foreground">Showing the first {events.length} of {totalEvents} indexed events.</div> : null}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs font-medium text-foreground">{ledgerMode === "conversation" ? "Conversation" : "All events"}</div>
-        <div className="flex items-center gap-1 rounded-md border border-border p-0.5" aria-label="Event view">
-          <button type="button" className={ledgerMode === "conversation" ? primaryButtonClass : buttonClass} onClick={() => setLedgerMode("conversation")}>
-            Messages & tools{conversationCount ? " · " + conversationCount : ""}
-          </button>
-          <button type="button" className={ledgerMode === "all" ? primaryButtonClass : buttonClass} onClick={() => setLedgerMode("all")}>
-            All events
-          </button>
-        </div>
+      <div className="min-h-0 flex-1 overflow-auto p-3">
+        {tab === "summary" || tab === "preview" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || event.title}</div> : null}
+        {tab === "payload" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
+        {tab === "result" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || "No result payload recorded."}</div> : null}
+        {tab === "raw" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
+        {tab === "timing" ? (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
+            <dt className="text-muted-foreground">Timestamp</dt><dd className="text-foreground">{formatTime(event.timestamp)}</dd>
+            <dt className="text-muted-foreground">Duration</dt><dd className="text-foreground">{formatDuration(event.durationMs)}</dd>
+            <dt className="text-muted-foreground">Input tokens</dt><dd className="text-foreground">{formatTokens(event.inputTokens)}</dd>
+            <dt className="text-muted-foreground">Output tokens</dt><dd className="text-foreground">{formatTokens(event.outputTokens)}</dd>
+            <dt className="text-muted-foreground">Model</dt><dd className="break-all font-mono text-foreground">{event.model ?? "—"}</dd>
+            <dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono text-foreground">{event.cwd ?? "—"}</dd>
+          </dl>
+        ) : null}
       </div>
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(280px,34%)]">
-        <EventLedger events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} mode={ledgerMode} />
-        <aside className="min-h-[18rem] min-w-0 overflow-auto rounded-md border border-border" aria-label="Selected event inspector">
-          <SessionInspector event={selectedEvent} raw={raw} />
-        </aside>
-      </div>
-    </div>
+    </aside>
   );
 }
 
-function ArtifactList({
-  artifacts,
-  selectedId,
-  onSelect,
-}: {
-  artifacts: TraceArtifact[];
-  selectedId: string | null;
-  onSelect: (artifact: TraceArtifact) => void;
-}) {
-  if (!artifacts.length) {
-    return <div className="p-4 text-sm text-muted-foreground">No decision or context files found in the detected roots.</div>;
-  }
+function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsHasMore, selectedEvent, raw, onSelectEvent, onLoadMore, onCloseInspector, onBack }: { session: TraceSession; events: TraceEvent[]; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedEvent: TraceEvent | null; raw: string | null; onSelectEvent: (event: TraceEvent) => void; onLoadMore: () => void; onCloseInspector: () => void; onBack: () => void }) {
+  const [query, setQuery] = useState("");
+  const [showDuration, setShowDuration] = useState(true);
+  const [showTurns, setShowTurns] = useState(true);
+  const [showCalls, setShowCalls] = useState(true);
+  const filteredEvents = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return events.filter((event) => {
+      if (!showCalls && event.kind === "tool") return false;
+      if (!normalized) return true;
+      return [event.type, event.title, event.summary, event.role ?? "", event.model ?? ""].some((value) => value.toLowerCase().includes(normalized));
+    });
+  }, [events, query, showCalls]);
   return (
-    <div>
-      {artifacts.map((artifact) => (
-        <button
-          type="button"
-          key={artifact.id}
-          className={
-            "block w-full border-b border-border px-3 py-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " +
-            (selectedId === artifact.id ? "bg-primary/10" : "hover:bg-state-hover")
-          }
-          onClick={() => onSelect(artifact)}
-          aria-pressed={selectedId === artifact.id}
-        >
-          <div className="flex items-center gap-2">
-            <span className={"rounded-full border px-2 py-0.5 text-[11px] " + (artifact.kind === "decision" ? "border-warning/30 bg-warning/10 text-warning" : "border-border bg-muted text-muted-foreground")}>
-              {artifact.kind}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{artifact.title}</span>
-          </div>
-          <div className="mt-1 text-[11px] text-muted-foreground">{formatTime(artifact.updatedAt)} · {formatBytes(artifact.sizeBytes)}</div>
-          <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{artifact.filePath}</div>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ArtifactDetail({ artifact }: { artifact: TraceArtifact | null }) {
-  if (!artifact) {
-    return <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">Select a decision or context file.</div>;
-  }
-  return (
-    <div className="min-h-[24rem] min-w-0 flex-1 overflow-auto p-4 lg:min-h-0">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={"rounded-full border px-2 py-0.5 text-[11px] " + (artifact.kind === "decision" ? "border-warning/30 bg-warning/10 text-warning" : "border-border bg-muted text-muted-foreground")}>
-          {artifact.kind}
-        </span>
-        <h2 className="text-base font-semibold text-foreground">{artifact.title}</h2>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
+        <button type="button" className="shrink-0 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" onClick={onBack}>← Sessions</button>
+        <SourceBadge source={session.source} />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={session.filePath}>{session.title}</span>
+        <span className="hidden shrink-0 text-[10px] text-muted-foreground md:inline">{totalEvents} events · {session.toolCount} tools · {formatDuration(session.durationMs)}</span>
+        {session.status === "active" ? <span className="shrink-0 text-[10px] text-success">active</span> : null}
+      </header>
+      <TrajectoryToolbar query={query} showDuration={showDuration} showTurns={showTurns} showCalls={showCalls} onQuery={setQuery} onDuration={() => setShowDuration((value) => !value)} onTurns={() => setShowTurns((value) => !value)} onCalls={() => setShowCalls((value) => !value)} />
+      <TrajectoryTimeline events={showCalls ? events : events.filter((event) => event.kind !== "tool")} selectedId={selectedEvent?.id ?? null} showTurns={showTurns} onSelect={onSelectEvent} />
+      {eventsHasMore ? (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-1 text-[10px] text-muted-foreground">
+          <span>Showing {events.length} of {totalEvents} indexed events</span>
+          <button type="button" className="rounded px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-state-hover disabled:opacity-50" disabled={eventsLoading} onClick={onLoadMore}>{eventsLoading ? "Loading…" : "Load more events"}</button>
+        </div>
+      ) : null}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <TrajectoryLedger events={filteredEvents} selectedId={selectedEvent?.id ?? null} showDuration={showDuration} showTurns={showTurns} onSelect={onSelectEvent} />
+        {selectedEvent ? <div className="max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-10 max-lg:w-[min(92%,420px)] lg:w-[clamp(320px,34%,440px)]"><SessionInspector event={selectedEvent} raw={raw} onClose={onCloseInspector} /></div> : null}
       </div>
-      <div className="mt-2 break-all font-mono text-[11px] text-muted-foreground">{artifact.filePath}</div>
-      <pre className="mt-4 whitespace-pre-wrap break-words rounded-md border border-border bg-muted/20 p-4 font-mono text-xs leading-relaxed text-foreground">{artifact.preview}</pre>
     </div>
   );
 }
 
-function TracesPanel(_props: PluginNavPanelProps) {
+function ArtifactDetail({ artifact, onBack }: { artifact: TraceArtifact | null; onBack: () => void }) {
+  if (!artifact) return <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">Artifact not found in the local index.</div>;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
+        <button type="button" className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" onClick={onBack}>← Artifacts</button>
+        <span className="rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning">{artifact.kind}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{artifact.title}</span>
+      </header>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="mb-3 break-all font-mono text-[11px] text-muted-foreground">{artifact.filePath}</div>
+        <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">{artifact.preview}</pre>
+      </div>
+    </div>
+  );
+}
+
+function TracesPanel({ subPath }: PluginNavPanelProps) {
+  const navigate = useBbNavigate();
+  const route = parseTraceRoute(subPath);
   const rpc = useRpc<typeof rpcContract>();
   const connection = useRealtimeConnectionState();
   const [status, setStatus] = useState<TraceStatus | null>(null);
   const [sessions, setSessions] = useState<TraceSession[]>([]);
   const [sessionTotal, setSessionTotal] = useState(0);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionHasMore, setSessionHasMore] = useState(false);
   const [artifacts, setArtifacts] = useState<TraceArtifact[]>([]);
-  const [view, setView] = useState<"sessions" | "artifacts">("sessions");
+  const [artifactTotal, setArtifactTotal] = useState(0);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactHasMore, setArtifactHasMore] = useState(false);
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [sort, setSort] = useState<SessionSort>("updated");
   const [session, setSession] = useState<TraceSession | null>(null);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [totalEvents, setTotalEvents] = useState(0);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsHasMore, setEventsHasMore] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<TraceEvent | null>(null);
   const [raw, setRaw] = useState<string | null>(null);
-  const [selectedArtifact, setSelectedArtifact] = useState<TraceArtifact | null>(null);
+  const [artifact, setArtifact] = useState<TraceArtifact | null>(null);
+  const [detailLoading, setDetailLoading] = useState(() => route.kind === "session");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const sessionRequest = useRef(0);
+  const metadataRequest = useRef(0);
+  const artifactRequest = useRef(0);
+  const eventRequest = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refreshMetadata = useCallback(async (preserveLoadedArtifacts = false) => {
+    const requestId = ++metadataRequest.current;
+    const artifactRequestId = ++artifactRequest.current;
+    setArtifactLoading(true);
     try {
-      const [nextStatus, nextSessions, nextArtifacts] = await Promise.all([
+      const [nextStatus, nextArtifacts] = await Promise.all([
         rpc.call("status", null),
-        rpc.call("listSessions", listSessionsInput(query, source)),
         rpc.call("listArtifacts", listArtifactsInput(query)),
       ]);
+      if (requestId !== metadataRequest.current || artifactRequestId !== artifactRequest.current) return;
       setStatus(nextStatus);
-      setSessions(nextSessions.sessions);
-      setSessionTotal(nextSessions.total);
-      setArtifacts(nextArtifacts.artifacts);
+      setArtifactTotal(nextArtifacts.total);
+      setArtifactHasMore(nextArtifacts.artifacts.length < nextArtifacts.total);
+      setArtifacts((current) => {
+        if (!preserveLoadedArtifacts) return nextArtifacts.artifacts;
+        const incoming = new Map(nextArtifacts.artifacts.map((item) => [item.id, item]));
+        const known = new Set(current.map((item) => item.id));
+        const updated = current.map((item) => incoming.get(item.id) ?? item);
+        return nextArtifacts.artifacts.filter((item) => !known.has(item.id)).concat(updated);
+      });
       setError(null);
-      if (selectedSessionId && !nextSessions.sessions.some((item) => item.id === selectedSessionId)) setSelectedSessionId(nextSessions.sessions[0]?.id ?? null);
-      if (!selectedSessionId && nextSessions.sessions[0]) setSelectedSessionId(nextSessions.sessions[0].id);
-      if (selectedArtifactId && !nextArtifacts.artifacts.some((item) => item.id === selectedArtifactId)) setSelectedArtifactId(nextArtifacts.artifacts[0]?.id ?? null);
-      if (!selectedArtifactId && nextArtifacts.artifacts[0]) setSelectedArtifactId(nextArtifacts.artifacts[0].id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (requestId === metadataRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (artifactRequestId === artifactRequest.current) setArtifactLoading(false);
     }
-  }, [rpc, query, source, selectedSessionId, selectedArtifactId]);
+  }, [rpc, query]);
+
+  const loadArtifactPage = useCallback(async (offset: number) => {
+    const requestId = ++artifactRequest.current;
+    setArtifactLoading(true);
+    try {
+      const next = await rpc.call("listArtifacts", listArtifactsInput(query, undefined, offset));
+      if (requestId !== artifactRequest.current) return;
+      setArtifactTotal(next.total);
+      setArtifactHasMore(offset + next.artifacts.length < next.total);
+      setArtifacts((current) => {
+        const known = new Set(current.map((item) => item.id));
+        return current.concat(next.artifacts.filter((item) => !known.has(item.id)));
+      });
+      setError(null);
+    } catch (cause) {
+      if (requestId === artifactRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (requestId === artifactRequest.current) setArtifactLoading(false);
+    }
+  }, [rpc, query]);
+
+  const loadSessionPage = useCallback(async (offset: number, replace: boolean, preserveLoadedOrder = false) => {
+    const requestId = ++sessionRequest.current;
+    setSessionLoading(true);
+    try {
+      const next = await rpc.call("listSessions", listSessionsInput(query, source, sort, offset));
+      if (requestId !== sessionRequest.current) return;
+      setSessionTotal(next.total);
+      setSessionHasMore(offset + next.sessions.length < next.total);
+      setSessions((current) => {
+        if (replace) return next.sessions;
+        const known = new Set(current.map((item) => item.id));
+        if (!preserveLoadedOrder || offset > 0) return current.concat(next.sessions.filter((item) => !known.has(item.id)));
+        const incoming = new Map(next.sessions.map((item) => [item.id, item]));
+        const updated = current.map((item) => incoming.get(item.id) ?? item);
+        return next.sessions.filter((item) => !known.has(item.id)).concat(updated);
+      });
+      setError(null);
+    } catch (cause) {
+      if (requestId === sessionRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (requestId === sessionRequest.current) setSessionLoading(false);
+    }
+  }, [rpc, query, source, sort]);
+
+  const refresh = useCallback(async (preserveLoadedRows = false) => {
+    await Promise.all([refreshMetadata(preserveLoadedRows), loadSessionPage(0, !preserveLoadedRows, preserveLoadedRows)]);
+  }, [loadSessionPage, refreshMetadata]);
 
   useEffect(() => {
-    const timer = setTimeout(() => void refresh(), 120);
+    setSessions([]);
+    setSessionTotal(0);
+    setSessionHasMore(false);
+    const timer = setTimeout(() => void loadSessionPage(0, true), 120);
     return () => clearTimeout(timer);
-  }, [refresh]);
+  }, [loadSessionPage]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => void refreshMetadata(), 120);
+    return () => clearTimeout(timer);
+  }, [refreshMetadata]);
 
   useRealtime("traces", () => {
-    void refresh();
+    void refresh(true);
   });
 
   useEffect(() => {
-    if (connection === "connected" || connection === "reconnecting") void refresh();
+    if (connection === "connected" || connection === "reconnecting") void refresh(true);
   }, [connection, refresh]);
 
+  const loadMoreSessions = useCallback(() => {
+    if (sessionLoading || !sessionHasMore) return;
+    void loadSessionPage(sessions.length, false);
+  }, [loadSessionPage, sessionHasMore, sessionLoading, sessions.length]);
+
+  const loadMoreArtifacts = useCallback(() => {
+    if (artifactLoading || !artifactHasMore) return;
+    void loadArtifactPage(artifacts.length);
+  }, [artifactHasMore, artifactLoading, artifacts.length, loadArtifactPage]);
+
+  const routeSessionId = route.kind === "session" ? route.id : null;
+
+  const loadMoreEvents = useCallback(() => {
+    if (!routeSessionId || eventsLoading || !eventsHasMore) return;
+    const requestId = ++eventRequest.current;
+    const offset = events.length;
+    setEventsLoading(true);
+    void rpc.call("getSession", { id: routeSessionId, limit: 2_000, offset }).then((result) => {
+      if (requestId !== eventRequest.current) return;
+      if (result.session) setSession(result.session);
+      setEvents((current) => {
+        const known = new Set(current.map((item) => item.id));
+        return current.concat(result.events.filter((item) => !known.has(item.id)));
+      });
+      setTotalEvents(result.totalEvents);
+      setEventsHasMore(offset + result.events.length < result.totalEvents);
+    }).catch((cause) => {
+      if (requestId === eventRequest.current) setError(cause instanceof Error ? cause.message : String(cause));
+    }).finally(() => {
+      if (requestId === eventRequest.current) setEventsLoading(false);
+    });
+  }, [eventRequest, events.length, eventsHasMore, eventsLoading, routeSessionId, rpc]);
+
   useEffect(() => {
-    if (!selectedSessionId) {
+    if (route.kind !== "session") {
+      ++eventRequest.current;
+      setDetailLoading(false);
       setSession(null);
       setEvents([]);
+      setTotalEvents(0);
+      setEventsLoading(false);
+      setEventsHasMore(false);
       setSelectedEvent(null);
+      setRaw(null);
       return;
     }
     let cancelled = false;
-    void rpc.call("getSession", { id: selectedSessionId, limit: 1_000, offset: 0 }).then((result) => {
-      if (cancelled) return;
+    const requestId = ++eventRequest.current;
+    setDetailLoading(true);
+    setEventsLoading(true);
+    setEventsHasMore(false);
+    setSession(null);
+    void rpc.call("getSession", { id: route.id, limit: 2_000, offset: 0 }).then((result) => {
+      if (cancelled || requestId !== eventRequest.current) return;
       setSession(result.session);
       setEvents(result.events);
       setTotalEvents(result.totalEvents);
-      setSelectedEvent(result.events.find(isConversationEvent) ?? result.events[0] ?? null);
+      setEventsHasMore(result.events.length < result.totalEvents);
+      setSelectedEvent(null);
       setRaw(null);
+      setDetailLoading(false);
+    }).catch((cause) => {
+      if (!cancelled && requestId === eventRequest.current) {
+        setDetailLoading(false);
+        setSession(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }).finally(() => {
+      if (!cancelled && requestId === eventRequest.current) setEventsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [eventRequest, rpc, route.kind, route.kind === "session" ? route.id : null]);
+
+  useEffect(() => {
+    if (route.kind !== "artifact") {
+      setArtifact(null);
+      return;
+    }
+    const known = artifacts.find((item) => item.id === route.id);
+    if (known) {
+      setArtifact(known);
+      return;
+    }
+    let cancelled = false;
+    void rpc.call("getArtifact", { id: route.id }).then((result) => {
+      if (!cancelled) setArtifact(result.artifact);
     }).catch((cause) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => {
       cancelled = true;
     };
-  }, [rpc, selectedSessionId]);
+  }, [rpc, route.kind, route.kind === "artifact" ? route.id : null, artifacts]);
 
   useEffect(() => {
     if (!selectedEvent) {
       setRaw(null);
       return;
     }
+    setRaw(null);
     let cancelled = false;
     void rpc.call("getEventRaw", { id: selectedEvent.id }).then((result) => {
       if (!cancelled) setRaw(result.raw);
@@ -538,16 +857,9 @@ function TracesPanel(_props: PluginNavPanelProps) {
 
   const sourceFilters = useMemo(() => {
     const values = new Map<string, string>();
-    for (const root of status?.sources ?? []) {
-      if (root.kind === "session") values.set(root.source, root.source);
-    }
+    for (const root of status?.sources ?? []) if (root.kind === "session") values.set(root.source, root.source);
     return [...values.keys()];
   }, [status]);
-
-  const sourceErrors = useMemo(
-    () => (status?.sources ?? []).filter((root) => root.error && root.exists),
-    [status],
-  );
 
   async function rescan() {
     setBusy(true);
@@ -562,80 +874,25 @@ function TracesPanel(_props: PluginNavPanelProps) {
     }
   }
 
+  if (route.kind === "session") {
+    if (detailLoading || (session && session.id !== route.id && session.filePath !== route.id)) return <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">Loading trajectory…</div>;
+    if (!session) return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 bg-background text-center">
+        <div className="text-sm font-medium text-foreground">Session not found</div>
+        <div className="text-xs text-muted-foreground">This deep link no longer matches a locally indexed session.</div>
+        <button type="button" className={buttonClass} onClick={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })}>Back to sessions</button>
+      </div>
+    );
+    return <TrajectoryScreen session={session} events={events} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedEvent={selectedEvent} raw={raw} onSelectEvent={setSelectedEvent} onLoadMore={loadMoreEvents} onCloseInspector={() => setSelectedEvent(null)} onBack={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })} />;
+  }
+
+  if (route.kind === "artifact") return <ArtifactDetail artifact={artifact} onBack={() => navigate.toPluginPanel("traces", { subPath: "artifacts", replace: true })} />;
+
+  const mode = route.kind === "artifacts" ? "artifacts" : "sessions";
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
-      <div className="shrink-0 border-b border-border bg-muted/20 px-4 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            <span className="text-sm font-semibold">Local session explorer</span>
-            <StatusDot status={status} />
-            <span className="text-xs text-muted-foreground">private to this device</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {status ? <span className="text-[11px] text-muted-foreground">{status.sessions} sessions · {status.events} events · {formatBytes(status.bytes)}</span> : null}
-            <button type="button" className={buttonClass} disabled={busy || status?.state === "indexing"} onClick={() => void rescan()}>
-              {busy || status?.state === "indexing" ? "Indexing…" : "Re-scan"}
-            </button>
-          </div>
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <div className="min-w-52 flex-1">
-            <input
-              className={inputClass}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search sessions, tools, prompts, and decision files"
-              aria-label="Search local traces"
-            />
-          </div>
-          <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-            <button type="button" className={view === "sessions" ? primaryButtonClass : buttonClass} onClick={() => setView("sessions")}>Sessions</button>
-            <button type="button" className={view === "artifacts" ? primaryButtonClass : buttonClass} onClick={() => setView("artifacts")}>Decisions</button>
-          </div>
-          {view === "sessions" ? (
-            <div className="flex max-w-full items-center gap-1 overflow-auto">
-              <button type="button" className={source === "" ? "rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary" : "rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-state-hover"} onClick={() => setSource("")}>All</button>
-              {sourceFilters.map((item) => (
-                <button key={item} type="button" className={source === item ? "rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary" : "rounded-md px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-state-hover"} onClick={() => setSource(item)}>
-                  {item === "dsh" ? "DeepSeek" : item}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-        {status?.lastError ? <div className="mt-2 text-xs text-destructive" role="alert">{status.lastError}</div> : null}
-        {sourceErrors.length ? (
-          <div className="mt-2 text-xs text-warning" role="status">
-            {sourceErrors.length} local source{sourceErrors.length === 1 ? "" : "s"} need attention: {sourceErrors.map((root) => root.label + " — " + root.error).join("; ")}
-          </div>
-        ) : null}
-        {error ? <div className="mt-2 text-xs text-destructive" role="alert">{error}</div> : null}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-auto">
-        {view === "sessions" ? (
-          <div className="grid min-h-full min-w-0 grid-cols-1 lg:grid-cols-[minmax(280px,34%)_1fr]">
-            <aside className="min-h-[16rem] overflow-auto border-b border-border lg:min-h-0 lg:border-b-0 lg:border-r" aria-label="Indexed sessions">
-              <div className="flex items-center justify-between border-b border-border px-3 py-2 text-[11px] text-muted-foreground">
-                <span>{sessionTotal} matching sessions</span>
-                <span>{status?.sources.filter((root) => root.kind === "session" && root.exists).length ?? 0} sources detected</span>
-              </div>
-              {sessions.length ? sessions.map((item) => <SessionRow key={item.id} session={item} selected={item.id === selectedSessionId} onSelect={() => setSelectedSessionId(item.id)} />) : (
-                <div className="p-4 text-sm text-muted-foreground">{status?.state === "indexing" ? "Indexing local session files…" : "No sessions found in the detected roots."}</div>
-              )}
-            </aside>
-            <SessionDetail session={session} events={events} totalEvents={totalEvents} selectedEvent={selectedEvent} raw={raw} onSelectEvent={setSelectedEvent} />
-          </div>
-        ) : (
-          <div className="grid min-h-full min-w-0 grid-cols-1 lg:grid-cols-[minmax(280px,34%)_1fr]">
-            <aside className="min-h-[16rem] overflow-auto border-b border-border lg:min-h-0 lg:border-b-0 lg:border-r" aria-label="Decision and context files">
-              <div className="border-b border-border px-3 py-2 text-[11px] text-muted-foreground">{artifacts.length} indexed files</div>
-              <ArtifactList artifacts={artifacts} selectedId={selectedArtifactId} onSelect={(item) => { setSelectedArtifactId(item.id); setSelectedArtifact(item); }} />
-            </aside>
-            <ArtifactDetail artifact={selectedArtifact ?? artifacts.find((item) => item.id === selectedArtifactId) ?? null} />
-          </div>
-        )}
-      </div>
+      <CollectionHeader mode={mode} status={status} busy={busy} query={query} source={source} sourceFilters={sourceFilters} sort={sort} onQuery={setQuery} onSource={setSource} onSort={setSort} onMode={(nextMode) => navigate.toPluginPanel("traces", { subPath: nextMode === "sessions" ? "" : "artifacts", replace: true })} onRescan={() => void rescan()} error={error} />
+      {mode === "sessions" ? <SessionCollection sessions={sessions} total={sessionTotal} status={status} loading={sessionLoading} hasMore={sessionHasMore} hasFilter={Boolean(query.trim() || source)} onLoadMore={loadMoreSessions} onOpen={(item) => navigate.toPluginPanel("traces", { subPath: `session/${encodeURIComponent(item.id)}` })} /> : <ArtifactCollection artifacts={artifacts} total={artifactTotal} loading={artifactLoading} hasMore={artifactHasMore} onLoadMore={loadMoreArtifacts} onOpen={(item) => navigate.toPluginPanel("traces", { subPath: `artifact/${encodeURIComponent(item.id)}` })} />}
     </div>
   );
 }

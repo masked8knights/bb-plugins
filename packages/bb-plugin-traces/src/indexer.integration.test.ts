@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureSchema, TraceIndexer, type RootSpec } from "./indexer";
+import { defaultArtifactRoots, ensureSchema, TraceIndexer, type RootSpec } from "./indexer";
 
 const databases: Database.Database[] = [];
 const temporaryDirectories: string[] = [];
@@ -14,6 +14,30 @@ afterEach(async () => {
 });
 
 describe("TraceIndexer", () => {
+  it("does not treat a home-directory host cwd as a workspace root", () => {
+    expect(defaultArtifactRoots("/Users/tester", "/Users/tester").map((root) => root.id)).toEqual([
+      "bb-thread-storage",
+    ]);
+    expect(defaultArtifactRoots("/Users/tester", "/Users/tester/project").map((root) => root.id)).toContain("current-workspace");
+  });
+
+  it("sorts the full indexed session set by collection sort", () => {
+    const database = new Database(":memory:");
+    databases.push(database);
+    ensureSchema(database);
+    database.prepare(
+      "INSERT INTO trace_sessions (id, source_id, title, file_path, started_at, updated_at, event_count, duration_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed')",
+    ).run("short", "codex", "Short", "/tmp/short.jsonl", 300, 200, 2, 100);
+    database.prepare(
+      "INSERT INTO trace_sessions (id, source_id, title, file_path, started_at, updated_at, event_count, duration_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed')",
+    ).run("busy", "claude", "Busy", "/tmp/busy.jsonl", 100, 100, 8, 2_000);
+
+    const indexer = new TraceIndexer(database, true);
+    expect(indexer.listSessions({ sort: "events", limit: 1, offset: 0 }).sessions[0]?.id).toBe("busy");
+    expect(indexer.listSessions({ sort: "duration", limit: 1, offset: 0 }).sessions[0]?.id).toBe("busy");
+    expect(indexer.listSessions({ sort: "started", limit: 1, offset: 0 }).sessions[0]?.id).toBe("short");
+  });
+
   it("indexes local sessions, preserves payloads, rescans appends, and indexes decisions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-traces-"));
     temporaryDirectories.push(directory);
@@ -93,8 +117,12 @@ describe("TraceIndexer", () => {
       summary: '{"command":"pwd"}',
     });
     expect(indexer.rawEvent(detail.events[1]!.id).raw).toContain('"tool/call"');
+    expect(indexer.listSessions({ query: "Investigate", limit: 10, offset: 0 }).total).toBe(1);
+    expect(indexer.listSessions({ query: "pwd", limit: 10, offset: 0 }).total).toBe(1);
+    expect(indexer.getSession(encodeURIComponent(sessionId), 10, 0).session?.id).toBe(sessionId);
 
     const indexedAt = database.prepare("SELECT indexed_at FROM trace_files WHERE path = ?").get(sessionPath) as { indexed_at: number };
+    database.prepare("UPDATE trace_files SET parser_version = 1 WHERE path = ?").run(sessionPath);
     await indexer.scan([sessionRoot], [artifactRoot]);
     expect((database.prepare("SELECT indexed_at FROM trace_files WHERE path = ?").get(sessionPath) as { indexed_at: number }).indexed_at).toBe(indexedAt.indexed_at);
 

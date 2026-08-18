@@ -21,4 +21,28 @@ describe("trace RPC inputs", () => {
       offset: 0,
     });
   });
+
+  it("passes non-default session sorting without adding an unnecessary default field", () => {
+    expect(listSessionsInput("", "", "duration")).toEqual({
+      sort: "duration",
+      limit: 100,
+      offset: 0,
+    });
+  });
+
+  it("builds continuation requests without losing the active filters", () => {
+    expect(listSessionsInput("tool", "codex", "events", 100, 50)).toEqual({
+      query: "tool",
+      source: "codex",
+      sort: "events",
+      limit: 50,
+      offset: 100,
+    });
+    expect(listArtifactsInput("plan", "decision", 25, 50)).toEqual({
+      query: "plan",
+      kind: "decision",
+      limit: 50,
+      offset: 25,
+    });
+  });
 });

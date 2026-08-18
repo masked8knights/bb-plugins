@@ -105,6 +105,7 @@ export const rpcContract = defineRpcContract({
       .object({
         query: z.string().max(500).optional(),
         source: z.string().max(80).optional(),
+        sort: z.enum(["updated", "started", "events", "duration"]).optional(),
         limit: z.number().int().min(1).max(200).default(100),
         offset: z.number().int().min(0).max(100_000).default(0),
       })
@@ -226,7 +227,7 @@ export default async function plugin(bb: BbPluginApi) {
   let indexing = false;
   let lastScanAt: number | null = null;
   let lastError: string | null = null;
-  let scanRequested = true;
+  let scanRequested = false;
   let activeScan: Promise<void> | null = null;
 
   async function roots(): Promise<{ sessions: RootSpec[]; artifacts: RootSpec[] }> {
@@ -268,18 +269,21 @@ export default async function plugin(bb: BbPluginApi) {
     activeScan = (async () => {
       indexing = true;
       lastError = null;
+      let changed = false;
       try {
         const configured = await roots();
+        const before = indexer.stats(null, false, null);
         await indexer.scan(configured.sessions, configured.artifacts, signal);
-        lastScanAt = Date.now();
-        publish();
+        const after = indexer.stats(null, false, null);
+        changed = before.sessions !== after.sessions || before.events !== after.events || before.artifacts !== after.artifacts || before.bytes !== after.bytes;
+        if (!signal?.aborted) lastScanAt = Date.now();
       } catch (error) {
         lastError = errorText(error);
         bb.log.warn("Trace index scan failed: " + lastError);
       } finally {
         indexing = false;
         activeScan = null;
-        publish();
+        if (changed || lastError) publish();
       }
     })();
     return activeScan;
@@ -310,8 +314,12 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   settings.onChange(() => {
-    scanRequested = true;
-    publish();
+    void settings.get().then((current) => {
+      scanRequested = current.autoIndex;
+      publish();
+    }).catch((error) => {
+      lastError = errorText(error);
+    });
   });
 
   bb.background.service("indexer", {

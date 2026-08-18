@@ -107,10 +107,15 @@ export type SqliteDb = {
 type DbRow = Record<string, unknown>;
 
 const MAX_RAW_JSON = 200_000;
+const MAX_EVENT_TEXT = 20_000;
 const MAX_ARTIFACT_PREVIEW = 40_000;
 const MAX_DISCOVERED_FILES = 20_000;
 const MAX_ARTIFACT_DEPTH = 9;
 const INDEXER_VERSION = 2;
+// v1 rows use the same durable schema and event identity as v2. Keep both
+// readable so a parser improvement does not turn the next plugin restart into
+// a full historical reparse; future incompatible formats can be added here.
+const COMPATIBLE_PARSER_VERSIONS = new Set([1, INDEXER_VERSION]);
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   "node_modules",
@@ -118,6 +123,11 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   "build",
   ".next",
   "cache",
+  ".cache",
+  ".pnpm-store",
+  ".turbo",
+  ".venv",
+  ".repos",
   "blobs",
   "Attachments",
   "attachments",
@@ -128,6 +138,10 @@ type DiscoveryResult = {
   accessible: boolean;
   complete: boolean;
 };
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 const SOURCE_LABELS: Record<TraceSourceId, string> = {
   codex: "Codex",
@@ -164,8 +178,20 @@ function clip(value: string, max: number): string {
   return value.slice(0, max) + "\n…";
 }
 
+function ftsQuery(value: string): string {
+  return value
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replaceAll('"', '""'))
+    .filter(Boolean)
+    .map((term) => `"${term}"`)
+    .join(" AND ");
+}
+
 function normalizeText(value: string): string {
-  return value.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").trim();
+  const bounded = value.length > MAX_EVENT_TEXT ? value.slice(0, MAX_EVENT_TEXT) : value;
+  const normalized = bounded.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n").trim();
+  return value.length > MAX_EVENT_TEXT ? normalized + "\n…" : normalized;
 }
 
 function findString(value: unknown, keys: string[], depth = 0): string | null {
@@ -215,10 +241,14 @@ function textFrom(value: unknown, depth = 0): string {
   if (typeof value === "string") return normalizeText(value);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) {
-    return value
-      .map((item) => textFrom(item, depth + 1))
-      .filter(Boolean)
-      .join("\n");
+    let output = "";
+    for (const item of value) {
+      const part = textFrom(item, depth + 1);
+      if (!part) continue;
+      output += (output ? "\n" : "") + part;
+      if (output.length >= MAX_EVENT_TEXT) return clip(output, MAX_EVENT_TEXT);
+    }
+    return output;
   }
   if (!isRecord(value)) return "";
   const preferred = [
@@ -418,18 +448,25 @@ export function defaultSessionRoots(home = homedir()): RootSpec[] {
   ];
 }
 
-export function defaultArtifactRoots(home = homedir(), cwd = process.cwd()): RootSpec[] {
-  return [
+export function defaultArtifactRoots(home = homedir(), cwd = process.env.BB_WORKSPACE_PATH ?? process.cwd()): RootSpec[] {
+  const roots: RootSpec[] = [
     { id: "bb-thread-storage", source: "artifacts", label: "BB thread storage", path: join(home, ".bb", "thread-storage"), kind: "artifact" },
-    { id: "bb-personal-workspaces", source: "artifacts", label: "BB personal workspaces", path: join(home, ".bb", "personal-workspaces"), kind: "artifact" },
-    { id: "current-workspace", source: "artifacts", label: "Current workspace", path: cwd, kind: "artifact" },
   ];
+  // The plugin host may start with the user's home directory as cwd. Never
+  // interpret that as the current project: scanning a home directory makes a
+  // local index appear to run forever and can ingest unrelated files. The
+  // explicit workspace-roots setting remains available for other projects.
+  if (resolve(cwd) !== resolve(home)) {
+    roots.push({ id: "current-workspace", source: "artifacts", label: "Current workspace", path: cwd, kind: "artifact" });
+  }
+  return roots;
 }
 
 async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Promise<DiscoveryResult> {
   const output: string[] = [];
   let accessible = true;
   let complete = true;
+  let visitedEntries = 0;
   async function walk(directory: string, depth: number): Promise<void> {
     if (signal?.aborted) {
       accessible = false;
@@ -449,6 +486,8 @@ async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Pr
       return;
     }
     for (const entry of entries) {
+      visitedEntries += 1;
+      if (visitedEntries % 256 === 0) await yieldToEventLoop();
       if (signal?.aborted) {
         accessible = false;
         complete = false;
@@ -474,7 +513,6 @@ async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Pr
       if (
         normalized.includes("/.plans/") ||
         normalized.includes("/.agents/") ||
-        normalized.includes("/.bb/") ||
         /(decision|plan|checkpoint|handoff|review|state|agent)/i.test(entry.name)
       ) {
         output.push(path);
@@ -538,10 +576,14 @@ async function* fileLines(
   format: TraceFormat,
   startByte: number,
   startLine: number,
+  endByte?: number,
   signal?: AbortSignal,
 ): AsyncGenerator<TraceLine> {
   if (format === "jsonl") {
-    const stream = createReadStream(filePath, { start: startByte });
+    const stream = createReadStream(filePath, {
+      start: startByte,
+      ...(endByte !== undefined && endByte > startByte ? { end: endByte - 1 } : {}),
+    });
     yield* completeLines(stream, startByte, startLine, signal);
     return;
   }
@@ -745,8 +787,9 @@ export class TraceIndexer {
         : !discovery.complete
           ? "Discovery limit reached; cached rows were preserved"
           : null;
-      for (const filePath of files) {
+      for (const [fileIndex, filePath] of files.entries()) {
         if (signal?.aborted) return;
+        if (fileIndex % 16 === 0) await yieldToEventLoop();
         seenSessionFiles.add(filePath);
         try {
           bytes += (await stat(filePath)).size;
@@ -778,8 +821,9 @@ export class TraceIndexer {
         : !discovery.complete
           ? "Discovery limit reached; cached rows were preserved"
           : null;
-      for (const filePath of files) {
+      for (const [fileIndex, filePath] of files.entries()) {
         if (signal?.aborted) return;
+        if (fileIndex % 16 === 0) await yieldToEventLoop();
         seenArtifacts.add(filePath);
         try {
           const fileStat = await stat(filePath);
@@ -800,7 +844,7 @@ export class TraceIndexer {
     );
   }
 
-  listSessions(input: { query?: string; source?: string; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
+  listSessions(input: { query?: string; source?: string; sort?: "updated" | "started" | "events" | "duration"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
     const query = input.query?.trim() ?? "";
     const source = input.source?.trim() ?? "";
     const clauses: string[] = [];
@@ -810,25 +854,42 @@ export class TraceIndexer {
       params.push(source);
     }
     if (query) {
-      clauses.push("(title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR id IN (SELECT session_id FROM trace_events WHERE summary LIKE ? OR type LIKE ?))");
       const like = "%" + query + "%";
-      params.push(like, like, like, like, like);
+      const eventSearch = ftsQuery(query);
+      if (this.ftsEnabled && eventSearch) {
+        clauses.push("(id LIKE ? OR source_id LIKE ? OR title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR model LIKE ? OR id IN (SELECT session_id FROM trace_event_fts WHERE trace_event_fts MATCH ?))");
+        params.push(like, like, like, like, like, like, eventSearch);
+      } else {
+        clauses.push("(id LIKE ? OR source_id LIKE ? OR title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR model LIKE ? OR id IN (SELECT session_id FROM trace_events WHERE summary LIKE ? OR type LIKE ? OR title LIKE ?))");
+        params.push(like, like, like, like, like, like, like, like, like);
+      }
     }
     const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
     const totalRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_sessions" + where).get(...params) as DbRow;
+    const orderBy = input.sort === "started"
+      ? "COALESCE(started_at, 0) DESC, file_path DESC"
+      : input.sort === "events"
+        ? "COALESCE(event_count, 0) DESC, COALESCE(updated_at, 0) DESC, file_path DESC"
+        : input.sort === "duration"
+          ? "COALESCE(duration_ms, -1) DESC, COALESCE(updated_at, 0) DESC, file_path DESC"
+          : "COALESCE(updated_at, 0) DESC, file_path DESC";
     const rows = this.db
-      .prepare("SELECT * FROM trace_sessions" + where + " ORDER BY COALESCE(updated_at, 0) DESC, file_path DESC LIMIT ? OFFSET ?")
+      .prepare("SELECT * FROM trace_sessions" + where + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?")
       .all(...params, input.limit, input.offset) as DbRow[];
     return { sessions: rows.map(rowToSession), total: numberValue(totalRow.count) ?? 0 };
   }
 
   getSession(sessionId: string, limit: number, offset: number): { session: SessionSummary | null; events: EventSummary[]; totalEvents: number } {
-    const sessionRow = this.db.prepare("SELECT * FROM trace_sessions WHERE id = ?").get(sessionId) as DbRow | undefined;
+    const decodedSessionId = safeDecodeURIComponent(sessionId);
+    const sessionRow = this.db
+      .prepare("SELECT * FROM trace_sessions WHERE id = ? OR id = ? OR file_path = ? LIMIT 1")
+      .get(sessionId, decodedSessionId, decodedSessionId) as DbRow | undefined;
     if (!sessionRow) return { session: null, events: [], totalEvents: 0 };
-    const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events WHERE session_id = ?").get(sessionId) as DbRow;
+    const resolvedSessionId = String(sessionRow.id);
+    const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events WHERE session_id = ?").get(resolvedSessionId) as DbRow;
     const eventRows = this.db
       .prepare("SELECT * FROM trace_events WHERE session_id = ? ORDER BY line_number ASC LIMIT ? OFFSET ?")
-      .all(sessionId, limit, offset) as DbRow[];
+      .all(resolvedSessionId, limit, offset) as DbRow[];
     return {
       session: rowToSession(sessionRow),
       events: eventRows.map(rowToEvent),
@@ -912,7 +973,8 @@ export class TraceIndexer {
     const format = root.format ?? "jsonl";
     const mtimeKey = Math.round(fileStat.mtimeMs);
     const existingMtime = numberValue(existingFile?.mtime_ms);
-    const parserChanged = numberValue(existingFile?.parser_version) !== INDEXER_VERSION;
+    const existingParserVersion = numberValue(existingFile?.parser_version);
+    const parserChanged = Boolean(existingFile) && existingParserVersion !== null && !COMPATIBLE_PARSER_VERSIONS.has(existingParserVersion);
     const unchanged =
       existingFile &&
       !parserChanged &&
@@ -963,9 +1025,13 @@ export class TraceIndexer {
           "timestamp = excluded.timestamp, duration_ms = excluded.duration_ms, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens, usage_is_total = excluded.usage_is_total, " +
           "turn = excluded.turn, step = excluded.step, depth = excluded.depth, model = excluded.model, cwd = excluded.cwd, raw_json = excluded.raw_json, raw_truncated = excluded.raw_truncated",
       );
-      const deleteFts = this.ftsEnabled ? this.db.prepare("DELETE FROM trace_event_fts WHERE event_id = ?") : null;
       const insertFts = this.ftsEnabled ? this.db.prepare("INSERT INTO trace_event_fts (event_id, session_id, content) VALUES (?, ?, ?)") : null;
-      for await (const line of fileLines(filePath, format, startByte, startLine, signal)) {
+      for await (const line of fileLines(filePath, format, startByte, startLine, fileStat.size, signal)) {
+        if (signal?.aborted) break;
+        const relativeLine = line.line - startLine;
+        if (relativeLine === 0 || relativeLine % 8 === 0) {
+          await yieldToEventLoop();
+        }
         if (signal?.aborted) break;
         indexedBytes = line.endByte;
         indexedLines = line.line + 1;
@@ -1003,7 +1069,6 @@ export class TraceIndexer {
           storedRaw.length < line.text.length ? 1 : 0,
         );
         if (this.ftsEnabled) {
-          deleteFts?.run(eventId);
           insertFts?.run(eventId, sessionId, event.type + " " + event.title + " " + event.summary);
         }
         aggregate.eventCount += 1;
@@ -1150,5 +1215,13 @@ export class TraceIndexer {
       }
       this.db.prepare("DELETE FROM trace_roots WHERE id = ?").run(rootId);
     }
+  }
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
 }
