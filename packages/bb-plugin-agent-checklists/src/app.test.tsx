@@ -584,9 +584,9 @@ describe("Checklists app", () => {
   });
 
   it("shows only the next few incomplete steps above the composer", async () => {
-    const banner = app.composerCustomizations[0]!.banners![0]!;
+    const bannerDefinition = app.composerCustomizations[0]!.banners![0]!;
     const slot = renderSlot(
-      banner,
+      bannerDefinition,
       {},
       {
         composer: { scope: { kind: "thread", threadId: "thread-1" } },
@@ -601,6 +601,12 @@ describe("Checklists app", () => {
     expect(slot.getByText("Up next:")).toBeTruthy();
     expect(slot.queryByText("Run checks")).toBeNull();
     expect(slot.queryByRole("checkbox")).toBeNull();
+    const bannerRegion = slot.getByRole("region", { name: "Checklist status" });
+    expect(bannerRegion.className).toContain("min-w-0");
+    expect(bannerRegion.className).toContain("overflow-hidden");
+    expect((bannerRegion.firstElementChild as HTMLElement).className).toContain("flex-wrap");
+    expect((bannerRegion.firstElementChild?.firstElementChild as HTMLElement).className).toContain("basis-full");
+    expect((bannerRegion.children[2] as HTMLElement).className).toContain("flex-wrap");
     fireEvent.click(slot.getByRole("button", { name: "Open Checklist details for Release Checklist" }));
     expect(slot.inspection.navigateCalls).toContainEqual({
       method: "openThreadPanel",

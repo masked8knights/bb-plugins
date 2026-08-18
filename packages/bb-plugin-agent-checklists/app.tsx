@@ -1225,9 +1225,9 @@ function ComposerChecklistBanner() {
 
   if (error) {
     return (
-      <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">
-        <span className="min-w-0 flex-1">Checklist unavailable: {error}</span>
-        <button type="button" className={quietButtonClass} onClick={() => void refresh()}>Retry</button>
+      <div className="mx-auto mb-2 flex w-full min-w-0 max-w-3xl flex-wrap items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">
+        <span className="min-w-0 flex-1 break-words">Checklist unavailable: {error}</span>
+        <button type="button" className={`${quietButtonClass} shrink-0`} onClick={() => void refresh()}>Retry</button>
       </div>
     );
   }
@@ -1284,14 +1284,14 @@ function ComposerChecklistBanner() {
 
   return (
     <div
-      className="mx-auto mb-2 w-full max-w-3xl rounded-md border border-border bg-surface-recessed/10 px-3 py-2.5"
+      className="mx-auto mb-2 w-full min-w-0 max-w-3xl overflow-hidden rounded-md border border-border bg-surface-recessed/10 px-3 py-2.5"
       role="region"
       aria-label="Checklist status"
     >
-      <div className="flex items-center gap-3">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{checklist.name}</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span className="min-w-0 basis-full truncate text-sm font-medium text-foreground sm:flex-1 sm:basis-auto">{checklist.name}</span>
         {checklist.status !== "active" ? (
-          <span className={`shrink-0 text-xs font-medium ${statusTone(checklist.status)}`}>
+          <span className={`min-w-0 max-w-full break-words text-xs font-medium ${statusTone(checklist.status)}`}>
             {statusLabel(checklist.status)}
           </span>
         ) : null}
@@ -1303,7 +1303,7 @@ function ComposerChecklistBanner() {
         </span>
         <button
           type="button"
-          className={quietButtonClass}
+          className={`${quietButtonClass} shrink-0`}
           aria-label={`Open Checklist details for ${checklist.name}`}
           onClick={openDetails}
         >
@@ -1335,19 +1335,21 @@ function ComposerChecklistBanner() {
           style={{ width: `${total === 0 ? 0 : Math.round((completed / total) * 100)}%` }}
         />
       </div>
-      <div className="mt-2 flex min-w-0 items-center gap-2 text-xs">
-        {nextStep ? (
-          <>
-            <span className="shrink-0 font-medium text-primary">Up next:</span>
-            <span className="min-w-0 truncate text-muted-foreground">{nextStep.title}</span>
-          </>
-        ) : (
-          <span className="text-success">All agent steps complete</span>
-        )}
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
+        <div className="flex min-w-0 flex-1 basis-full items-center gap-2 sm:basis-auto">
+          {nextStep ? (
+            <>
+              <span className="shrink-0 font-medium text-primary">Up next:</span>
+              <span className="min-w-0 truncate text-muted-foreground">{nextStep.title}</span>
+            </>
+          ) : (
+            <span className="min-w-0 text-success">All agent steps complete</span>
+          )}
+        </div>
         {checklist.status === "awaiting_approval" ? (
           <button
             type="button"
-            className={`${quietButtonClass} ml-auto shrink-0 text-foreground`}
+            className={`${quietButtonClass} shrink-0 text-foreground sm:ml-auto`}
             disabled={actionBusy}
             onClick={() =>
               void performAction(async () =>
@@ -1360,7 +1362,7 @@ function ComposerChecklistBanner() {
         ) : checklist.status === "paused" ? (
           <button
             type="button"
-            className={`${quietButtonClass} ml-auto shrink-0 text-foreground`}
+            className={`${quietButtonClass} shrink-0 text-foreground sm:ml-auto`}
             disabled={actionBusy}
             onClick={() =>
               void performAction(() =>
@@ -1373,7 +1375,7 @@ function ComposerChecklistBanner() {
         ) : checklist.status === "limit_reached" ? (
           <button
             type="button"
-            className={`${quietButtonClass} ml-auto shrink-0 text-foreground`}
+            className={`${quietButtonClass} shrink-0 text-foreground sm:ml-auto`}
             disabled={actionBusy}
             onClick={() =>
               void performAction(() => rpc.call("resume", { checklistId: checklist.id }))
