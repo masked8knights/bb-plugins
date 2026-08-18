@@ -227,8 +227,8 @@ function EventLedger({
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{event.title}</span>
             {event.durationMs !== null ? <span className="shrink-0 text-[10px] text-muted-foreground">{formatDuration(event.durationMs)}</span> : null}
           </div>
-          <div className={mode === "conversation" ? "mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground" : "mt-1 line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground"}>
-            {mode === "conversation" ? event.summary : shortText(event.summary)}
+          <div className={mode === "conversation" ? "mt-2 line-clamp-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground" : "mt-1 line-clamp-2 whitespace-pre-wrap break-words text-xs text-muted-foreground"}>
+            {mode === "conversation" ? shortText(event.summary, 520) : shortText(event.summary)}
           </div>
           {event.inputTokens !== null || event.outputTokens !== null ? (
             <div className="mt-1 flex gap-3 text-[10px] text-muted-foreground">
@@ -243,29 +243,69 @@ function EventLedger({
 }
 
 function SessionInspector({ event, raw }: { event: TraceEvent | null; raw: string | null }) {
+  const [tab, setTab] = useState<"summary" | "payload" | "timing">("summary");
+
+  useEffect(() => {
+    setTab("summary");
+  }, [event?.id]);
+
   if (!event) {
     return (
-      <div className="flex min-h-28 items-center justify-center rounded-md border border-dashed border-border px-4 text-center text-xs text-muted-foreground">
+      <div className="flex min-h-28 items-center justify-center px-4 text-center text-xs text-muted-foreground">
         Select a row to inspect its payload and timing.
       </div>
     );
   }
   return (
-    <div className="rounded-md border border-border bg-muted/20">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+    <div className="min-h-full bg-muted/10">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-3">
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-foreground">{event.title}</div>
-          <div className="text-[11px] text-muted-foreground">{event.type} · line {event.line}</div>
+          <div className="flex items-center gap-2">
+            <span className={"rounded-full border px-2 py-0.5 text-[11px] font-medium " + (event.kind === "tool" ? "border-warning/30 bg-warning/10 text-warning" : "border-primary/30 bg-primary/10 text-primary")}>
+              {conversationLabel(event)}
+            </span>
+            <div className="truncate text-sm font-medium text-foreground">{event.title}</div>
+          </div>
+          <div className="mt-1 text-[11px] text-muted-foreground">{event.type} · line {event.line}</div>
         </div>
         <div className="flex gap-3 text-[10px] text-muted-foreground">
           <span>{formatClock(event.timestamp)}</span>
           <span>{formatDuration(event.durationMs)}</span>
         </div>
       </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-        {raw ?? event.rawJson}
-      </pre>
-      {event.rawTruncated ? <div className="border-t border-border px-3 py-2 text-[10px] text-warning">Payload preview is truncated; the source session file remains unchanged.</div> : null}
+      <div className="flex items-center gap-1 border-b border-border px-3 py-2">
+        {(["summary", "payload", "timing"] as const).map((item) => (
+          <button
+            key={item}
+            type="button"
+            className={tab === item ? primaryButtonClass : buttonClass}
+            onClick={() => setTab(item)}
+          >
+            {item[0]!.toUpperCase() + item.slice(1)}
+          </button>
+        ))}
+      </div>
+      {tab === "summary" ? (
+        <div className="whitespace-pre-wrap break-words p-3 text-sm leading-relaxed text-foreground">{event.summary}</div>
+      ) : null}
+      {tab === "payload" ? (
+        <>
+          <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+            {raw ?? event.rawJson}
+          </pre>
+          {event.rawTruncated ? <div className="border-t border-border px-3 py-2 text-[10px] text-warning">Payload preview is truncated; the source session file remains unchanged.</div> : null}
+        </>
+      ) : null}
+      {tab === "timing" ? (
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 p-3 text-xs">
+          <dt className="text-muted-foreground">Timestamp</dt><dd className="text-foreground">{formatTime(event.timestamp)}</dd>
+          <dt className="text-muted-foreground">Duration</dt><dd className="text-foreground">{formatDuration(event.durationMs)}</dd>
+          <dt className="text-muted-foreground">Input tokens</dt><dd className="text-foreground">{formatTokens(event.inputTokens)}</dd>
+          <dt className="text-muted-foreground">Output tokens</dt><dd className="text-foreground">{formatTokens(event.outputTokens)}</dd>
+          <dt className="text-muted-foreground">Model</dt><dd className="break-all font-mono text-foreground">{event.model ?? "—"}</dd>
+          <dt className="text-muted-foreground">Working directory</dt><dd className="break-all font-mono text-foreground">{event.cwd ?? "—"}</dd>
+        </dl>
+      ) : null}
     </div>
   );
 }
@@ -298,7 +338,7 @@ function SessionDetail({
   }
   const conversationCount = events.filter(isConversationEvent).length;
   return (
-    <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3 overflow-auto p-3 lg:min-h-0">
+    <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col gap-3 overflow-auto p-3 lg:min-h-0 lg:overflow-hidden">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -335,8 +375,12 @@ function SessionDetail({
           </button>
         </div>
       </div>
-      <EventLedger events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} mode={ledgerMode} />
-      <SessionInspector event={selectedEvent} raw={raw} />
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(280px,34%)]">
+        <EventLedger events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} mode={ledgerMode} />
+        <aside className="min-h-[18rem] min-w-0 overflow-auto rounded-md border border-border" aria-label="Selected event inspector">
+          <SessionInspector event={selectedEvent} raw={raw} />
+        </aside>
+      </div>
     </div>
   );
 }
@@ -466,7 +510,7 @@ function TracesPanel(_props: PluginNavPanelProps) {
       setSession(result.session);
       setEvents(result.events);
       setTotalEvents(result.totalEvents);
-      setSelectedEvent(null);
+      setSelectedEvent(result.events.find(isConversationEvent) ?? result.events[0] ?? null);
       setRaw(null);
     }).catch((cause) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
