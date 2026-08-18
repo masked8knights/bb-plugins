@@ -126,7 +126,7 @@ const saveTemplateInput = z
   .strict()
   .refine(
     (input) => input.templateId == null || input.expectedUpdatedAt !== undefined,
-    "An expected revision is required when editing an Agent Checklist",
+    "An expected revision is required when editing a checklist",
   );
 
 const deleteTemplateInput = z
@@ -263,8 +263,8 @@ function reminderText(checklist: Checklist): string {
   const total = checklist.steps.length;
   const remaining = total - complete;
   return [
-    "Agent Checklist continuation",
-    `BB resumed this thread because the attached Agent Checklist "${checklist.name}" is still incomplete (${complete} of ${total} steps complete; ${remaining} remaining). This is not a new user request. Do not stop merely because the previous turn became idle.`,
+    "Checklist continuation",
+    `BB resumed this thread because the attached Checklist "${checklist.name}" is still incomplete (${complete} of ${total} steps complete; ${remaining} remaining). This is not a new user request. Do not stop merely because the previous turn became idle.`,
     next
       ? `Continue the current task from the next unchecked step: "${next.title}".${next.description ? `\n${next.description}` : ""}`
       : "The checklist has no remaining unchecked steps; verify its state with agent_checklist_get before stopping.",
@@ -282,7 +282,7 @@ async function reconcilePersistedThreads(bb: BbPluginApi, store: ChecklistStore)
         if (isMissingThreadError(error)) {
           store.markOrphaned(threadId);
         } else {
-          bb.log.warn(`Could not reconcile Agent Checklist thread ${threadId}: ${errorText(error)}`);
+          bb.log.warn(`Could not reconcile Checklist thread ${threadId}: ${errorText(error)}`);
         }
       }
     }),
@@ -603,7 +603,7 @@ export default async function plugin(bb: BbPluginApi) {
       const result = await bb.ui.requestInput({
         threadId,
         rendererId: "agent-checklist-picker",
-        title: "Agent Checklist",
+        title: "Checklist",
         payload: { templates },
         timeoutMs: 300_000,
       });
@@ -664,7 +664,7 @@ export default async function plugin(bb: BbPluginApi) {
       const current = store.getChecklist(checklistId);
       if (!current) throw new Error("Checklist not found");
       if (current.status === "closed") {
-        throw new Error("This Agent Checklist is closed");
+        throw new Error("This Checklist is closed");
       }
       const result = await guardedSendContinuation(checklistId, true);
       return result;
@@ -685,12 +685,12 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "agent_checklist_get",
-    description: "Read the persisted Agent Checklist attached to the current BB thread.",
+    description: "Read the persisted Checklist attached to the current BB thread.",
     instructions:
       "Read the checklist before starting work and after major progress. Use the structured checkbox state, not Markdown, as the source of truth.",
     experimental_statusLabels: {
-      pending: "Reading Agent Checklist",
-      completed: "Agent Checklist read",
+      pending: "Reading Checklist",
+      completed: "Checklist read",
     },
     parameters: z.object({}).strict(),
     execute(_input, context) {
@@ -700,18 +700,18 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "agent_checklist_update",
-    description: "Update a step, note, evidence, or pause state in the current thread's Agent Checklist.",
+    description: "Update a step, note, evidence, or pause state in the current thread's Checklist.",
     instructions:
       "Check a step when it is complete. Add notes or evidence when useful. If user input or an external dependency blocks progress, leave the step unchecked and add a note, then pause the checklist.",
     experimental_statusLabels: {
-      pending: "Updating Agent Checklist",
-      completed: "Agent Checklist updated",
+      pending: "Updating Checklist",
+      completed: "Checklist updated",
     },
     parameters: agentUpdateInput,
     execute(input, context) {
       const checklist = store.getChecklistForThread(context.threadId);
       if (!checklist) {
-        return JSON.stringify({ checklist: null, message: "No Agent Checklist is attached to this thread." });
+        return JSON.stringify({ checklist: null, message: "No Checklist is attached to this thread." });
       }
       const updated = store.applyAgentUpdate(checklist.id, input);
       bumpThreadVersion(updated.threadId);
@@ -725,7 +725,7 @@ export default async function plugin(bb: BbPluginApi) {
     tools: ["agent_checklist_get", "agent_checklist_update"],
     skills: [],
     instructions:
-      "When an Agent Checklist is attached to this thread, use its tools to read the steps and persist checkbox updates, notes, and evidence as you work.",
+      "When a checklist is attached to this thread, use its tools to read the steps and persist checkbox updates, notes, and evidence as you work.",
   }));
 
   bb.events.on("thread.idle", ({ thread }) => {
