@@ -1,5 +1,5 @@
 {
-  "name": "bb-plugin-lapdog",
+  "name": "bb-plugin-traces",
   "version": "0.1.0",
   "type": "module",
   "engines": {
@@ -8,8 +8,8 @@
     "bbPluginSdk": "^0.4.6"
   },
   "bb": {
-    "name": "Lapdog",
-    "description": "Run the official local Lapdog agent, capture BB Codex sessions, and open its Datadog observability UI in BB.",
+    "name": "Traces",
+    "description": "Index local agent sessions, trajectories, and decision artifacts in one private explorer.",
     "branding": {
       "icon": "Activity"
     },
@@ -26,9 +26,11 @@
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.6",
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
     "jsdom": "29.0.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
