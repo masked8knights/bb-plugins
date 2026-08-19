@@ -15,7 +15,8 @@ import {
 } from "./src/indexer";
 import { shouldScanAfterSettingsChange } from "./src/settings";
 
-const SCAN_BATCH_FILES = 8;
+const SCAN_BATCH_FILES = 1;
+const DETAIL_EVENT_RAW_PREVIEW_BYTES = 256;
 
 const rootSchema = z.object({
   id: z.string(),
@@ -71,7 +72,7 @@ const eventSchema = z.object({
   depth: z.number(),
   model: z.string().nullable(),
   cwd: z.string().nullable(),
-  rawJson: z.string(),
+  rawJson: z.string().max(DETAIL_EVENT_RAW_PREVIEW_BYTES),
   rawTruncated: z.boolean(),
 });
 
@@ -196,6 +197,7 @@ export default async function plugin(bb: BbPluginApi) {
   let scanRequested = false;
   let activeScan: Promise<boolean> | null = null;
   let autoIndexEnabled = true;
+  let manualScanPending = false;
   let rootWatchers: FSWatcher[] = [];
   let watchedRootKey = "";
   let watcherScanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -277,10 +279,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function status(): Promise<TraceStatus> {
-    const stats = indexer.stats(lastScanAt, indexing, lastError);
+    const scanInProgress = indexing || scanRequested || activeScan !== null;
+    const stats = indexer.stats(lastScanAt, scanInProgress, lastError);
     return {
       localOnly: true,
-      state: indexing ? "indexing" : lastError ? "error" : "idle",
+      state: scanInProgress ? "indexing" : lastError ? "error" : "idle",
       sessions: stats.sessions,
       events: stats.events,
       bytes: stats.bytes,
@@ -328,7 +331,7 @@ export default async function plugin(bb: BbPluginApi) {
         changed = changed || failedSessionPaths.size > 0;
         scanComplete = result.complete;
         scanCompleted = !signal?.aborted;
-        if (!signal?.aborted) lastScanAt = Date.now();
+        if (!signal?.aborted && scanComplete) lastScanAt = Date.now();
       } catch (error) {
         scanFailed = true;
         restoreWatcherState();
@@ -338,7 +341,8 @@ export default async function plugin(bb: BbPluginApi) {
         restoreWatcherState();
         indexing = false;
         activeScan = null;
-        if (!signal?.aborted && !scanFailed && !scanComplete) scanRequested = true;
+        if (scanComplete) manualScanPending = false;
+        if (!signal?.aborted && !scanFailed && !scanComplete && (autoIndexEnabled || manualScanPending)) scanRequested = true;
         if (changed || lastError) publish();
       }
       return scanComplete;
@@ -352,13 +356,22 @@ export default async function plugin(bb: BbPluginApi) {
       return indexer.listSessions(input);
     },
     getSession(input) {
-      return indexer.getSession(input.id, input.limit, input.offset);
+      const detail = indexer.getSession(input.id, input.limit, input.offset);
+      return {
+        ...detail,
+        events: detail.events.map((event) => ({
+          ...event,
+          rawJson: event.rawJson.slice(0, DETAIL_EVENT_RAW_PREVIEW_BYTES),
+          rawTruncated: event.rawTruncated || event.rawJson.length > DETAIL_EVENT_RAW_PREVIEW_BYTES,
+        })),
+      };
     },
-    getEventRaw({ id }) {
+    async getEventRaw({ id }) {
       return indexer.rawEvent(id);
     },
     async rescan() {
       scanRequested = true;
+      manualScanPending = true;
       nextSafetyScanAt = 0;
       publish();
       return status();
@@ -368,8 +381,14 @@ export default async function plugin(bb: BbPluginApi) {
   settings.onChange((next, previous) => {
     autoIndexEnabled = next.autoIndex;
     const rootsChanged = next.additionalSessionRoots !== previous.additionalSessionRoots;
-    if (!next.autoIndex && !rootsChanged) scanRequested = false;
-    else scanRequested = scanRequested || shouldScanAfterSettingsChange(next, previous);
+    const shouldScan = shouldScanAfterSettingsChange(next, previous);
+    if (!next.autoIndex && !rootsChanged) {
+      scanRequested = false;
+      manualScanPending = false;
+    } else {
+      scanRequested = scanRequested || shouldScan;
+      if (shouldScan && (!next.autoIndex || rootsChanged)) manualScanPending = true;
+    }
     if (next.scanIntervalSeconds !== previous.scanIntervalSeconds) nextSafetyScanAt = 0;
     if (!next.autoIndex) closeRootWatchers();
     publish();

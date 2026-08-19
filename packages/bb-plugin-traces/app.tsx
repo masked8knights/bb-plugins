@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
   useBbNavigate,
-  useRealtime,
-  useRealtimeConnectionState,
   useRpc,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
@@ -25,6 +23,15 @@ type TraceRoute =
 type SessionSort = "updated" | "started" | "events" | "duration";
 type InspectorTab = "summary" | "preview" | "raw" | "payload" | "result" | "timing";
 type TimelineLane = "input" | "model" | "tools";
+const DETAIL_EVENT_PAGE_SIZE = 500;
+const DETAIL_REQUEST_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
 
 function decodeRouteSegment(value: string): string {
   try {
@@ -35,8 +42,10 @@ function decodeRouteSegment(value: string): string {
 }
 
 function parseTraceRoute(subPath: string): TraceRoute {
-  const parts = subPath.split("/").filter(Boolean).map(decodeRouteSegment);
-  if (parts[0] === "session" && parts[1]) return { kind: "session", id: parts[1] };
+  const parts = subPath.split("/").filter(Boolean);
+  if (parts[0] === "session" && parts.length > 1) {
+    return { kind: "session", id: decodeRouteSegment(parts.slice(1).join("/")) };
+  }
   return { kind: "sessions" };
 }
 
@@ -231,7 +240,7 @@ function CollectionHeader({
           <StatusDot status={status} />
         </div>
         <div className="flex items-center gap-2">
-          {status ? <span className="text-[11px] text-muted-foreground">{status.sessions} sessions · {status.events} events · {formatBytes(status.bytes)}</span> : null}
+          {status ? <span className="text-[11px] text-muted-foreground">{status.state === "indexing" ? `Indexing${status.sessions ? ` · ${status.sessions} cached` : "…"}` : `${status.sessions} sessions · ${status.events} events · ${formatBytes(status.bytes)}`}</span> : null}
           <button type="button" className={buttonClass} disabled={busy} onClick={onRescan}>
             {busy ? "Re-scanning…" : "Re-scan"}
           </button>
@@ -482,7 +491,7 @@ function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: str
   );
 }
 
-function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsHasMore, selectedEvent, raw, onSelectEvent, onLoadMore, onCloseInspector, onBack }: { session: TraceSession; events: TraceEvent[]; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedEvent: TraceEvent | null; raw: string | null; onSelectEvent: (event: TraceEvent) => void; onLoadMore: () => void; onCloseInspector: () => void; onBack: () => void }) {
+function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsHasMore, selectedEvent, raw, error, onSelectEvent, onLoadMore, onCloseInspector, onBack }: { session: TraceSession; events: TraceEvent[]; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedEvent: TraceEvent | null; raw: string | null; error: string | null; onSelectEvent: (event: TraceEvent) => void; onLoadMore: () => void; onCloseInspector: () => void; onBack: () => void }) {
   const [query, setQuery] = useState("");
   const [showDuration, setShowDuration] = useState(true);
   const [showTurns, setShowTurns] = useState(true);
@@ -506,6 +515,7 @@ function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsH
       </header>
       <TrajectoryToolbar query={query} showDuration={showDuration} showTurns={showTurns} showCalls={showCalls} onQuery={setQuery} onDuration={() => setShowDuration((value) => !value)} onTurns={() => setShowTurns((value) => !value)} onCalls={() => setShowCalls((value) => !value)} />
       <TrajectoryTimeline events={showCalls ? events : events.filter((event) => event.kind !== "tool")} selectedId={selectedEvent?.id ?? null} showTurns={showTurns} onSelect={onSelectEvent} />
+      {error ? <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[10px] text-destructive" role="alert">{error}</div> : null}
       {eventsHasMore ? (
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-1 text-[10px] text-muted-foreground">
           <span>Showing {events.length} of {totalEvents} indexed events</span>
@@ -524,7 +534,6 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
   const navigate = useBbNavigate();
   const route = parseTraceRoute(subPath);
   const rpc = useRpc<typeof rpcContract>();
-  const connection = useRealtimeConnectionState();
   const [status, setStatus] = useState<TraceStatus | null>(null);
   const [sessions, setSessions] = useState<TraceSession[]>([]);
   const [sessionTotal, setSessionTotal] = useState(0);
@@ -541,6 +550,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
   const [selectedEvent, setSelectedEvent] = useState<TraceEvent | null>(null);
   const [raw, setRaw] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(() => route.kind === "session");
+  const [detailRetry, setDetailRetry] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sessionRequest = useRef(0);
@@ -588,25 +598,25 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
   }, [loadSessionPage, refreshMetadata]);
 
   useEffect(() => {
+    if (route.kind !== "sessions") return;
     setSessions([]);
     setSessionTotal(0);
     setSessionHasMore(false);
     const timer = setTimeout(() => void loadSessionPage(0, true), 120);
     return () => clearTimeout(timer);
-  }, [loadSessionPage]);
+  }, [loadSessionPage, route.kind]);
 
   useEffect(() => {
+    if (route.kind !== "sessions") return;
     const timer = setTimeout(() => void refreshMetadata(), 120);
     return () => clearTimeout(timer);
-  }, [refreshMetadata]);
-
-  useRealtime("traces", () => {
-    void refresh(true);
-  });
+  }, [refreshMetadata, route.kind]);
 
   useEffect(() => {
-    if (connection === "connected" || connection === "reconnecting") void refresh(true);
-  }, [connection, refresh]);
+    if (route.kind !== "sessions") return;
+    const timer = setInterval(() => void refresh(true), 10_000);
+    return () => clearInterval(timer);
+  }, [refresh, route.kind]);
 
   const loadMoreSessions = useCallback(() => {
     if (sessionLoading || !sessionHasMore) return;
@@ -620,7 +630,11 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     const requestId = ++eventRequest.current;
     const offset = events.length;
     setEventsLoading(true);
-    void rpc.call("getSession", { id: routeSessionId, limit: 2_000, offset }).then((result) => {
+    void withTimeout(
+      rpc.call("getSession", { id: routeSessionId, limit: DETAIL_EVENT_PAGE_SIZE, offset }),
+      DETAIL_REQUEST_TIMEOUT_MS,
+      "Timed out while loading more events. The local index may still be busy.",
+    ).then((result) => {
       if (requestId !== eventRequest.current) return;
       if (result.session) setSession(result.session);
       setEvents((current) => {
@@ -655,7 +669,12 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     setEventsLoading(true);
     setEventsHasMore(false);
     setSession(null);
-    void rpc.call("getSession", { id: route.id, limit: 2_000, offset: 0 }).then((result) => {
+    setError(null);
+    void withTimeout(
+      rpc.call("getSession", { id: route.id, limit: DETAIL_EVENT_PAGE_SIZE, offset: 0 }),
+      DETAIL_REQUEST_TIMEOUT_MS,
+      "Timed out while loading the trace. The local index may still be busy.",
+    ).then((result) => {
       if (cancelled || requestId !== eventRequest.current) return;
       setSession(result.session);
       setEvents(result.events);
@@ -676,7 +695,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [eventRequest, rpc, route.kind, route.kind === "session" ? route.id : null]);
+  }, [detailRetry, eventRequest, rpc, route.kind, route.kind === "session" ? route.id : null]);
 
   useEffect(() => {
     if (!selectedEvent) {
@@ -718,12 +737,15 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     if (detailLoading || (session && session.id !== route.id && session.filePath !== route.id)) return <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">Loading trajectory…</div>;
     if (!session) return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-background text-center">
-        <div className="text-sm font-medium text-foreground">Session not found</div>
-        <div className="text-xs text-muted-foreground">This deep link no longer matches a locally indexed session.</div>
-        <button type="button" className={buttonClass} onClick={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })}>Back to sessions</button>
+        <div className="text-sm font-medium text-foreground">{error ? "Unable to load trace" : "Session not found"}</div>
+        <div className="max-w-md text-xs text-muted-foreground">{error ?? "This deep link no longer matches a locally indexed session."}</div>
+        <div className="flex items-center gap-2">
+          <button type="button" className={buttonClass} onClick={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })}>Back to sessions</button>
+          {error ? <button type="button" className={buttonClass} onClick={() => setDetailRetry((value) => value + 1)}>Retry</button> : null}
+        </div>
       </div>
     );
-    return <TrajectoryScreen session={session} events={events} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedEvent={selectedEvent} raw={raw} onSelectEvent={setSelectedEvent} onLoadMore={loadMoreEvents} onCloseInspector={() => setSelectedEvent(null)} onBack={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })} />;
+    return <TrajectoryScreen session={session} events={events} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedEvent={selectedEvent} raw={raw} error={error} onSelectEvent={setSelectedEvent} onLoadMore={loadMoreEvents} onCloseInspector={() => setSelectedEvent(null)} onBack={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })} />;
   }
 
   return (

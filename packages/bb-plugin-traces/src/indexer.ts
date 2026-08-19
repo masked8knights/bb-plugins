@@ -99,14 +99,23 @@ export type SqliteDb = {
 
 type DbRow = Record<string, unknown>;
 
-const MAX_RAW_JSON = 200_000;
-const MAX_EVENT_TEXT = 20_000;
+type StatsSnapshot = {
+  sessions: number;
+  events: number;
+  bytes: number;
+};
+
+// The source files remain the authoritative payload store. The index keeps a
+// small fallback preview and reloads the selected line from the source file
+// when the inspector asks for the full payload.
+const MAX_RAW_JSON = 512;
+const MAX_EVENT_TEXT = 1_024;
 const MAX_SESSION_FILES = 50_000;
 const MAX_SESSION_DEPTH = 32;
-const INDEXER_VERSION = 2;
-// v1 rows use the same durable schema and event identity as v2. Keep both
-// readable so a parser improvement does not turn the next plugin restart into
-// a full historical reparse; future incompatible formats can be added here.
+const INDEXER_VERSION = 3;
+// v1 rows use the same durable schema and event identity as the current
+// parser. Version 2 used larger payload bounds and is intentionally rebuilt
+// under v3; future incompatible formats can be added here.
 const COMPATIBLE_PARSER_VERSIONS = new Set([1, INDEXER_VERSION]);
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
@@ -740,6 +749,8 @@ export class TraceIndexer {
   private readonly sessionScanQueues = new Map<string, SessionScanQueue>();
   private readonly sessionScanPassSeen = new Set<string>();
   private sessionScanPassInvalid = false;
+  private statsSnapshot: StatsSnapshot | null = null;
+  private statsSnapshotAt = 0;
 
   constructor(db: SqliteDb, ftsEnabled: boolean, log: (message: string) => void = () => undefined) {
     this.db = db;
@@ -896,21 +907,62 @@ export class TraceIndexer {
     };
   }
 
-  rawEvent(eventId: string, maxBytes = 2_000_000): { raw: string | null; truncated: boolean } {
-    const row = this.db.prepare("SELECT raw_json, raw_truncated FROM trace_events WHERE id = ?").get(eventId) as DbRow | undefined;
+  async rawEvent(eventId: string, maxBytes = 2_000_000): Promise<{ raw: string | null; truncated: boolean }> {
+    const row = this.db.prepare(
+      "SELECT e.raw_json, e.raw_truncated, e.line_number, s.file_path, f.format " +
+        "FROM trace_events e JOIN trace_sessions s ON s.id = e.session_id " +
+        "LEFT JOIN trace_files f ON f.path = s.file_path WHERE e.id = ?",
+    ).get(eventId) as DbRow | undefined;
     if (!row) return { raw: null, truncated: false };
-    const raw = String(row.raw_json);
-    return { raw: clip(raw, maxBytes), truncated: Boolean(row.raw_truncated) || raw.length > maxBytes };
+    const storedRaw = String(row.raw_json);
+    const lineNumber = numberValue(row.line_number);
+    const filePath = stringValue(row.file_path);
+    if (lineNumber !== null && filePath) {
+      try {
+        const format: TraceFormat = row.format === "zstd" ? "zstd" : "jsonl";
+        for await (const line of fileLines(filePath, format, 0, 0, undefined)) {
+          if (line.line === lineNumber) {
+            const raw = clip(line.text, maxBytes);
+            return { raw, truncated: raw.length < line.text.length };
+          }
+          if (line.line > lineNumber) break;
+          if (line.line % 256 === 0) await yieldToEventLoop();
+        }
+      } catch {
+        // The source can be rotated or temporarily unavailable. Return the
+        // durable preview rather than making the inspector fail completely.
+      }
+    }
+    const raw = clip(storedRaw, maxBytes);
+    return { raw, truncated: Boolean(row.raw_truncated) || raw.length < storedRaw.length };
   }
 
   stats(lastScanAt: number | null, indexing: boolean, lastError: string | null): IndexStats {
-    const sessions = this.db.prepare("SELECT COUNT(*) AS count FROM trace_sessions").get() as DbRow;
-    const events = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events").get() as DbRow;
-    const bytes = this.db.prepare("SELECT COALESCE(SUM(file_size_bytes), 0) AS total FROM trace_sessions").get() as DbRow;
+    // Do not run three whole-table aggregates while a rebuild is writing. A
+    // status request must remain cheap enough for BB's health checks. Return
+    // the last completed snapshot during indexing, then refresh it after the
+    // scan settles.
+    if (!this.statsSnapshot || (!indexing && Date.now() - this.statsSnapshotAt >= 1_000)) {
+      if (!indexing || this.statsSnapshot) {
+        const sessions = this.db.prepare("SELECT COUNT(*) AS count FROM trace_sessions").get() as DbRow;
+        const events = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events").get() as DbRow;
+        const bytes = this.db.prepare("SELECT COALESCE(SUM(file_size_bytes), 0) AS total FROM trace_sessions").get() as DbRow;
+        this.statsSnapshot = {
+          sessions: numberValue(sessions.count) ?? 0,
+          events: numberValue(events.count) ?? 0,
+          bytes: numberValue(bytes.total) ?? 0,
+        };
+        this.statsSnapshotAt = Date.now();
+      } else {
+        this.statsSnapshot = { sessions: 0, events: 0, bytes: 0 };
+        this.statsSnapshotAt = Date.now();
+      }
+    }
+    const snapshot = this.statsSnapshot;
     return {
-      sessions: numberValue(sessions.count) ?? 0,
-      events: numberValue(events.count) ?? 0,
-      bytes: numberValue(bytes.total) ?? 0,
+      sessions: snapshot.sessions,
+      events: snapshot.events,
+      bytes: snapshot.bytes,
       lastScanAt,
       indexing,
       lastError,

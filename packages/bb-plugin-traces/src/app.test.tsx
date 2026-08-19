@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { TraceEvent, TraceSession, TraceStatus } from "../server";
 
@@ -137,8 +138,17 @@ describe("Traces app interactions", () => {
 
   it("renders the trajectory, selects events, switches inspector tabs, and appends event pages", async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const collectionCalls: string[] = [];
     const slot = renderSlot(panel, { subPath: "session/dsh%3Asession%2Fone" }, {
       rpc: commonRpc({
+        status: () => {
+          collectionCalls.push("status");
+          return status;
+        },
+        listSessions: () => {
+          collectionCalls.push("listSessions");
+          return { sessions: [session], total: 1 };
+        },
         getSession: (input: Record<string, unknown>) => {
           calls.push(input);
           return input.offset === 0
@@ -149,6 +159,9 @@ describe("Traces app interactions", () => {
     });
 
     await slot.findByLabelText("Trajectory event ledger");
+    expect(calls[0]).toMatchObject({ id: session.id, limit: 500, offset: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(collectionCalls).toEqual([]);
     expect(slot.getAllByRole("button", { name: "Select USER event 1" }).length).toBeGreaterThan(0);
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select USER event 1" })[0]!);
@@ -157,13 +170,19 @@ describe("Traces app interactions", () => {
     await slot.findByText("raw:event-user");
 
     fireEvent.click(slot.getByRole("button", { name: "Load more events" }));
-    await waitFor(() => expect(calls.some((input) => input.offset === 2)).toBe(true));
+    await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 500)).toBe(true));
     await slot.findByText(/pwd/);
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
     await slot.findByRole("button", { name: "Payload" });
     fireEvent.click(slot.getByRole("button", { name: "Result" }));
     expect(slot.getByRole("complementary", { name: "Selected event inspector" })).toBeTruthy();
+  });
+
+  it("accepts decoded session IDs that contain path separators", async () => {
+    const slot = renderSlot(panel, { subPath: "session/dsh:session/one" }, { rpc: commonRpc() as never });
+    await slot.findByLabelText("Trajectory event ledger");
+    expect(slot.getByText("Inspect the local trace")).toBeTruthy();
   });
 
   it("shows a useful missing-session state and keeps the collection focused on sessions", async () => {
@@ -176,5 +195,21 @@ describe("Traces app interactions", () => {
 
     const collection = renderSlot(panel, { subPath: "" }, { rpc: commonRpc() as never });
     await collection.findByRole("button", { name: /Inspect trace/ });
+  });
+
+  it("turns a hung trajectory request into a retryable error", async () => {
+    vi.useFakeTimers();
+    try {
+      const slot = renderSlot(panel, { subPath: "session/dsh%3Asession%2Fone" }, {
+        rpc: commonRpc({ getSession: () => new Promise(() => undefined) }) as never,
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      expect(slot.getByText("Unable to load trace")).toBeTruthy();
+      expect(slot.getByRole("button", { name: "Retry" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

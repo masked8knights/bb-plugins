@@ -95,7 +95,7 @@ describe("TraceIndexer", () => {
       depth: 1,
       summary: '{"command":"pwd"}',
     });
-    expect(indexer.rawEvent(detail.events[1]!.id).raw).toContain('"tool/call"');
+    expect((await indexer.rawEvent(detail.events[1]!.id)).raw).toContain('"tool/call"');
     expect(indexer.listSessions({ query: "Investigate", limit: 10, offset: 0 }).total).toBe(1);
     expect(indexer.listSessions({ query: "pwd", limit: 10, offset: 0 }).total).toBe(1);
     expect(indexer.getSession(encodeURIComponent(sessionId), 10, 0).session?.id).toBe(sessionId);
@@ -134,6 +134,39 @@ describe("TraceIndexer", () => {
 
     await indexer.scan([]);
     expect(indexer.roots()).toEqual([]);
+  });
+
+  it("keeps indexed payloads compact while reloading the full source line", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bb-traces-raw-preview-"));
+    temporaryDirectories.push(directory);
+    const sessionPath = join(directory, "session.jsonl");
+    const payload = "x".repeat(2_000);
+    await writeFile(
+      sessionPath,
+      JSON.stringify({ type: "tool/call", data: { name: "large", arguments: payload } }) + "\n",
+      "utf8",
+    );
+
+    const database = new Database(":memory:");
+    databases.push(database);
+    const indexer = new TraceIndexer(database, ensureSchema(database));
+    const root: RootSpec = {
+      id: "raw-preview-sessions",
+      source: "custom",
+      label: "Raw preview sessions",
+      path: directory,
+      kind: "session",
+      format: "jsonl",
+    };
+    await indexer.scan([root]);
+
+    const session = indexer.listSessions({ limit: 1, offset: 0 }).sessions[0]!;
+    const event = indexer.getSession(session.id, 1, 0).events[0]!;
+    expect(event.rawJson.length).toBeLessThanOrEqual(514);
+    const raw = await indexer.rawEvent(event.id);
+    expect(raw.raw).toContain(payload);
+    expect(raw.raw?.length).toBeGreaterThan(512);
+    expect(raw.truncated).toBe(false);
   });
 
   it("advances a bounded scan batch without restarting discovery", async () => {
