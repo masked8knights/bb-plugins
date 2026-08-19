@@ -479,6 +479,7 @@ function TrajectoryToolbar({
 }
 
 function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const timed = events.filter((event) => event.timestamp !== null);
   const start = timed.length ? Math.min(...timed.map((event) => event.timestamp ?? 0)) : 0;
   const end = timed.length ? Math.max(...timed.map((event) => (event.timestamp ?? 0) + (event.durationMs ?? 1))) : 1;
@@ -486,8 +487,17 @@ function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { event
   const lanes: TimelineLane[] = ["input", "model", "tools"];
   const labels: Record<TimelineLane, string> = { input: "Input", model: "Model", tools: "Tools" };
   const turnBoundaries = showTurns ? events.filter((event, index) => event.turn !== null && event.turn !== events[index - 1]?.turn) : [];
+  const hoveredIndex = hoveredId === null ? -1 : events.findIndex((event) => event.id === hoveredId);
+  const hoveredEvent = hoveredIndex >= 0 ? events[hoveredIndex] : null;
+  const hoveredPosition = hoveredEvent
+    ? hoveredEvent.timestamp === null
+      ? hoveredIndex / Math.max(1, events.length)
+      : (hoveredEvent.timestamp - start) / span
+    : null;
+  const hoveredLeft = hoveredPosition === null ? null : `${Math.min(99.5, Math.max(0, hoveredPosition * 100))}%`;
+  const tooltipTransform = hoveredPosition !== null && hoveredPosition < 0.16 ? "translateX(0)" : hoveredPosition !== null && hoveredPosition > 0.84 ? "translateX(-100%)" : "translateX(-50%)";
   return (
-    <div className="grid h-[50px] shrink-0 grid-cols-[44px_minmax(0,1fr)] border-b border-border bg-background">
+    <div className="grid h-[50px] shrink-0 grid-cols-[44px_minmax(0,1fr)] border-b border-border bg-background" aria-label="Trajectory timeline" onMouseLeave={() => setHoveredId(null)}>
       <div className="grid grid-rows-3 border-r border-border text-[9px] uppercase leading-none text-muted-foreground">
         {lanes.map((lane) => <div key={lane} className="flex items-center justify-end border-b border-border/60 pr-1 last:border-b-0">{labels[lane]}</div>)}
       </div>
@@ -509,11 +519,24 @@ function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { event
               className={"absolute h-2 min-w-[3px] rounded-sm opacity-90 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring " + timelineSegmentClass(event) + (selectedId === event.id ? " ring-1 ring-foreground" : "")}
               style={{ left: `${Math.min(99.5, Math.max(0, position * 100))}%`, top: `${laneIndex * 16.66 + 4}px`, width: `${Math.min(20, width * 100)}%` }}
               onClick={() => onSelect(event)}
+              onMouseEnter={() => setHoveredId(event.id)}
+              onFocus={() => setHoveredId(event.id)}
+              onBlur={() => setHoveredId(null)}
               title={`${eventKind(event)} · ${event.title} · ${formatClock(event.timestamp)}`}
               aria-label={`Select ${eventKind(event)} event ${event.line}`}
             />
           );
         })}
+        {hoveredEvent && hoveredLeft !== null ? (
+          <>
+            <span data-testid="timeline-hover-guide" className="pointer-events-none absolute inset-y-0 z-10 w-px bg-foreground/80" style={{ left: hoveredLeft }} aria-hidden="true" />
+            <div role="tooltip" className="pointer-events-none absolute top-1 z-20 flex max-w-[min(80%,28rem)] items-center gap-2 overflow-hidden rounded-sm border border-border bg-background/95 px-2 py-1 text-[10px] shadow-sm" style={{ left: hoveredLeft, transform: tooltipTransform }}>
+              <span className={"shrink-0 font-semibold " + eventKindClass(hoveredEvent)}>{eventKind(hoveredEvent)}</span>
+              <span className="min-w-0 truncate text-foreground" title={hoveredEvent.title}>{shortText(conversationContent(hoveredEvent), 180)}</span>
+              <span className="shrink-0 font-mono text-[9px] text-muted-foreground">#{hoveredEvent.line} · {formatClock(hoveredEvent.timestamp)}</span>
+            </div>
+          </>
+        ) : null}
       </div>
     </div>
   );

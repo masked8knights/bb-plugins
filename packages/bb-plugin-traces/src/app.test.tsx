@@ -181,6 +181,15 @@ describe("Traces app interactions", () => {
     await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 2_000)).toBe(true));
     await slot.findByText(/pwd/);
 
+    const timeline = slot.getByLabelText("Trajectory timeline");
+    const timelineTool = timeline.querySelector<HTMLButtonElement>('button[aria-label="Select TOOL event 3"]');
+    expect(timelineTool).not.toBeNull();
+    fireEvent.mouseEnter(timelineTool!);
+    expect(slot.getByRole("tooltip").textContent).toContain("TOOL");
+    expect(timeline.querySelector('[data-testid="timeline-hover-guide"]')).toBeTruthy();
+    fireEvent.mouseLeave(timeline);
+    expect(slot.queryByRole("tooltip")).toBeNull();
+
     fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
     await slot.findByRole("button", { name: "Payload" });
     fireEvent.click(slot.getByRole("button", { name: "Result" }));
