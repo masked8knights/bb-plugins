@@ -23,8 +23,9 @@ type TraceRoute =
 type SessionSort = "updated" | "started" | "events" | "duration";
 type InspectorTab = "summary" | "preview" | "raw" | "payload" | "result" | "timing";
 type TimelineLane = "input" | "model" | "tools";
-const DETAIL_EVENT_PAGE_SIZE = 100;
+const DETAIL_EVENT_PAGE_SIZE = 2_000;
 const DETAIL_REQUEST_TIMEOUT_MS = 15_000;
+const countFormatter = new Intl.NumberFormat();
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -86,6 +87,10 @@ function formatTokens(value: number | null): string {
   if (value < 1_000) return String(Math.round(value));
   if (value < 1_000_000) return (value / 1_000).toFixed(1) + "k";
   return (value / 1_000_000).toFixed(1) + "m";
+}
+
+function formatCount(value: number): string {
+  return countFormatter.format(value);
 }
 
 function formatDuration(value: number | null): string {
@@ -514,7 +519,26 @@ function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { event
   );
 }
 
-function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showDuration: boolean; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
+function EventLoadMoreRow({ loadedEventCount, totalEvents, eventsLoading, onLoadMore }: { loadedEventCount: number; totalEvents: number; eventsLoading: boolean; onLoadMore: () => void }) {
+  const remaining = Math.max(0, totalEvents - loadedEventCount);
+  const nextPage = Math.min(DETAIL_EVENT_PAGE_SIZE, remaining);
+  return (
+    <div className="flex min-h-9 items-center justify-between gap-3 border-b border-border bg-muted/20 px-3 py-1.5 text-[10px] text-muted-foreground">
+      <span>{formatCount(loadedEventCount)} of {formatCount(totalEvents)} events loaded · {formatCount(remaining)} remaining</span>
+      <button
+        type="button"
+        className="shrink-0 rounded px-2 py-1 text-[10px] font-medium text-primary hover:bg-state-hover disabled:cursor-wait disabled:opacity-50"
+        aria-label="Load more events"
+        disabled={eventsLoading}
+        onClick={onLoadMore}
+      >
+        {eventsLoading ? "Loading…" : `Load more events · ${formatCount(nextPage)} next`}
+      </button>
+    </div>
+  );
+}
+
+function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading, eventsHasMore, selectedId, showDuration, showTurns, onSelect, onLoadMore }: { events: TraceEvent[]; loadedEventCount: number; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedId: string | null; showDuration: boolean; showTurns: boolean; onSelect: (event: TraceEvent) => void; onLoadMore: () => void }) {
   const [roleColumnWidth, setRoleColumnWidth] = useState(ROLE_COLUMN_DEFAULT);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const setWidth = (value: number) => setRoleColumnWidth(Math.min(ROLE_COLUMN_MAX, Math.max(ROLE_COLUMN_MIN, value)));
@@ -538,7 +562,14 @@ function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelec
     else return;
     event.preventDefault();
   };
-  if (!events.length) return <div className="flex min-h-40 flex-1 items-center justify-center text-sm text-muted-foreground">No events match this trajectory filter.</div>;
+  if (!events.length) {
+    return (
+      <div className="min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
+        <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">No events match this trajectory filter.</div>
+        {eventsHasMore ? <EventLoadMoreRow loadedEventCount={loadedEventCount} totalEvents={totalEvents} eventsLoading={eventsLoading} onLoadMore={onLoadMore} /> : null}
+      </div>
+    );
+  }
   let previousTurn: number | null = null;
   return (
     <div className="relative min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
@@ -594,6 +625,7 @@ function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelec
           </div>
         );
       })}
+      {eventsHasMore ? <EventLoadMoreRow loadedEventCount={loadedEventCount} totalEvents={totalEvents} eventsLoading={eventsLoading} onLoadMore={onLoadMore} /> : null}
     </div>
   );
 }
@@ -663,14 +695,8 @@ function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsH
       <TrajectoryToolbar query={query} showDuration={showDuration} showTurns={showTurns} showCalls={showCalls} onQuery={setQuery} onDuration={() => setShowDuration((value) => !value)} onTurns={() => setShowTurns((value) => !value)} onCalls={() => setShowCalls((value) => !value)} />
       <TrajectoryTimeline events={showCalls ? events : events.filter((event) => event.kind !== "tool")} selectedId={selectedEvent?.id ?? null} showTurns={showTurns} onSelect={onSelectEvent} />
       {error ? <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[10px] text-destructive" role="alert">{error}</div> : null}
-      {eventsHasMore ? (
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-1 text-[10px] text-muted-foreground">
-          <span>Showing {events.length} of {totalEvents} indexed events</span>
-          <button type="button" className="rounded px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-state-hover disabled:opacity-50" disabled={eventsLoading} onClick={onLoadMore}>{eventsLoading ? "Loading…" : "Load more events"}</button>
-        </div>
-      ) : null}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <TrajectoryLedger events={filteredEvents} selectedId={selectedEvent?.id ?? null} showDuration={showDuration} showTurns={showTurns} onSelect={onSelectEvent} />
+        <TrajectoryLedger events={filteredEvents} loadedEventCount={events.length} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedId={selectedEvent?.id ?? null} showDuration={showDuration} showTurns={showTurns} onSelect={onSelectEvent} onLoadMore={onLoadMore} />
         {selectedEvent ? <div className="max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-10 max-lg:w-[min(92%,420px)] lg:w-[clamp(320px,34%,440px)]"><SessionInspector event={selectedEvent} raw={raw} onClose={onCloseInspector} /></div> : null}
       </div>
     </div>

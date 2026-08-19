@@ -159,7 +159,7 @@ describe("Traces app interactions", () => {
     });
 
     await slot.findByLabelText("Trajectory event ledger");
-    expect(calls[0]).toMatchObject({ id: session.id, limit: 100, offset: 0 });
+    expect(calls[0]).toMatchObject({ id: session.id, limit: 2_000, offset: 0 });
     const roleSeparator = slot.getByRole("separator", { name: "Resize role column" });
     expect(roleSeparator.getAttribute("aria-valuenow")).toBe("156");
     fireEvent.keyDown(roleSeparator, { key: "ArrowRight" });
@@ -169,6 +169,8 @@ describe("Traces app interactions", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(collectionCalls).toEqual([]);
     expect(slot.getAllByRole("button", { name: "Select USER event 1" }).length).toBeGreaterThan(0);
+    expect(slot.getByLabelText("Trajectory event ledger").contains(slot.getByRole("button", { name: "Load more events" }))).toBe(true);
+    expect(slot.getByText("2 of 3 events loaded · 1 remaining")).toBeTruthy();
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select USER event 1" })[0]!);
     await slot.findByRole("complementary", { name: "Selected event inspector" });
@@ -176,7 +178,7 @@ describe("Traces app interactions", () => {
     await slot.findByText("raw:event-user");
 
     fireEvent.click(slot.getByRole("button", { name: "Load more events" }));
-    await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 100)).toBe(true));
+    await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 2_000)).toBe(true));
     await slot.findByText(/pwd/);
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
