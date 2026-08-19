@@ -14,21 +14,6 @@ afterEach(async () => {
 });
 
 describe("TraceIndexer", () => {
-  it("removes the retired artifact cache during schema migration", () => {
-    const database = new Database(":memory:");
-    databases.push(database);
-    ensureSchema(database);
-    database.exec("CREATE TABLE trace_artifacts (id TEXT PRIMARY KEY, preview TEXT NOT NULL);");
-    database.prepare(
-      "INSERT INTO trace_roots (id, source_id, label, path, kind) VALUES (?, ?, ?, ?, ?)",
-    ).run("legacy-artifacts", "artifacts", "Legacy artifacts", "/tmp/legacy", "artifact");
-
-    ensureSchema(database);
-
-    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'trace_artifacts'").get()).toBeUndefined();
-    expect(database.prepare("SELECT id FROM trace_roots WHERE id = ?").get("legacy-artifacts")).toBeUndefined();
-  });
-
   it("sorts the full indexed session set by collection sort", () => {
     const database = new Database(":memory:");
     databases.push(database);
@@ -151,6 +136,41 @@ describe("TraceIndexer", () => {
     expect(indexer.roots()).toEqual([]);
   });
 
+  it("advances a bounded scan batch without restarting discovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bb-traces-batch-"));
+    temporaryDirectories.push(directory);
+    await Promise.all(
+      ["one", "two", "three"].map((title) =>
+        writeFile(
+          join(directory, title + ".jsonl"),
+          JSON.stringify({ type: "user/message", data: { role: "user", content: title } }) + "\n",
+          "utf8",
+        ),
+      ),
+    );
+
+    const database = new Database(":memory:");
+    databases.push(database);
+    const indexer = new TraceIndexer(database, ensureSchema(database));
+    const root: RootSpec = {
+      id: "bounded-sessions",
+      source: "custom",
+      label: "Bounded sessions",
+      path: directory,
+      kind: "session",
+      format: "jsonl",
+    };
+
+    const first = await indexer.scan([root], undefined, { maxFiles: 1 });
+    const second = await indexer.scan([root], undefined, { maxFiles: 1 });
+    const third = await indexer.scan([root], undefined, { maxFiles: 1 });
+
+    expect(first.complete).toBe(false);
+    expect(second.complete).toBe(false);
+    expect(third.complete).toBe(true);
+    expect(indexer.listSessions({ limit: 10, offset: 0 }).total).toBe(3);
+  });
+
   it("fingerprints completed files and replaces stale rows when a session is rewritten", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-traces-fingerprint-"));
     temporaryDirectories.push(directory);
@@ -175,7 +195,7 @@ describe("TraceIndexer", () => {
     const database = new Database(":memory:");
     databases.push(database);
     const indexer = new TraceIndexer(database, ensureSchema(database));
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
 
     const firstFile = database.prepare("SELECT indexed_at, mtime_ms, content_hash FROM trace_files WHERE path = ?").get(sessionPath) as {
       indexed_at: number;
@@ -184,7 +204,7 @@ describe("TraceIndexer", () => {
     };
     expect(firstFile.content_hash).toMatch(/^[0-9a-f]{64}$/);
     database.prepare("UPDATE trace_files SET content_hash = NULL WHERE path = ?").run(sessionPath);
-    expect(await indexer.scan([root], undefined, { forceFingerprintAll: true })).toBe(true);
+    expect((await indexer.scan([root], undefined, { forceFingerprintAll: true })).changed).toBe(true);
     expect((database.prepare("SELECT content_hash FROM trace_files WHERE path = ?").get(sessionPath) as {
       content_hash: string | null;
     }).content_hash).toMatch(/^[0-9a-f]{64}$/);
@@ -194,7 +214,7 @@ describe("TraceIndexer", () => {
     };
     const touchedMtime = fingerprintedFile.mtime_ms + 5_000;
     await utimes(sessionPath, new Date(touchedMtime), new Date(touchedMtime));
-    expect(await indexer.scan([root])).toBe(false);
+    expect((await indexer.scan([root])).changed).toBe(false);
     const afterTouch = database.prepare("SELECT indexed_at, mtime_ms FROM trace_files WHERE path = ?").get(sessionPath) as {
       indexed_at: number;
       mtime_ms: number;
@@ -209,7 +229,7 @@ describe("TraceIndexer", () => {
     ]);
     await utimes(sessionPath, new Date(touchedMtime), new Date(touchedMtime));
     const sessionId = indexer.listSessions({ limit: 10, offset: 0 }).sessions[0]!.id;
-    expect(await indexer.scan([root], undefined, { forceFingerprintPaths: new Set([sessionPath]) })).toBe(true);
+    expect((await indexer.scan([root], undefined, { forceFingerprintPaths: new Set([sessionPath]) })).changed).toBe(true);
     expect(indexer.getSession(sessionId, 10, 0).events.map((event) => event.summary)).toEqual([
       "new request",
       "new response",
@@ -223,7 +243,7 @@ describe("TraceIndexer", () => {
       { type: "tool/call", data: { name: "alt-tool", arguments: "{}" } },
     ]);
     await utimes(sessionPath, new Date(touchedMtime + 5_000), new Date(touchedMtime + 5_000));
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
     expect(indexer.getSession(sessionId, 10, 0).events.map((event) => event.summary)).toEqual([
       "alt request",
       "alt response",
@@ -239,7 +259,7 @@ describe("TraceIndexer", () => {
       { type: "assistant/message", data: { role: "assistant", content: "short replacement response" } },
     ]);
     await utimes(sessionPath, new Date(touchedMtime + 7_500), new Date(touchedMtime + 7_500));
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
     expect(indexer.getSession(sessionId, 10, 0).events.map((event) => event.summary)).toEqual([
       "short replacement request",
       "short replacement response",
@@ -251,7 +271,7 @@ describe("TraceIndexer", () => {
       { type: "tool/call", data: { name: "new-tool", arguments: '{"command":"ls"}' } },
     ]);
     await utimes(sessionPath, new Date(touchedMtime + 10_000), new Date(touchedMtime + 10_000));
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
     const largerDetail = indexer.getSession(sessionId, 10, 0);
     expect(largerDetail.totalEvents).toBe(3);
     expect(largerDetail.events.map((event) => event.summary)).toEqual([
@@ -285,7 +305,7 @@ describe("TraceIndexer", () => {
       ].map((record) => JSON.stringify(record)).join("\n") + "\n",
       "utf8",
     );
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
     const sessionId = indexer.listSessions({ limit: 10, offset: 0 }).sessions[0]!.id;
 
     await appendFile(sessionPath, JSON.stringify({ type: "user/message", data: { content: "unfinished original" } }), "utf8");
@@ -296,7 +316,7 @@ describe("TraceIndexer", () => {
       size_bytes: number;
     };
     expect(partialFile.indexed_bytes).toBeLessThan(partialFile.size_bytes);
-    expect(await indexer.scan([root], undefined, { forceFingerprintPaths: new Set([sessionPath]) })).toBe(true);
+    expect((await indexer.scan([root], undefined, { forceFingerprintPaths: new Set([sessionPath]) })).changed).toBe(true);
     expect(indexer.getSession(sessionId, 10, 0).totalEvents).toBe(2);
 
     await writeFile(
@@ -308,7 +328,7 @@ describe("TraceIndexer", () => {
       ].map((record) => JSON.stringify(record)).join("\n") + "\n",
       "utf8",
     );
-    expect(await indexer.scan([root])).toBe(true);
+    expect((await indexer.scan([root])).changed).toBe(true);
     expect(indexer.getSession(sessionId, 10, 0).events.map((event) => event.summary)).toEqual([
       "replacement request",
       "replacement response",

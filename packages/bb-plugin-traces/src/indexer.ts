@@ -80,6 +80,12 @@ export type IndexStats = {
   lastError: string | null;
 };
 
+export type ScanResult = {
+  changed: boolean;
+  complete: boolean;
+  processedPaths: string[];
+};
+
 type SqliteStatement = {
   run(...args: unknown[]): unknown;
   get(...args: unknown[]): unknown;
@@ -124,6 +130,14 @@ type DiscoveryResult = {
   accessible: boolean;
   complete: boolean;
   limited: boolean;
+};
+
+type SessionScanQueue = {
+  files: string[];
+  index: number;
+  complete: boolean;
+  error: string | null;
+  bytes: number;
 };
 
 function yieldToEventLoop(): Promise<void> {
@@ -498,6 +512,7 @@ async function walkFiles(root: string, signal?: AbortSignal): Promise<DiscoveryR
     return { files: [], accessible: false, complete: false, limited: false };
   }
   await walk(root, 0);
+  output.sort();
   return { files: output, accessible, complete, limited };
 }
 
@@ -580,10 +595,16 @@ async function fileFingerprint(filePath: string, byteLength: number, signal?: Ab
   const hash = createHash("sha256");
   if (byteLength === 0) return hash.digest("hex");
   const stream = createReadStream(filePath, { start: 0, end: byteLength - 1 });
+  let bytesSinceYield = 0;
   try {
     for await (const chunk of stream) {
       if (signal?.aborted) return null;
       hash.update(chunk);
+      bytesSinceYield += chunk.length;
+      if (bytesSinceYield >= 4 * 1024 * 1024) {
+        bytesSinceYield = 0;
+        await yieldToEventLoop();
+      }
     }
     return signal?.aborted ? null : hash.digest("hex");
   } finally {
@@ -695,9 +716,6 @@ export function ensureSchema(db: SqliteDb): boolean {
       "CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line_number);" +
       "CREATE INDEX IF NOT EXISTS trace_events_timestamp ON trace_events(timestamp);",
   );
-  // Artifact rows are derived cache data. Remove the retired table and its
-  // roots while leaving all source files untouched.
-  db.exec("DROP TABLE IF EXISTS trace_artifacts; DELETE FROM trace_roots WHERE kind = 'artifact' OR source_id = 'artifacts';");
   const traceFileColumns = new Set(
     (db.prepare("PRAGMA table_info(trace_files)").all() as DbRow[]).map((row) => String(row.name)),
   );
@@ -719,6 +737,9 @@ export class TraceIndexer {
   private readonly db: SqliteDb;
   private readonly ftsEnabled: boolean;
   private readonly log: (message: string) => void;
+  private readonly sessionScanQueues = new Map<string, SessionScanQueue>();
+  private readonly sessionScanPassSeen = new Set<string>();
+  private sessionScanPassInvalid = false;
 
   constructor(db: SqliteDb, ftsEnabled: boolean, log: (message: string) => void = () => undefined) {
     this.db = db;
@@ -733,51 +754,93 @@ export class TraceIndexer {
       forceFingerprintPaths?: ReadonlySet<string>;
       forceFingerprintAll?: boolean;
       failedSessionPaths?: Set<string>;
+      maxFiles?: number;
     } = {},
-  ): Promise<boolean> {
+  ): Promise<ScanResult> {
     let changed = false;
+    const processedPaths: string[] = [];
+    let complete = true;
     for (const root of roots) this.ensureRoot(root);
     this.pruneInactiveRoots(roots);
 
-    const seenSessionFiles = new Set<string>();
-    const unavailableSessionRoots = new Set<string>();
     for (const root of roots) {
-      if (signal?.aborted) return changed;
-      const discovery = await discoverSessionFilesWithStatus(root, signal);
-      if (signal?.aborted) return changed;
-      const files = discovery.files;
-      let bytes = 0;
-      let rootError = !discovery.accessible
-        ? "Root is missing or not readable"
-        : !discovery.complete
-          ? discovery.limited
-            ? "Discovery limit reached; cached rows were preserved"
-            : "Discovery incomplete; cached rows were preserved"
-          : null;
-      for (const [fileIndex, filePath] of files.entries()) {
-        if (signal?.aborted) return changed;
-        if (fileIndex % 16 === 0) await yieldToEventLoop();
-        seenSessionFiles.add(filePath);
+      if (signal?.aborted) return { changed, complete: false, processedPaths };
+      let queue = this.sessionScanQueues.get(root.id);
+      if (!queue) {
+        const discovery = await discoverSessionFilesWithStatus(root, signal);
+        if (signal?.aborted) return { changed, complete: false, processedPaths };
+        queue = {
+          files: discovery.files,
+          index: 0,
+          complete: discovery.complete,
+          error: !discovery.accessible
+            ? "Root is missing or not readable"
+            : !discovery.complete
+              ? discovery.limited
+                ? "Discovery limit reached; cached rows were preserved"
+                : "Discovery incomplete; cached rows were preserved"
+              : null,
+          bytes: 0,
+        };
+        this.sessionScanQueues.set(root.id, queue);
+        if (!queue.complete) this.sessionScanPassInvalid = true;
+      }
+      let remainingFiles = options.maxFiles ?? Number.MAX_SAFE_INTEGER;
+      while (queue.index < queue.files.length) {
+        if (remainingFiles <= 0) {
+          complete = false;
+          break;
+        }
+        if (signal?.aborted) return { changed, complete: false, processedPaths };
+        if (queue.index % 8 === 0) await yieldToEventLoop();
+        const filePath = queue.files[queue.index]!;
         try {
-          bytes += (await stat(filePath)).size;
+          queue.bytes += (await stat(filePath)).size;
           const forceFingerprintFromPath = options.forceFingerprintPaths?.has(filePath) === true;
           const forceFingerprint = options.forceFingerprintAll === true || forceFingerprintFromPath;
           changed = (await this.indexSessionFile(root, filePath, signal, forceFingerprint)) || changed;
+          if (signal?.aborted) return { changed, complete: false, processedPaths };
+          queue.index += 1;
+          this.sessionScanPassSeen.add(filePath);
+          processedPaths.push(filePath);
+          remainingFiles -= 1;
         } catch (error) {
+          if (signal?.aborted) return { changed, complete: false, processedPaths };
+          queue.index += 1;
+          this.sessionScanPassSeen.add(filePath);
           options.failedSessionPaths?.add(filePath);
           const message = error instanceof Error ? error.message : String(error);
-          rootError = rootError ?? message;
+          queue.error = queue.error ?? message;
           this.log("Could not index " + filePath + ": " + message);
+          remainingFiles -= 1;
         }
       }
-      this.updateRoot(root, files.length, bytes, rootError);
-      if (!discovery.complete) unavailableSessionRoots.add(root.id);
+      this.updateRoot(root, queue.files.length, queue.bytes, queue.error);
+      if (queue.index < queue.files.length) {
+        complete = false;
+        continue;
+      }
+      this.sessionScanQueues.delete(root.id);
+      if (!queue.complete) {
+        complete = false;
+      }
     }
-    this.removeMissingSessionFiles(
-      roots.filter((root) => !unavailableSessionRoots.has(root.id)),
-      seenSessionFiles,
-    );
-    return changed;
+    if (complete) {
+      if (this.sessionScanPassInvalid) {
+        this.sessionScanPassSeen.clear();
+        this.sessionScanPassInvalid = false;
+      } else {
+        changed = this.removeMissingSessionFiles(roots, this.sessionScanPassSeen) || changed;
+        this.sessionScanPassSeen.clear();
+      }
+    } else if (this.sessionScanQueues.size === 0 && this.sessionScanPassInvalid) {
+      // An inaccessible or bounded discovery completed without a safe file
+      // set. Preserve cached rows for this pass, then let the next scan make
+      // a fresh discovery that can safely prune rows if the root is readable.
+      this.sessionScanPassSeen.clear();
+      this.sessionScanPassInvalid = false;
+    }
+    return { changed, complete, processedPaths };
   }
 
   listSessions(input: { query?: string; source?: string; sort?: "updated" | "started" | "events" | "duration"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
@@ -1142,22 +1205,28 @@ export class TraceIndexer {
     ).run(root.id, root.source, root.label, root.path, root.kind, existsFlag);
   }
 
-  private removeMissingSessionFiles(roots: RootSpec[], seen: Set<string>): void {
+  private removeMissingSessionFiles(roots: RootSpec[], seen: Set<string>): boolean {
     const rootIds = roots.map((root) => root.id);
-    if (!rootIds.length) return;
+    if (!rootIds.length) return false;
+    let changed = false;
     const rows = this.db.prepare("SELECT path, root_id, session_id FROM trace_files").all() as DbRow[];
     for (const row of rows) {
       if (!rootIds.includes(String(row.root_id)) || seen.has(String(row.path))) continue;
+      changed = true;
       const sessionId = String(row.session_id);
       this.db.prepare("DELETE FROM trace_files WHERE path = ?").run(String(row.path));
       this.db.prepare("DELETE FROM trace_events WHERE session_id = ?").run(sessionId);
       if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM trace_sessions WHERE id = ?").run(sessionId);
     }
+    return changed;
   }
 
   private pruneInactiveRoots(sessionRoots: RootSpec[]): void {
     const active = new Set(sessionRoots.map((root) => root.id));
+    for (const rootId of this.sessionScanQueues.keys()) {
+      if (!active.has(rootId)) this.sessionScanQueues.delete(rootId);
+    }
     const rootRows = this.db.prepare("SELECT id, kind FROM trace_roots").all() as DbRow[];
     for (const row of rootRows) {
       if (active.has(String(row.id))) continue;

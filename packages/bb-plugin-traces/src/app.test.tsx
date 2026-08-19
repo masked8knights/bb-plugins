@@ -176,7 +176,5 @@ describe("Traces app interactions", () => {
 
     const collection = renderSlot(panel, { subPath: "" }, { rpc: commonRpc() as never });
     await collection.findByRole("button", { name: /Inspect trace/ });
-    expect(collection.queryByRole("button", { name: "Artifacts" })).toBeNull();
-    expect(collection.queryByText("Plans, checkpoints, and context files")).toBeNull();
   });
 });

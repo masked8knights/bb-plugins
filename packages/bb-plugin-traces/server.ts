@@ -15,6 +15,8 @@ import {
 } from "./src/indexer";
 import { shouldScanAfterSettingsChange } from "./src/settings";
 
+const SCAN_BATCH_FILES = 8;
+
 const rootSchema = z.object({
   id: z.string(),
   source: z.string(),
@@ -192,14 +194,13 @@ export default async function plugin(bb: BbPluginApi) {
   let lastScanAt: number | null = null;
   let lastError: string | null = null;
   let scanRequested = false;
-  let activeScan: Promise<void> | null = null;
+  let activeScan: Promise<boolean> | null = null;
   let autoIndexEnabled = true;
   let rootWatchers: FSWatcher[] = [];
   let watchedRootKey = "";
   let watcherScanTimer: ReturnType<typeof setTimeout> | null = null;
   let nextSafetyScanAt = 0;
   let dirtySessionPaths = new Set<string>();
-  let forceFingerprintAll = false;
   let watcherGeneration = 0;
 
   async function roots(): Promise<RootSpec[]> {
@@ -229,9 +230,7 @@ export default async function plugin(bb: BbPluginApi) {
   function requestScanFromWatcher(generation: number, rootPath: string, filename: string | Buffer | null): void {
     if (generation !== watcherGeneration) return;
     if (!autoIndexEnabled) return;
-    if (filename === null || String(filename).length === 0) {
-      forceFingerprintAll = true;
-    } else {
+    if (filename !== null && String(filename).length > 0) {
       dirtySessionPaths.add(join(rootPath, String(filename)));
     }
     if (watcherScanTimer) clearTimeout(watcherScanTimer);
@@ -264,7 +263,6 @@ export default async function plugin(bb: BbPluginApi) {
           watcher.close();
           if (watchedRootKey === key) {
             watchedRootKey = "";
-            forceFingerprintAll = true;
             scanRequested = true;
           }
           bb.log.warn("Trace watcher failed for " + root.path + ": " + errorText(error));
@@ -295,42 +293,44 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function scanNow(signal?: AbortSignal): Promise<void> {
+  async function scanNow(signal?: AbortSignal): Promise<boolean> {
     if (activeScan) return activeScan;
     activeScan = (async () => {
       indexing = true;
       lastError = null;
       let changed = false;
       let drainedDirtySessionPaths = new Set<string>();
-      let drainedForceFingerprintAll = false;
       let scanDrainedWatcherState = false;
       let scanCompleted = false;
+      let scanComplete = false;
+      let scanFailed = false;
       const restoreWatcherState = () => {
         if (!scanDrainedWatcherState || scanCompleted) return;
-        if (drainedForceFingerprintAll) forceFingerprintAll = true;
         for (const path of drainedDirtySessionPaths) dirtySessionPaths.add(path);
       };
       try {
         const configured = await roots();
-        const before = indexer.stats(null, false, null);
         drainedDirtySessionPaths = dirtySessionPaths;
-        drainedForceFingerprintAll = forceFingerprintAll;
         const failedSessionPaths = new Set<string>();
         dirtySessionPaths = new Set();
-        forceFingerprintAll = false;
         scanDrainedWatcherState = true;
-        changed = (await indexer.scan(configured, signal, {
+        const result = await indexer.scan(configured, signal, {
           forceFingerprintPaths: drainedDirtySessionPaths,
-          forceFingerprintAll: drainedForceFingerprintAll,
           failedSessionPaths,
-        })) || changed;
+          maxFiles: SCAN_BATCH_FILES,
+        });
+        changed = result.changed;
+        const processedPaths = new Set(result.processedPaths);
+        for (const path of drainedDirtySessionPaths) {
+          if (!processedPaths.has(path)) dirtySessionPaths.add(path);
+        }
         for (const path of failedSessionPaths) dirtySessionPaths.add(path);
         changed = changed || failedSessionPaths.size > 0;
+        scanComplete = result.complete;
         scanCompleted = !signal?.aborted;
-        const after = indexer.stats(null, false, null);
-        changed = changed || before.sessions !== after.sessions || before.events !== after.events || before.bytes !== after.bytes;
         if (!signal?.aborted) lastScanAt = Date.now();
       } catch (error) {
+        scanFailed = true;
         restoreWatcherState();
         lastError = errorText(error);
         bb.log.warn("Trace index scan failed: " + lastError);
@@ -338,8 +338,10 @@ export default async function plugin(bb: BbPluginApi) {
         restoreWatcherState();
         indexing = false;
         activeScan = null;
+        if (!signal?.aborted && !scanFailed && !scanComplete) scanRequested = true;
         if (changed || lastError) publish();
       }
+      return scanComplete;
     })();
     return activeScan;
   }
@@ -356,16 +358,9 @@ export default async function plugin(bb: BbPluginApi) {
       return indexer.rawEvent(id);
     },
     async rescan() {
-      const scanAlreadyInFlight = activeScan !== null;
-      scanRequested = false;
-      forceFingerprintAll = true;
-      await scanNow();
-      if (scanAlreadyInFlight) {
-        forceFingerprintAll = true;
-        scanRequested = true;
-      }
-      const current = await settings.get();
-      nextSafetyScanAt = Date.now() + parseInterval(current.scanIntervalSeconds);
+      scanRequested = true;
+      nextSafetyScanAt = 0;
+      publish();
       return status();
     },
   });
@@ -394,8 +389,10 @@ export default async function plugin(bb: BbPluginApi) {
             }
             if (scanRequested) {
               scanRequested = false;
-              await scanNow(signal);
-              nextSafetyScanAt = Date.now() + parseInterval(current.scanIntervalSeconds);
+              const scanComplete = await scanNow(signal);
+              nextSafetyScanAt = scanComplete
+                ? Date.now() + parseInterval(current.scanIntervalSeconds)
+                : Date.now() + (lastError ? 10_000 : 1_000);
             }
           } catch (error) {
             lastError = errorText(error);
