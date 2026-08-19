@@ -99,6 +99,7 @@ describe("TraceIndexer", () => {
     expect(indexer.listSessions({ query: "Investigate", limit: 10, offset: 0 }).total).toBe(1);
     expect(indexer.listSessions({ query: "pwd", limit: 10, offset: 0 }).total).toBe(1);
     expect(indexer.getSession(encodeURIComponent(sessionId), 10, 0).session?.id).toBe(sessionId);
+    expect(indexer.getSession(encodeURIComponent(encodeURIComponent(sessionId)), 10, 0).session?.id).toBe(sessionId);
 
     const indexedAt = database.prepare("SELECT indexed_at FROM trace_files WHERE path = ?").get(sessionPath) as { indexed_at: number };
     database.prepare("UPDATE trace_files SET parser_version = 1 WHERE path = ?").run(sessionPath);

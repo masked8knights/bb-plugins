@@ -23,7 +23,7 @@ type TraceRoute =
 type SessionSort = "updated" | "started" | "events" | "duration";
 type InspectorTab = "summary" | "preview" | "raw" | "payload" | "result" | "timing";
 type TimelineLane = "input" | "model" | "tools";
-const DETAIL_EVENT_PAGE_SIZE = 500;
+const DETAIL_EVENT_PAGE_SIZE = 100;
 const DETAIL_REQUEST_TIMEOUT_MS = 15_000;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -33,18 +33,24 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-function decodeRouteSegment(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+function decodeRouteValue(value: string): string {
+  let decoded = value;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) return decoded;
+      decoded = next;
+    } catch {
+      return decoded;
+    }
   }
+  return decoded;
 }
 
 function parseTraceRoute(subPath: string): TraceRoute {
-  const parts = subPath.split("/").filter(Boolean);
+  const parts = decodeRouteValue(subPath).split("/").filter(Boolean);
   if (parts[0] === "session" && parts.length > 1) {
-    return { kind: "session", id: decodeRouteSegment(parts.slice(1).join("/")) };
+    return { kind: "session", id: decodeRouteValue(parts.slice(1).join("/")) };
   }
   return { kind: "sessions" };
 }
@@ -734,7 +740,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
   }
 
   if (route.kind === "session") {
-    if (detailLoading || (session && session.id !== route.id && session.filePath !== route.id)) return <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">Loading trajectory…</div>;
+    if (detailLoading) return <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">Loading trajectory…</div>;
     if (!session) return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-background text-center">
         <div className="text-sm font-medium text-foreground">{error ? "Unable to load trace" : "Session not found"}</div>

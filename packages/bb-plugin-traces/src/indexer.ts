@@ -1300,9 +1300,15 @@ export class TraceIndexer {
 }
 
 function safeDecodeURIComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+  let decoded = value;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) return decoded;
+      decoded = next;
+    } catch {
+      return decoded;
+    }
   }
+  return decoded;
 }

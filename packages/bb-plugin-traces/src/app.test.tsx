@@ -159,7 +159,7 @@ describe("Traces app interactions", () => {
     });
 
     await slot.findByLabelText("Trajectory event ledger");
-    expect(calls[0]).toMatchObject({ id: session.id, limit: 500, offset: 0 });
+    expect(calls[0]).toMatchObject({ id: session.id, limit: 100, offset: 0 });
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(collectionCalls).toEqual([]);
     expect(slot.getAllByRole("button", { name: "Select USER event 1" }).length).toBeGreaterThan(0);
@@ -170,7 +170,7 @@ describe("Traces app interactions", () => {
     await slot.findByText("raw:event-user");
 
     fireEvent.click(slot.getByRole("button", { name: "Load more events" }));
-    await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 500)).toBe(true));
+    await waitFor(() => expect(calls.some((input) => input.offset === 2 && input.limit === 100)).toBe(true));
     await slot.findByText(/pwd/);
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
@@ -181,6 +181,20 @@ describe("Traces app interactions", () => {
 
   it("accepts decoded session IDs that contain path separators", async () => {
     const slot = renderSlot(panel, { subPath: "session/dsh:session/one" }, { rpc: commonRpc() as never });
+    await slot.findByLabelText("Trajectory event ledger");
+    expect(slot.getByText("Inspect the local trace")).toBeTruthy();
+  });
+
+  it("accepts a session ID that the host encoded twice during navigation", async () => {
+    const doubleEncoded = encodeURIComponent(encodeURIComponent(session.id));
+    const slot = renderSlot(panel, { subPath: `session/${doubleEncoded}` }, { rpc: commonRpc() as never });
+    await slot.findByLabelText("Trajectory event ledger");
+    expect(slot.getByText("Inspect the local trace")).toBeTruthy();
+  });
+
+  it("accepts a panel subpath encoded as one URL segment", async () => {
+    const encodedSubPath = encodeURIComponent(`session/${session.id}`);
+    const slot = renderSlot(panel, { subPath: encodedSubPath }, { rpc: commonRpc() as never });
     await slot.findByLabelText("Trajectory event ledger");
     expect(slot.getByText("Inspect the local trace")).toBeTruthy();
   });
