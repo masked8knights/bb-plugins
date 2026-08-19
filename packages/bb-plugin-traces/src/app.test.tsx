@@ -191,8 +191,10 @@ describe("Traces app interactions", () => {
     expect(slot.queryByRole("tooltip")).toBeNull();
 
     fireEvent.click(slot.getAllByRole("button", { name: "Select TOOL event 3" })[0]!);
-    await slot.findByRole("button", { name: "Payload" });
-    fireEvent.click(slot.getByRole("button", { name: "Result" }));
+    await slot.findByRole("button", { name: "JSON" });
+    expect(slot.queryByRole("button", { name: "Summary" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Payload" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Result" })).toBeNull();
     expect(slot.getByRole("complementary", { name: "Selected event inspector" })).toBeTruthy();
   });
 
@@ -214,6 +216,7 @@ describe("Traces app interactions", () => {
 
     await slot.findByLabelText("Trajectory event ledger");
     fireEvent.click(slot.getByRole("button", { name: "Select SYSTEM event 0" }));
+    expect(slot.getByRole("button", { name: "JSON" })).toBeTruthy();
     const prettyPayload = await slot.findByLabelText("Pretty-printed JSON");
     expect(prettyPayload.textContent).toContain('"base_instructions"');
     expect(prettyPayload.textContent).toContain('"text": "You are an agent with a readable system prompt."');

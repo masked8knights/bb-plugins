@@ -21,7 +21,7 @@ type TraceRoute =
   | { kind: "session"; id: string };
 
 type SessionSort = "updated" | "started" | "events" | "duration";
-type InspectorTab = "summary" | "preview" | "raw" | "payload" | "result" | "timing";
+type InspectorTab = "json" | "raw" | "timing";
 type TimelineLane = "input" | "model" | "tools";
 const DETAIL_EVENT_PAGE_SIZE = 2_000;
 const DETAIL_REQUEST_TIMEOUT_MS = 15_000;
@@ -591,14 +591,12 @@ function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading
   );
 }
 
-function inspectorTabs(event: TraceEvent): Array<{ id: InspectorTab; label: string }> {
-  if (event.kind === "tool") return [{ id: "summary", label: "Summary" }, { id: "payload", label: "Payload" }, { id: "result", label: "Result" }, { id: "timing", label: "Timing" }];
-  if (event.kind === "system") return [{ id: "summary", label: "System Prompt" }, { id: "raw", label: "Raw" }, { id: "timing", label: "Timing" }];
-  return [{ id: "summary", label: "Summary" }, { id: "preview", label: "Preview" }, { id: "raw", label: "Raw" }, { id: "timing", label: "Timing" }];
+function inspectorTabs(): Array<{ id: InspectorTab; label: string }> {
+  return [{ id: "json", label: "JSON" }, { id: "raw", label: "Raw" }, { id: "timing", label: "Timing" }];
 }
 
 function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: string | null; onClose: () => void }) {
-  const tabs = inspectorTabs(event);
+  const tabs = inspectorTabs();
   const [tab, setTab] = useState<InspectorTab>(tabs[0]!.id);
   useEffect(() => setTab(tabs[0]!.id), [event.id]);
   return (
@@ -612,9 +610,7 @@ function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: str
         {tabs.map((item) => <button key={item.id} type="button" className={(tab === item.id ? "border-b-2 border-primary text-primary " : "border-b-2 border-transparent text-muted-foreground ") + "h-8 shrink-0 px-2 text-[10px] font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"} onClick={() => setTab(item.id)}>{item.label}</button>)}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {tab === "summary" ? <div className="space-y-3">{event.summary && event.summary !== event.title ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary}</div> : null}<PrettyPayload event={event} raw={raw} /></div> : null}
-        {tab === "preview" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || event.title}</div> : null}
-        {tab === "payload" || tab === "result" ? <PrettyPayload event={event} raw={raw} /> : null}
+        {tab === "json" ? <PrettyPayload event={event} raw={raw} /> : null}
         {tab === "raw" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
         {tab === "timing" ? (
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
