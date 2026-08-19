@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { listSessionsInput } from "./rpc-input";
+import { getSessionInput, listSessionsInput } from "./rpc-input";
 
 describe("trace RPC inputs", () => {
   it("omits empty optional fields instead of sending undefined over RPC", () => {
@@ -31,6 +31,34 @@ describe("trace RPC inputs", () => {
       sort: "events",
       limit: 50,
       offset: 100,
+    });
+  });
+
+  it("builds collection health filters without sending inactive defaults", () => {
+    expect(listSessionsInput("", "", "errors", 0, 100, { errorFilter: "only", status: "active", hasTools: true })).toEqual({
+      errorFilter: "only",
+      status: "active",
+      hasTools: true,
+      sort: "errors",
+      limit: 100,
+      offset: 0,
+    });
+  });
+
+  it("builds trajectory filter requests with deduplicated values", () => {
+    expect(getSessionInput("session-one", 2_000, 0, {
+      query: "  permission denied ",
+      categories: ["tool", "tool"],
+      toolTypes: [" exec ", "exec"],
+      errorFilter: "only",
+    })).toEqual({
+      id: "session-one",
+      query: "permission denied",
+      categories: ["tool"],
+      toolTypes: ["exec"],
+      errorFilter: "only",
+      limit: 2_000,
+      offset: 0,
     });
   });
 });

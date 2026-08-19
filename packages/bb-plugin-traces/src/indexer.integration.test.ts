@@ -31,6 +31,43 @@ describe("TraceIndexer", () => {
     expect(indexer.listSessions({ sort: "started", limit: 1, offset: 0 }).sessions[0]?.id).toBe("short");
   });
 
+  it("filters sessions and trajectory events from indexed facets", () => {
+    const database = new Database(":memory:");
+    databases.push(database);
+    ensureSchema(database);
+    database.prepare(
+      "INSERT INTO trace_sessions (id, source_id, title, file_path, event_count, tool_count, error_count, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("errors", "codex", "Errors", "/tmp/errors.jsonl", 4, 2, 1, "completed");
+    database.prepare(
+      "INSERT INTO trace_sessions (id, source_id, title, file_path, event_count, tool_count, error_count, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("clean", "dsh", "Clean", "/tmp/clean.jsonl", 2, 0, 0, "active");
+    const insertEvent = database.prepare(
+      "INSERT INTO trace_events (id, session_id, line_number, type, kind, role, title, summary, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    insertEvent.run("user", "errors", 1, "user/message", "message", "user", "User", "Investigate the failing command", "{}");
+    insertEvent.run("exec", "errors", 2, "tool/call", "tool", "tool", "exec", "Run the command", "{}");
+    insertEvent.run("exec-result", "errors", 3, "tool/result", "tool", "tool_result", "exec", "Permission denied", "{}");
+    insertEvent.run("assistant", "errors", 4, "assistant/message", "message", "assistant", "Assistant", "The command failed", "{}");
+    insertEvent.run("clean-user", "clean", 1, "user/message", "message", "user", "User", "A clean request", "{}");
+    insertEvent.run("clean-assistant", "clean", 2, "assistant/message", "message", "assistant", "Assistant", "A clean response", "{}");
+
+    const indexer = new TraceIndexer(database, false);
+    expect(indexer.listSessions({ errorFilter: "only", limit: 10, offset: 0 }).sessions.map((item) => item.id)).toEqual(["errors"]);
+    expect(indexer.listSessions({ status: "active", hasTools: true, limit: 10, offset: 0 }).total).toBe(0);
+    expect(indexer.listSessions({ sort: "errors", limit: 1, offset: 0 }).sessions[0]?.id).toBe("errors");
+
+    expect(indexer.getSession("errors", 10, 0, { categories: ["tool"] }).totalEvents).toBe(2);
+    expect(indexer.getSession("errors", 10, 0, { toolTypes: ["exec"] }).totalEvents).toBe(2);
+    expect(indexer.getSession("errors", 10, 0, { errorFilter: "only" }).totalEvents).toBe(1);
+    expect(indexer.getSession("errors", 10, 0, { query: "permission denied" }).totalEvents).toBe(1);
+
+    const facets = indexer.getSessionFacets("errors");
+    expect(facets.totalEvents).toBe(4);
+    expect(facets.errorCount).toBe(1);
+    expect(facets.categories).toEqual(expect.arrayContaining([{ value: "tool", count: 2 }, { value: "user", count: 1 }, { value: "assistant", count: 1 }]));
+    expect(facets.toolTypes).toContainEqual({ value: "exec", count: 2 });
+  });
+
   it("indexes local sessions, preserves payloads, and rescans appends", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-traces-"));
     temporaryDirectories.push(directory);

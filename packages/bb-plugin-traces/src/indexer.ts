@@ -7,6 +7,28 @@ import { spawn } from "node:child_process";
 
 export type TraceSourceId = "codex" | "claude" | "pi" | "omp" | "dsh" | "custom";
 export type TraceFormat = "jsonl" | "zstd";
+export type TraceEventCategory = "user" | "assistant" | "tool" | "system" | "context" | "telemetry" | "step" | "turn" | "other";
+export type TraceErrorFilter = "all" | "only";
+export type TraceSessionStatus = "active" | "completed" | "unknown";
+
+export type TraceEventFilters = {
+  query?: string;
+  categories?: TraceEventCategory[];
+  toolTypes?: string[];
+  errorFilter?: TraceErrorFilter;
+};
+
+export type TraceFacet = {
+  value: string;
+  count: number;
+};
+
+export type TraceSessionFacets = {
+  categories: TraceFacet[];
+  toolTypes: TraceFacet[];
+  errorCount: number;
+  totalEvents: number;
+};
 
 export type RootSpec = {
   id: string;
@@ -59,7 +81,7 @@ export type SessionSummary = {
   inputTokens: number | null;
   outputTokens: number | null;
   durationMs: number | null;
-  status: "active" | "completed" | "unknown";
+  status: TraceSessionStatus;
   fileSizeBytes: number;
 };
 
@@ -196,6 +218,60 @@ function ftsQuery(value: string): string {
     .filter(Boolean)
     .map((term) => `"${term}"`)
     .join(" AND ");
+}
+
+const EVENT_ERROR_SQL = "(LOWER(type) LIKE '%error%' OR LOWER(type) LIKE '%fail%' OR (role = 'tool_result' AND (LOWER(summary) LIKE '%error%' OR LOWER(summary) LIKE '%fail%' OR LOWER(summary) LIKE '%denied%' OR LOWER(summary) LIKE '%exception%' OR LOWER(summary) LIKE '%timeout%')))";
+const EVENT_CATEGORY_SQL: Record<TraceEventCategory, string> = {
+  user: "role = 'user'",
+  assistant: "role = 'assistant'",
+  tool: "kind = 'tool'",
+  system: "kind = 'system'",
+  context: "kind = 'reasoning'",
+  telemetry: "kind = 'telemetry'",
+  step: "kind = 'step'",
+  turn: "kind = 'turn'",
+  other: "(kind = 'message' AND role IS NULL)",
+};
+
+function eventCategory(kind: string, role: string | null): TraceEventCategory {
+  if (role === "user" || role === "assistant") return role;
+  if (kind === "tool") return "tool";
+  if (kind === "system") return "system";
+  if (kind === "telemetry") return "telemetry";
+  if (kind === "step") return "step";
+  if (kind === "turn") return "turn";
+  if (kind === "reasoning") return "context";
+  return "other";
+}
+
+function isErrorEvent(event: Pick<NormalizedEvent, "type" | "role" | "summary">): boolean {
+  return /error|fail/i.test(event.type) || event.role === "tool_result" && /error|fail|denied|exception|timeout/i.test(event.summary);
+}
+
+function eventFilterWhere(sessionId: string, input: TraceEventFilters, ftsEnabled: boolean): { where: string; params: unknown[] } {
+  const clauses = ["session_id = ?"];
+  const params: unknown[] = [sessionId];
+  const query = input.query?.trim() ?? "";
+  if (query) {
+    const like = "%" + query + "%";
+    const eventSearch = ftsQuery(query);
+    if (ftsEnabled && eventSearch) {
+      clauses.push("(type LIKE ? OR role LIKE ? OR title LIKE ? OR summary LIKE ? OR id IN (SELECT event_id FROM trace_event_fts WHERE trace_event_fts MATCH ?))");
+      params.push(like, like, like, like, eventSearch);
+    } else {
+      clauses.push("(type LIKE ? OR role LIKE ? OR title LIKE ? OR summary LIKE ?)");
+      params.push(like, like, like, like);
+    }
+  }
+  const categories = [...new Set(input.categories ?? [])].map((category) => EVENT_CATEGORY_SQL[category]).filter(Boolean);
+  if (categories.length) clauses.push("(" + categories.join(" OR ") + ")");
+  const toolTypes = [...new Set((input.toolTypes ?? []).map((value) => value.trim()).filter(Boolean))];
+  if (toolTypes.length) {
+    clauses.push("kind = 'tool' AND title IN (" + toolTypes.map(() => "?").join(", ") + ")");
+    params.push(...toolTypes);
+  }
+  if (input.errorFilter === "only") clauses.push(EVENT_ERROR_SQL);
+  return { where: " WHERE " + clauses.join(" AND "), params };
 }
 
 function normalizeText(value: string): string {
@@ -854,7 +930,7 @@ export class TraceIndexer {
     return { changed, complete, processedPaths };
   }
 
-  listSessions(input: { query?: string; source?: string; sort?: "updated" | "started" | "events" | "duration"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
+  listSessions(input: { query?: string; source?: string; errorFilter?: TraceErrorFilter; status?: TraceSessionStatus; hasTools?: boolean; sort?: "updated" | "started" | "events" | "duration" | "errors"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
     const query = input.query?.trim() ?? "";
     const source = input.source?.trim() ?? "";
     const clauses: string[] = [];
@@ -863,6 +939,12 @@ export class TraceIndexer {
       clauses.push("source_id = ?");
       params.push(source);
     }
+    if (input.errorFilter === "only") clauses.push("COALESCE(error_count, 0) > 0");
+    if (input.status) {
+      clauses.push("status = ?");
+      params.push(input.status);
+    }
+    if (input.hasTools) clauses.push("COALESCE(tool_count, 0) > 0");
     if (query) {
       const like = "%" + query + "%";
       const eventSearch = ftsQuery(query);
@@ -882,6 +964,8 @@ export class TraceIndexer {
         ? "COALESCE(event_count, 0) DESC, COALESCE(updated_at, 0) DESC, file_path DESC"
         : input.sort === "duration"
           ? "COALESCE(duration_ms, -1) DESC, COALESCE(updated_at, 0) DESC, file_path DESC"
+          : input.sort === "errors"
+            ? "COALESCE(error_count, 0) DESC, COALESCE(updated_at, 0) DESC, file_path DESC"
           : "COALESCE(updated_at, 0) DESC, file_path DESC";
     const rows = this.db
       .prepare("SELECT * FROM trace_sessions" + where + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?")
@@ -889,21 +973,51 @@ export class TraceIndexer {
     return { sessions: rows.map(rowToSession), total: numberValue(totalRow.count) ?? 0 };
   }
 
-  getSession(sessionId: string, limit: number, offset: number): { session: SessionSummary | null; events: EventSummary[]; totalEvents: number } {
+  getSession(sessionId: string, limit: number, offset: number, filters: TraceEventFilters = {}): { session: SessionSummary | null; events: EventSummary[]; totalEvents: number } {
     const decodedSessionId = safeDecodeURIComponent(sessionId);
     const sessionRow = this.db
       .prepare("SELECT * FROM trace_sessions WHERE id = ? OR id = ? OR file_path = ? LIMIT 1")
       .get(sessionId, decodedSessionId, decodedSessionId) as DbRow | undefined;
     if (!sessionRow) return { session: null, events: [], totalEvents: 0 };
     const resolvedSessionId = String(sessionRow.id);
-    const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events WHERE session_id = ?").get(resolvedSessionId) as DbRow;
+    const filter = eventFilterWhere(resolvedSessionId, filters, this.ftsEnabled);
+    const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events" + filter.where).get(...filter.params) as DbRow;
     const eventRows = this.db
-      .prepare("SELECT * FROM trace_events WHERE session_id = ? ORDER BY line_number ASC LIMIT ? OFFSET ?")
-      .all(resolvedSessionId, limit, offset) as DbRow[];
+      .prepare("SELECT * FROM trace_events" + filter.where + " ORDER BY line_number ASC LIMIT ? OFFSET ?")
+      .all(...filter.params, limit, offset) as DbRow[];
     return {
       session: rowToSession(sessionRow),
       events: eventRows.map(rowToEvent),
       totalEvents: numberValue(countRow.count) ?? 0,
+    };
+  }
+
+  getSessionFacets(sessionId: string): TraceSessionFacets {
+    const decodedSessionId = safeDecodeURIComponent(sessionId);
+    const sessionRow = this.db
+      .prepare("SELECT * FROM trace_sessions WHERE id = ? OR id = ? OR file_path = ? LIMIT 1")
+      .get(sessionId, decodedSessionId, decodedSessionId) as DbRow | undefined;
+    if (!sessionRow) return { categories: [], toolTypes: [], errorCount: 0, totalEvents: 0 };
+    const resolvedSessionId = String(sessionRow.id);
+    const categoryCounts = new Map<TraceEventCategory, number>();
+    const categoryRows = this.db
+      .prepare("SELECT kind, role, COUNT(*) AS count FROM trace_events WHERE session_id = ? GROUP BY kind, role")
+      .all(resolvedSessionId) as DbRow[];
+    for (const row of categoryRows) {
+      const category = eventCategory(String(row.kind), stringValue(row.role));
+      categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + (numberValue(row.count) ?? 0));
+    }
+    const toolRows = this.db
+      .prepare("SELECT title AS value, COUNT(*) AS count FROM trace_events WHERE session_id = ? AND kind = 'tool' GROUP BY title ORDER BY count DESC, value ASC LIMIT 100")
+      .all(resolvedSessionId) as DbRow[];
+    const errorRow = this.db
+      .prepare("SELECT COUNT(*) AS count FROM trace_events WHERE session_id = ? AND " + EVENT_ERROR_SQL)
+      .get(resolvedSessionId) as DbRow;
+    return {
+      categories: [...categoryCounts.entries()].map(([value, count]) => ({ value, count })).sort((left, right) => right.count - left.count || left.value.localeCompare(right.value)),
+      toolTypes: toolRows.map((row) => ({ value: String(row.value), count: numberValue(row.count) ?? 0 })),
+      errorCount: numberValue(errorRow.count) ?? 0,
+      totalEvents: numberValue(sessionRow.event_count) ?? 0,
     };
   }
 
@@ -1147,7 +1261,7 @@ export class TraceIndexer {
         if (event.role === "user") aggregate.userCount += 1;
         if (event.role === "assistant") aggregate.assistantCount += 1;
         if (event.kind === "tool") aggregate.toolCount += 1;
-        if (event.type.toLowerCase().includes("error") || event.role === "tool_result" && /error|failed/i.test(event.summary)) {
+        if (isErrorEvent(event)) {
           aggregate.errorCount += 1;
         }
         if (event.timestamp !== null) {

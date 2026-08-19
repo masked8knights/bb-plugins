@@ -87,6 +87,17 @@ const statusSchema = z.object({
   sources: z.array(rootSchema),
 });
 
+const eventCategorySchema = z.enum(["user", "assistant", "tool", "system", "context", "telemetry", "step", "turn", "other"]);
+const errorFilterSchema = z.enum(["all", "only"]);
+const sessionStatusSchema = z.enum(["active", "completed", "unknown"]);
+const facetSchema = z.object({ value: z.string(), count: z.number() });
+const sessionFacetsSchema = z.object({
+  categories: z.array(facetSchema),
+  toolTypes: z.array(facetSchema),
+  errorCount: z.number(),
+  totalEvents: z.number(),
+});
+
 export const rpcContract = defineRpcContract({
   status: {
     input: z.null(),
@@ -97,7 +108,10 @@ export const rpcContract = defineRpcContract({
       .object({
         query: z.string().max(500).optional(),
         source: z.string().max(80).optional(),
-        sort: z.enum(["updated", "started", "events", "duration"]).optional(),
+        errorFilter: errorFilterSchema.optional(),
+        status: sessionStatusSchema.optional(),
+        hasTools: z.boolean().optional(),
+        sort: z.enum(["updated", "started", "events", "duration", "errors"]).optional(),
         limit: z.number().int().min(1).max(200).default(100),
         offset: z.number().int().min(0).max(100_000).default(0),
       })
@@ -111,6 +125,10 @@ export const rpcContract = defineRpcContract({
     input: z
       .object({
         id: z.string().min(1),
+        query: z.string().max(500).optional(),
+        categories: z.array(eventCategorySchema).max(9).optional(),
+        toolTypes: z.array(z.string().max(160)).max(100).optional(),
+        errorFilter: errorFilterSchema.optional(),
         limit: z.number().int().min(1).max(2_000).default(1_000),
         offset: z.number().int().min(0).max(100_000).default(0),
       })
@@ -120,6 +138,10 @@ export const rpcContract = defineRpcContract({
       events: z.array(eventSchema),
       totalEvents: z.number(),
     }),
+  },
+  getSessionFacets: {
+    input: z.object({ id: z.string().min(1) }).strict(),
+    output: sessionFacetsSchema,
   },
   getEventRaw: {
     input: z.object({ id: z.string().min(1) }).strict(),
@@ -134,6 +156,7 @@ export const rpcContract = defineRpcContract({
 export type TraceStatus = z.infer<typeof statusSchema>;
 export type TraceSession = z.infer<typeof sessionSchema>;
 export type TraceEvent = z.infer<typeof eventSchema>;
+export type TraceSessionFacets = z.infer<typeof sessionFacetsSchema>;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -356,7 +379,12 @@ export default async function plugin(bb: BbPluginApi) {
       return indexer.listSessions(input);
     },
     getSession(input) {
-      const detail = indexer.getSession(input.id, input.limit, input.offset);
+      const detail = indexer.getSession(input.id, input.limit, input.offset, {
+        query: input.query,
+        categories: input.categories,
+        toolTypes: input.toolTypes,
+        errorFilter: input.errorFilter,
+      });
       return {
         ...detail,
         events: detail.events.map((event) => ({
@@ -365,6 +393,9 @@ export default async function plugin(bb: BbPluginApi) {
           rawTruncated: event.rawTruncated || event.rawJson.length > DETAIL_EVENT_RAW_PREVIEW_BYTES,
         })),
       };
+    },
+    getSessionFacets({ id }) {
+      return indexer.getSessionFacets(id);
     },
     async getEventRaw({ id }) {
       return indexer.rawEvent(id);
