@@ -43,7 +43,7 @@ export function ds4LifecycleNotice(
         kind: "loading",
         title: "Starting DwarfStar…",
         description:
-          "Loading the local inference server. The first response may take a moment.",
+          "Loading the local inference server. If the first request fails while it warms up, wait for “DwarfStar ready” and try again.",
       };
     case "ready":
       return {
@@ -68,7 +68,7 @@ export function ds4LifecycleNotice(
         kind: "error",
         title: "DwarfStar unavailable",
         description:
-          options.error ?? "The local inference server exited unexpectedly.",
+          `${options.error ?? "The local inference server exited unexpectedly."} Try again after DwarfStar is ready. If it stays unavailable, check the DS4 setup.`,
       };
   }
 }

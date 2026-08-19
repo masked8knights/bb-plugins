@@ -64,6 +64,10 @@ test("suppresses a ready or stopped toast for an initial status snapshot", () =>
 
 test("creates notices only when the lifecycle phase changes", () => {
   assert.equal(ds4LifecycleNotice("starting", "starting"), null);
+  assert.match(
+    ds4LifecycleNotice("starting", null)?.description ?? "",
+    /try again/i,
+  );
   assert.equal(
     ds4LifecycleNotice("ready", "starting")?.title,
     "DwarfStar ready",
@@ -72,9 +76,9 @@ test("creates notices only when the lifecycle phase changes", () => {
     ds4LifecycleNotice("stopping", "ready")?.kind,
     "loading",
   );
-  assert.equal(
+  assert.match(
     ds4LifecycleNotice("error", "starting", { error: "binary missing" })
-      ?.description,
-    "binary missing",
+      ?.description ?? "",
+    /binary missing.*try again/i,
   );
 });
