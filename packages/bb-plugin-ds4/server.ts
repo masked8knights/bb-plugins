@@ -300,6 +300,7 @@ export default async function plugin(bb: BbPluginApi) {
   const demandThreads = new Map<string, number>();
   let lastDemandAt: number | null = null;
   let startPromise: Promise<void> | null = null;
+  let stopRequested = false;
 
   const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     new Promise((resolve) => {
@@ -492,6 +493,7 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     lastError = null;
+    lastHealth = null;
     bb.log.info(`starting ds4-server: ${cfg.bin} ${cfg.args.join(" ")}`);
     lastDemandAt ??= Date.now();
     proc.start({
@@ -503,8 +505,12 @@ export default async function plugin(bb: BbPluginApi) {
         scheduleLogFlush();
       },
       onExit: (code, signal) => {
-        bb.log.warn(`ds4-server exited (code=${code} signal=${signal})`);
-        void publishState();
+        const message = `ds4-server exited (code=${code} signal=${signal})`;
+        if (stopRequested) bb.log.info(message);
+        else {
+          bb.log.warn(message);
+          void publishState();
+        }
       },
     });
     await publishState();
@@ -522,6 +528,18 @@ export default async function plugin(bb: BbPluginApi) {
       startPromise = null;
     });
     await startPromise;
+  }
+
+  /** Transition the process to stopping before broadcasting its new state. */
+  async function stopProc(): Promise<void> {
+    stopRequested = true;
+    try {
+      const stopping = proc.stop();
+      await publishState();
+      await stopping;
+    } finally {
+      stopRequested = false;
+    }
   }
 
   // --- realtime log fan-out (batched + throttled) ---
@@ -566,7 +584,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.info("supervisor started");
       let lastFingerprint: string | null = null;
       let crashBackoffMs = 2000;
-      let lastHealthSeen: z.infer<typeof healthSchema> | null = null;
 
       try {
         while (!signal.aborted) {
@@ -583,7 +600,7 @@ export default async function plugin(bb: BbPluginApi) {
           ) {
             bb.log.info("config changed — restarting ds4-server");
             restartAfterDrift = true;
-            await proc.stop();
+            await stopProc();
             lastHealth = null;
           }
           lastFingerprint = cfg.fingerprint;
@@ -616,27 +633,26 @@ export default async function plugin(bb: BbPluginApi) {
             Date.now() - lastDemandAt >= idleTimeoutMs()
           ) {
             bb.log.info("stopping ds4-server after the configured idle period");
-            await proc.stop();
+            await stopProc();
             lastDemandAt = null;
             lastHealth = null;
             await publishState();
           }
 
           const health = await pollHealth(cfg);
+          const previousHealth = lastHealth;
+          lastHealth = health;
           const healthChanged =
             health !== null &&
-            lastHealthSeen !== null &&
-            (health.ok !== lastHealthSeen.ok ||
-              JSON.stringify(health.models) !== JSON.stringify(lastHealthSeen.models));
-          lastHealth = health;
+            (previousHealth === null ||
+              health.ok !== previousHealth.ok ||
+              JSON.stringify(health.models) !== JSON.stringify(previousHealth.models));
           if (healthChanged) await publishState();
           if (health && health.ok && proc.isRunning) {
             crashBackoffMs = 2000; // healthy run resets the crash backoff
           } else if (proc.state === "crashed" && hasDemand) {
             crashBackoffMs = Math.min(30_000, crashBackoffMs * 2); // exponential
           }
-          lastHealthSeen = health;
-
           await sleep(2000, signal);
         }
       } catch (err) {
@@ -646,7 +662,7 @@ export default async function plugin(bb: BbPluginApi) {
       flushLogs();
       if (proc.isRunning || proc.state === "stopping") {
         bb.log.info("stopping ds4-server (supervisor aborted)");
-        await proc.stop();
+        await stopProc();
       }
       bb.log.info("supervisor stopped");
     },
@@ -667,7 +683,7 @@ export default async function plugin(bb: BbPluginApi) {
       releaseAllDemand();
       lastError = null;
       bb.log.info("manual stop requested");
-      await proc.stop();
+      await stopProc();
       lastDemandAt = null;
       lastHealth = null;
       await publishState();
@@ -676,7 +692,7 @@ export default async function plugin(bb: BbPluginApi) {
     async restart() {
       lastError = null;
       bb.log.info("manual restart requested");
-      await proc.stop();
+      await stopProc();
       lastDemandAt = Date.now();
       await ensureStarted(await currentConfig());
       return buildStatus();
@@ -813,14 +829,14 @@ export default async function plugin(bb: BbPluginApi) {
         }
         case "stop": {
           releaseAllDemand();
-          await proc.stop();
+          await stopProc();
           lastDemandAt = null;
           lastHealth = null;
           await publishState();
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         }
         case "restart": {
-          await proc.stop();
+          await stopProc();
           lastDemandAt = Date.now();
           await ensureStarted(await currentConfig());
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
