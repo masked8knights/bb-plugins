@@ -667,7 +667,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "toolbox",
     title: "Toolbox",
-    icon: "Wrench",
+    icon: "Toolbox",
     path: "tools",
     component: ToolboxPanel,
   });

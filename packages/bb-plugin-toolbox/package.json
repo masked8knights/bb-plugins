@@ -10,7 +10,7 @@
     "name": "Toolbox",
     "description": "Manage MCP servers and raw CLI sources through one proxy.",
     "branding": {
-      "icon": "Wrench"
+      "icon": "Toolbox"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
