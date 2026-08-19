@@ -260,6 +260,10 @@ describe("Traces app interactions", () => {
     expect(filterTrigger.className).toContain("text-muted-foreground");
     expect(filterTrigger.className).toContain("border-border");
     fireEvent.click(filterTrigger);
+    const filterMenu = filterTrigger.parentElement?.querySelector<HTMLDivElement>("div.absolute");
+    expect(filterMenu?.className).toContain("left-0");
+    expect(filterMenu?.className).not.toContain("right-0");
+    expect(slot.getByText("Event state")).toBeTruthy();
     fireEvent.click(slot.getByRole("checkbox", { name: "Errors only" }));
     await waitFor(() => expect(calls.some((input) => input.errorFilter === "only")).toBe(true));
     expect(slot.getByRole("button", { name: "Event filters" }).className).toContain("bg-primary/10");

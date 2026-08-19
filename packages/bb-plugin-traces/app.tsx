@@ -460,7 +460,7 @@ function FilterPopover({ label, activeCount, children }: { label: string; active
         {label}
         {activeCount > 0 ? <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">{activeCount}</span> : null}
       </summary>
-      <div className="absolute right-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-border bg-background p-2 shadow-lg">
+      <div className="absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-border bg-background p-2 shadow-lg">
         {children}
       </div>
     </details>
