@@ -14,7 +14,10 @@ The default roots cover:
 - OMP sessions under `~/.omp/agent/sessions`.
 - DeepSeek Harness compressed JSONL under `~/.dsh/sessions`.
 
-Add more JSONL roots in plugin settings. Use one absolute path per line.
+Open Settings → Extensions → Traces to see every built-in session directory and
+its scan state. The Session directories section also lets you add or remove
+custom roots; the same paths remain available in the host-rendered setting as
+one absolute path per line.
 
 ## Indexing
 

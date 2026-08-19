@@ -7,6 +7,7 @@ import type { TraceEvent, TraceSession, TraceStatus } from "../server";
 
 const app = await loadPluginApp(() => import("../app"));
 const panel = app.navPanels[0]!;
+const settingsPanel = app.settingsSections[0]!;
 
 const status: TraceStatus = {
   localOnly: true,
@@ -110,7 +111,10 @@ function commonRpc(overrides: Record<string, unknown> = {}) {
   };
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("Traces app interactions", () => {
   it("filters, sorts, loads another session page, and encodes a session deep link", async () => {
@@ -340,5 +344,85 @@ describe("Traces app interactions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("Traces settings", () => {
+  it("lists detected roots and persists add/remove custom directory edits", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const settingsStatus: TraceStatus = {
+      ...status,
+      sources: [
+        ...status.sources,
+        {
+          id: "custom-session-root",
+          source: "custom",
+          label: "Custom session root",
+          path: "/tmp/custom",
+          configuredPath: "/tmp/custom",
+          kind: "session",
+          format: "jsonl",
+          exists: true,
+          fileCount: 3,
+          byteCount: 1_024,
+          lastScanAt: 1_000,
+          error: null,
+        },
+      ],
+    };
+    const slot = renderSlot(settingsPanel, {}, {
+      settings: { additionalSessionRoots: "/tmp/custom" },
+      rpc: { status: () => settingsStatus } as never,
+    });
+
+    await slot.findByText("/tmp/custom");
+    expect(slot.getByText("/tmp/dsh")).toBeTruthy();
+    expect(slot.getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+
+    fireEvent.change(slot.getByRole("textbox", { name: "New session directory" }), {
+      target: { value: "/tmp/another" },
+    });
+    fireEvent.click(slot.getByRole("button", { name: "Add directory" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/plugins/traces/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ values: { additionalSessionRoots: "/tmp/custom\n/tmp/another" } }),
+      }),
+    ));
+
+    fireEvent.click(slot.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/plugins/traces/settings",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ values: { additionalSessionRoots: "/tmp/another" } }),
+      }),
+    ));
+  });
+
+  it("keeps a new directory in the form when saving fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ ok: false, error: "settings unavailable" }),
+    }));
+    const slot = renderSlot(settingsPanel, {}, {
+      settings: { additionalSessionRoots: "" },
+      rpc: { status: () => status } as never,
+    });
+
+    const input = await slot.findByRole("textbox", { name: "New session directory" });
+    fireEvent.change(input, { target: { value: "/tmp/keep-this" } });
+    fireEvent.click(slot.getByRole("button", { name: "Add directory" }));
+
+    await slot.findByRole("alert");
+    expect(input).toHaveProperty("value", "/tmp/keep-this");
+    expect(slot.getByText("settings unavailable")).toBeTruthy();
   });
 });

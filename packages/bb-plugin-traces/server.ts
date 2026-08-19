@@ -13,7 +13,7 @@ import {
   type SessionSummary,
   type TraceSourceId,
 } from "./src/indexer";
-import { shouldScanAfterSettingsChange } from "./src/settings";
+import { configuredSessionRootEntries, shouldScanAfterSettingsChange } from "./src/settings";
 
 const SCAN_BATCH_FILES = 1;
 const DETAIL_EVENT_RAW_PREVIEW_BYTES = 256;
@@ -30,6 +30,7 @@ const rootSchema = z.object({
   byteCount: z.number(),
   lastScanAt: z.number().nullable(),
   error: z.string().nullable(),
+  configuredPath: z.string().optional(),
 });
 
 const sessionSchema = z.object({
@@ -179,7 +180,7 @@ function dedupeRoots(roots: RootSpec[]): RootSpec[] {
 }
 
 function customRoots(raw: string): RootSpec[] {
-  return expandConfiguredPaths(raw).map((path) => ({
+  return expandConfiguredPaths(configuredSessionRootEntries(raw).join("\n")).map((path) => ({
     id: "custom-session-" + createHash("sha1").update(path).digest("hex").slice(0, 16),
     source: "custom",
     label: "Custom session root",
@@ -205,8 +206,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
     additionalSessionRoots: {
       type: "string",
-      label: "Additional session roots",
-      description: "Optional absolute paths, one per line, containing JSONL sessions from another harness.",
+      label: "Custom session directories",
+      description: "Optional absolute paths, one per line. The Session directories section below provides add and remove controls.",
       default: "",
     },
   });
@@ -304,6 +305,13 @@ export default async function plugin(bb: BbPluginApi) {
   async function status(): Promise<TraceStatus> {
     const scanInProgress = indexing || scanRequested || activeScan !== null;
     const stats = indexer.stats(lastScanAt, scanInProgress, lastError);
+    const current = await settings.get();
+    const configuredEntries = configuredSessionRootEntries(current.additionalSessionRoots);
+    const configured = dedupeRoots(defaultSessionRoots().concat(customRoots(configuredEntries.join("\n"))));
+    const cached = new Map(indexer.roots().map((root) => [root.id, root]));
+    const configuredPaths = new Map(
+      expandConfiguredPaths(configuredEntries.join("\n")).map((path, index) => [path, configuredEntries[index]]),
+    );
     return {
       localOnly: true,
       state: scanInProgress ? "indexing" : lastError ? "error" : "idle",
@@ -312,10 +320,20 @@ export default async function plugin(bb: BbPluginApi) {
       bytes: stats.bytes,
       lastScanAt: stats.lastScanAt,
       lastError: stats.lastError,
-      sources: indexer.roots().map((root) => ({
-        ...root,
-        format: root.format,
-      })),
+      sources: configured.map((root) => {
+        const previous = cached.get(root.id);
+        return {
+          ...root,
+          exists: previous?.exists ?? existsSync(root.path),
+          fileCount: previous?.fileCount ?? 0,
+          byteCount: previous?.byteCount ?? 0,
+          lastScanAt: previous?.lastScanAt ?? null,
+          error: previous?.error ?? null,
+          ...(root.source === "custom" && configuredPaths.get(root.path)
+            ? { configuredPath: configuredPaths.get(root.path) }
+            : {}),
+        };
+      }),
     };
   }
 

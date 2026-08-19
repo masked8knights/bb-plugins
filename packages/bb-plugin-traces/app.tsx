@@ -2,11 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import {
   definePluginApp,
   useBbNavigate,
+  useRealtime,
   useRpc,
+  useSettings,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract, TraceEvent, TraceSession, TraceSessionFacets, TraceStatus } from "./server";
 import type { TraceEventCategory } from "./src/indexer";
+import {
+  addSessionRootEntry,
+  configuredSessionRootEntries,
+  removeSessionRootEntry,
+} from "./src/settings";
 import { getSessionInput, listSessionsInput, type EventFilters, type SessionListFilters } from "./src/rpc-input";
 
 const buttonClass =
@@ -156,6 +163,180 @@ function StatusDot({ status }: { status: TraceStatus | null }) {
           ? "Index needs attention"
           : "Local index ready"}
     </span>
+  );
+}
+
+const TRACE_SETTINGS_URL = "/api/v1/plugins/traces/settings";
+
+async function saveAdditionalSessionRoots(value: string): Promise<void> {
+  const response = await fetch(TRACE_SETTINGS_URL, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ values: { additionalSessionRoots: value } }),
+  });
+  const body = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+  if (!response.ok || body?.ok !== true) {
+    throw new Error(body?.error ?? `HTTP ${response.status}`);
+  }
+}
+
+function SessionRootSettingsRow({
+  root,
+  onRemove,
+  removing,
+  disabled,
+}: {
+  root: TraceStatus["sources"][number];
+  onRemove?: () => void;
+  removing: boolean;
+  disabled: boolean;
+}) {
+  const custom = root.source === "custom";
+  return (
+    <div className="flex min-w-0 items-center gap-3 border-t border-border py-2 first:border-t-0">
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2 text-sm text-foreground">
+          <span className="truncate" title={root.path}>{root.path}</span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">{custom ? "Custom" : "Built-in"}</span>
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+          <span>{root.label}</span>
+          <span>{root.format ?? "jsonl"}</span>
+          {root.exists ? <span>{formatCount(root.fileCount)} files · {formatBytes(root.byteCount)}</span> : <span className="text-warning">Not found</span>}
+          {root.error ? <span className="text-warning">{root.error}</span> : null}
+        </div>
+      </div>
+      {custom && onRemove ? (
+        <button type="button" className={buttonClass + " shrink-0"} onClick={onRemove} disabled={disabled || removing}>
+          {removing ? "Removing…" : "Remove"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function TraceSettingsSection() {
+  const { values, isLoading } = useSettings();
+  const rpc = useRpc<typeof rpcContract>();
+  const [status, setStatus] = useState<TraceStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [configuredEntries, setConfiguredEntries] = useState<string[]>([]);
+  const [newRoot, setNewRoot] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    setConfiguredEntries(
+      configuredSessionRootEntries(
+        typeof values?.additionalSessionRoots === "string" ? values.additionalSessionRoots : "",
+      ),
+    );
+  }, [values?.additionalSessionRoots]);
+
+  const loadStatus = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      setStatus(await rpc.call("status", null));
+    } catch (error) {
+      setMessage({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setStatusLoading(false);
+    }
+  }, [rpc]);
+
+  useEffect(() => {
+    void loadStatus();
+  }, [loadStatus]);
+
+  const onIndexUpdated = useCallback(() => {
+    void loadStatus();
+  }, [loadStatus]);
+  useRealtime("traces", onIndexUpdated);
+
+  const saveEntries = useCallback(async (nextEntries: string[], successText: string): Promise<boolean> => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const nextValue = nextEntries.join("\n");
+      await saveAdditionalSessionRoots(nextValue);
+      setConfiguredEntries(nextEntries);
+      setMessage({ kind: "success", text: successText });
+      await loadStatus();
+      return true;
+    } catch (error) {
+      setMessage({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [loadStatus]);
+
+  const addRoot = () => {
+    const entry = newRoot.trim();
+    if (!entry) return;
+    const nextEntries = configuredSessionRootEntries(addSessionRootEntry(configuredEntries.join("\n"), entry));
+    void saveEntries(nextEntries, "Session directory added. A scan will start shortly.").then((saved) => {
+      if (saved) setNewRoot("");
+    });
+  };
+
+  const removeRoot = (root: TraceStatus["sources"][number]) => {
+    const entry = root.configuredPath ?? root.path;
+    setRemoving(entry);
+    const nextEntries = configuredSessionRootEntries(removeSessionRootEntry(configuredEntries.join("\n"), entry));
+    void saveEntries(nextEntries, "Session directory removed.").finally(() => setRemoving(null));
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <p className="text-sm text-muted-foreground">
+          Traces reads session files from the directories below. Built-in directories are detected automatically; custom directories are stored in this plugin&apos;s settings and can be removed here.
+        </p>
+      </div>
+
+      <section aria-labelledby="trace-configured-roots-heading" className="border-y border-border">
+        <div className="flex items-baseline justify-between gap-3 py-3">
+          <h3 id="trace-configured-roots-heading" className="text-sm font-medium text-foreground">Configured roots</h3>
+          <span className="text-[11px] text-muted-foreground">{statusLoading ? "Checking…" : `${status?.sources.length ?? 0} configured`}</span>
+        </div>
+        {statusLoading && !status ? <p className="border-t border-border py-3 text-xs text-muted-foreground">Loading configured directories…</p> : null}
+        {status?.sources.map((root) => (
+          <SessionRootSettingsRow
+            key={root.id}
+            root={root}
+            removing={removing === (root.configuredPath ?? root.path)}
+            disabled={saving}
+            onRemove={root.source === "custom" ? () => removeRoot(root) : undefined}
+          />
+        ))}
+        {!statusLoading && status?.sources.length === 0 ? <p className="border-t border-border py-3 text-xs text-muted-foreground">No session directories are configured.</p> : null}
+      </section>
+
+      <section aria-labelledby="trace-add-directory-heading" className="space-y-3">
+        <div>
+          <h3 id="trace-add-directory-heading" className="text-sm font-medium text-foreground">Add a custom directory</h3>
+          <p className="mt-1 text-xs text-muted-foreground">Use an absolute path to a directory containing JSONL sessions. <code className="font-mono">~</code> is also accepted.</p>
+        </div>
+        <form className="flex flex-wrap items-center gap-2" onSubmit={(event) => { event.preventDefault(); addRoot(); }}>
+          <label className="sr-only" htmlFor="trace-new-session-directory">New session directory</label>
+          <input
+            id="trace-new-session-directory"
+            className={inputClass + " min-w-64 flex-1"}
+            value={newRoot}
+            onChange={(event) => setNewRoot(event.target.value)}
+            placeholder="/Users/me/.my-harness/sessions"
+            disabled={saving || isLoading}
+          />
+          <button type="submit" className={buttonClass} disabled={!newRoot.trim() || saving || isLoading}>
+            {saving ? "Saving…" : "Add directory"}
+          </button>
+        </form>
+      </section>
+
+      {message ? <p className={message.kind === "error" ? "text-xs text-destructive" : "text-xs text-success"} role={message.kind === "error" ? "alert" : "status"}>{message.text}</p> : null}
+    </div>
   );
 }
 
@@ -1020,6 +1201,12 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
 }
 
 export default definePluginApp((app) => {
+  app.slots.settingsSection({
+    id: "session-directories",
+    title: "Session directories",
+    description: "Review the local roots Traces indexes and manage additional directories.",
+    component: TraceSettingsSection,
+  });
   app.slots.navPanel({
     id: "traces",
     title: "Traces",
