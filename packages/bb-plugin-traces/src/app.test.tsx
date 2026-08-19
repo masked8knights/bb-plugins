@@ -214,9 +214,11 @@ describe("Traces app interactions", () => {
 
     await slot.findByLabelText("Trajectory event ledger");
     fireEvent.click(slot.getByRole("button", { name: "Select SYSTEM event 0" }));
-    await slot.findByText("base_instructions");
-    expect(slot.getByText("You are an agent with a readable system prompt.")).toBeTruthy();
-    expect(slot.getByText("context_window")).toBeTruthy();
+    const prettyPayload = await slot.findByLabelText("Pretty-printed JSON");
+    expect(prettyPayload.textContent).toContain('"base_instructions"');
+    expect(prettyPayload.textContent).toContain('"text": "You are an agent with a readable system prompt."');
+    expect(prettyPayload.textContent).toContain('"context_window": 258400');
+    expect(prettyPayload.querySelector("dl")).toBeNull();
   });
 
   it("accepts decoded session IDs that contain path separators", async () => {

@@ -201,95 +201,33 @@ function conversationContent(event: TraceEvent): string {
 const ROLE_COLUMN_DEFAULT = 156;
 const ROLE_COLUMN_MIN = 128;
 const ROLE_COLUMN_MAX = 280;
-const STRUCTURED_FIELD_LIMIT = 80;
-const STRUCTURED_DEPTH_LIMIT = 8;
-const STRUCTURED_STRING_LIMIT = 24_000;
+const PRETTY_PAYLOAD_CHAR_LIMIT = 120_000;
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isJsonContainer(value: unknown): boolean {
-  return Array.isArray(value) || isJsonObject(value);
-}
-
-function structuredLabel(value: unknown): string {
-  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
-  if (isJsonObject(value)) {
-    const count = Object.keys(value).length;
-    return `${count} field${count === 1 ? "" : "s"}`;
-  }
-  return "value";
-}
-
-function parseStructuredPayload(raw: string): unknown {
+function formatPayload(raw: string): { text: string; isJson: boolean; clipped: boolean } {
   try {
-    return JSON.parse(raw) as unknown;
+    const pretty = JSON.stringify(JSON.parse(raw) as unknown, null, 2) ?? "null";
+    return {
+      text: pretty.slice(0, PRETTY_PAYLOAD_CHAR_LIMIT),
+      isJson: true,
+      clipped: pretty.length > PRETTY_PAYLOAD_CHAR_LIMIT,
+    };
   } catch {
-    return raw;
+    return {
+      text: raw.slice(0, PRETTY_PAYLOAD_CHAR_LIMIT),
+      isJson: false,
+      clipped: raw.length > PRETTY_PAYLOAD_CHAR_LIMIT,
+    };
   }
 }
 
-function StructuredValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
-  if (depth > STRUCTURED_DEPTH_LIMIT) return <span className="text-[10px] text-muted-foreground">Nested payload omitted at this depth.</span>;
-  if (Array.isArray(value)) {
-    const visible = value.slice(0, STRUCTURED_FIELD_LIMIT);
-    return (
-      <div className="space-y-1">
-        {visible.map((item, index) => (
-          <div key={index} className="min-w-0 rounded-sm border border-border/60 bg-background/30 px-2 py-1.5">
-            <div className="mb-1 text-[10px] font-medium text-muted-foreground">[{index}]</div>
-            {isJsonContainer(item) ? (
-              <details open={depth <= 2}>
-                <summary className="cursor-pointer select-none text-[10px] text-muted-foreground">{structuredLabel(item)}</summary>
-                <div className="mt-1"><StructuredValue value={item} depth={depth + 1} /></div>
-              </details>
-            ) : <StructuredValue value={item} depth={depth + 1} />}
-          </div>
-        ))}
-        {value.length > visible.length ? <div className="text-[10px] text-muted-foreground">{value.length - visible.length} more items hidden. Use Raw to inspect the complete payload.</div> : null}
-      </div>
-    );
-  }
-  if (isJsonObject(value)) {
-    const entries = Object.entries(value);
-    const visible = entries.slice(0, STRUCTURED_FIELD_LIMIT);
-    return (
-      <dl className="divide-y divide-border/60 overflow-hidden rounded-sm border border-border/70">
-        {visible.map(([key, child]) => (
-          <div key={key} className="grid min-w-0 grid-cols-[minmax(7rem,0.34fr)_minmax(0,1fr)] gap-x-3 px-2 py-1.5">
-            <dt className="min-w-0 break-words font-mono text-[10px] text-muted-foreground" title={key}>{key}</dt>
-            <dd className="min-w-0 text-[11px] text-foreground">
-              {isJsonContainer(child) ? (
-                <details open={depth <= 2}>
-                  <summary className="cursor-pointer select-none text-[10px] text-muted-foreground hover:text-foreground">{structuredLabel(child)}</summary>
-                  <div className="mt-1"><StructuredValue value={child} depth={depth + 1} /></div>
-                </details>
-              ) : <StructuredValue value={child} depth={depth + 1} />}
-            </dd>
-          </div>
-        ))}
-        {entries.length > visible.length ? (
-          <div className="px-2 py-1.5 text-[10px] text-muted-foreground">{entries.length - visible.length} more fields hidden. Use Raw to inspect the complete payload.</div>
-        ) : null}
-      </dl>
-    );
-  }
-  if (typeof value === "string") {
-    const clipped = value.length > STRUCTURED_STRING_LIMIT;
-    return <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed text-foreground">{clipped ? value.slice(0, STRUCTURED_STRING_LIMIT) + "\n… text clipped; use Raw for the complete value." : value}</pre>;
-  }
-  if (value === null) return <span className="font-mono text-[10px] text-muted-foreground">null</span>;
-  if (typeof value === "boolean" || typeof value === "number") return <span className="font-mono text-[10px] text-foreground">{String(value)}</span>;
-  return <span className="text-[10px] text-muted-foreground">Unsupported value</span>;
-}
-
-function StructuredPayload({ event, raw }: { event: TraceEvent; raw: string | null }) {
+function PrettyPayload({ event, raw }: { event: TraceEvent; raw: string | null }) {
   const source = raw ?? event.rawJson;
+  const formatted = source ? formatPayload(source) : { text: "No payload recorded.", isJson: false, clipped: false };
   return (
     <div className="space-y-2">
       {raw === null ? <div className="text-[10px] text-muted-foreground" role="status">Showing the indexed preview while the full payload loads…</div> : null}
-      <StructuredValue value={source ? parseStructuredPayload(source) : "No payload recorded."} />
+      <pre aria-label={formatted.isJson ? "Pretty-printed JSON" : "Payload preview"} className="max-h-[min(70vh,48rem)] overflow-auto whitespace-pre-wrap break-words rounded-sm border border-border/70 bg-background/60 p-3 font-mono text-[10px] leading-relaxed text-foreground">{formatted.text}</pre>
+      {formatted.clipped ? <div className="text-[10px] text-muted-foreground">Preview clipped for responsiveness. Use Raw to inspect the complete payload.</div> : null}
     </div>
   );
 }
@@ -674,9 +612,9 @@ function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: str
         {tabs.map((item) => <button key={item.id} type="button" className={(tab === item.id ? "border-b-2 border-primary text-primary " : "border-b-2 border-transparent text-muted-foreground ") + "h-8 shrink-0 px-2 text-[10px] font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"} onClick={() => setTab(item.id)}>{item.label}</button>)}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {tab === "summary" ? <div className="space-y-3">{event.summary && event.summary !== event.title ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary}</div> : null}<StructuredPayload event={event} raw={raw} /></div> : null}
+        {tab === "summary" ? <div className="space-y-3">{event.summary && event.summary !== event.title ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary}</div> : null}<PrettyPayload event={event} raw={raw} /></div> : null}
         {tab === "preview" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || event.title}</div> : null}
-        {tab === "payload" || tab === "result" ? <StructuredPayload event={event} raw={raw} /> : null}
+        {tab === "payload" || tab === "result" ? <PrettyPayload event={event} raw={raw} /> : null}
         {tab === "raw" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
         {tab === "timing" ? (
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">
