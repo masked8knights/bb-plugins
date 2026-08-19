@@ -1,8 +1,9 @@
 # bb-plugin-ds4 — DwarfStar
 
-Administer a local **DwarfStar** (`antirez/ds4`, a.k.a. ds4.c) inference
-server from BB: run/stop/restart `ds4-server`, tail its logs live, watch its
-health, and connect it to your coding agents (Pi/BB, opencode, Codex CLI).
+Configure a local **DwarfStar** (`antirez/ds4`, a.k.a. ds4.c) inference
+server for BB. Once the setup is complete, choose its model in BB's model
+picker: the plugin starts `ds4-server` for matching turns and stops it after
+the configured idle grace period.
 
 Requires a DS4 checkout with a built `ds4-server` binary and a downloaded
 model (see the [ds4 README](https://github.com/antirez/ds4#readme)):
@@ -24,14 +25,14 @@ bb plugin build      # optional: precompile the frontend
 
 ## What you get
 
-- **DwarfStar settings** (Settings → Plugins → DwarfStar): configuration,
-  live status + health, Start / Stop / Restart buttons, streaming process log
-  (with follow / clear), agent connection manager, and a one-click "launch
-  interactive ds4-agent in a BB terminal".
-- **Thread-header status dot**: every thread's header shows a live DwarfStar
-  indicator (green = ready, amber pulsing = loading/starting, gray = stopped,
-  red = crashed). Click it for quick Start / Stop / Restart controls.
-- **`bb ds4` CLI**:
+- **DwarfStar setup** (Settings → Plugins → DwarfStar): checkout/model paths,
+  BB model selector, optional provider filter, idle grace period, runtime
+  tuning, and optional external-agent configuration.
+- **Demand-driven supervision**: the local server starts when BB resolves a
+  matching model for a turn, stays warm while matching turns are active, and
+  stops after the last one is idle. It stops as part of plugin reload/disable
+  and BB shutdown as well.
+- **`bb ds4` diagnostics** (kept for troubleshooting):
   - `bb ds4 status` — state, pid, uptime, health, served models
   - `bb ds4 start | stop | restart`
   - `bb ds4 logs [-n N]` — recent process output (also persisted to
@@ -57,19 +58,23 @@ bb plugin build      # optional: precompile the frontend
 
 A background `supervisor` service:
 
-- starts the server when **autoStart** is on (BB launch / plugin load),
-- restarts after a crash when **restartOnCrash** is on (exponential backoff
+- starts the server when BB resolves a selected model matching
+  **`modelSelector`** for a turn,
+- restarts after a crash while a matching turn still needs it when
+  **`restartOnCrash`** is on (exponential backoff
   2 s → 30 s, reset after a healthy run),
 - restarts automatically when settings that affect the command line change
   (port, ctx, model, backend, …), so you never need a manual stop/start,
 - polls `/v1/models` every 2 s and flips the status to **ready** (green) once
   the HTTP API answers, showing "loading model…" while a big GGUF is still
   being read,
+- stops after `idleTimeoutSeconds` with no active matching turn,
 - stops the server cleanly (SIGTERM → SIGKILL after 12 s) on plugin
   reload/disable and BB shutdown.
 
-A manual **Stop** wins over auto-start until the next manual **Start** or BB
-restart.
+The first matching turn starts the process asynchronously; subsequent turns
+reuse it while it is warm. The local provider/client should tolerate the brief
+model-loading window just like any other local model server.
 
 ## Settings (`bb plugin config ds4`)
 
@@ -77,6 +82,9 @@ restart.
 | --- | --- | --- |
 | `ds4Dir` | `""` | DS4 checkout dir. Empty = auto-detect (`DS4_DIR`, `~/workingdir/ds4`, `~/ds4`, …) |
 | `modelPath` | `""` | GGUF path; absolute or relative to `ds4Dir`. Empty = `ds4flash.gguf` |
+| `modelSelector` | `ds4/` | Exact model id or namespace from BB's model picker; matches `ds4/deepseek-v4-flash` by default |
+| `providerId` | `""` | Optional exact BB provider id filter; empty matches the model across providers |
+| `idleTimeoutSeconds` | `300` | How long to keep the server warm after the last matching turn |
 | `backend` | `auto` | `metal` \| `cuda` \| `cpu` |
 | `host` | `127.0.0.1` | Bind address |
 | `port` | `8000` | Bind port |
@@ -88,7 +96,6 @@ restart.
 | `dspark` | `true` | Enable DSpark speculative decoding; requires the support GGUF |
 | `dsparkSupportPath` | `""` | Absolute or DS4-relative support GGUF path; empty auto-detects `gguf/DeepSeek-V4-Flash-DSpark-support.gguf` |
 | `dsparkConfidence` | `0.9` | DSpark confidence pruning threshold (`0..1`) |
-| `autoStart` | `false` | Start the server when BB starts |
 | `restartOnCrash` | `true` | Restart after a crash (backoff) |
 | `configurePi` / `configureOpencode` / `configureCodex` | `true`/`false`/`false` | Which agent configs `bb ds4 agents apply` writes by default |
 

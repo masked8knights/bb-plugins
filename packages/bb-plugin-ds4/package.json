@@ -8,12 +8,16 @@
   },
   "bb": {
     "name": "DwarfStar",
-    "description": "Run, monitor, and administer a local DwarfStar (antirez/ds4) inference server: start/stop/restart, live logs, health, and agent provider configs for Pi, opencode, and Codex CLI.",
+    "description": "Configure a local DwarfStar (antirez/ds4) inference server that starts when its BB model is used and stops after idle.",
     "branding": {
       "icon": "./assets/icon.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
+  },
+  "scripts": {
+    "test": "node --test src/model-selection.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.1.3",

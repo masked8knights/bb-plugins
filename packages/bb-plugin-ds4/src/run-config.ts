@@ -26,7 +26,6 @@ export interface RunSettings {
   dspark: boolean;
   dsparkSupportPath: string;
   dsparkConfidence: string;
-  autoStart: boolean;
   restartOnCrash: boolean;
   configurePi: boolean;
   configureOpencode: boolean;

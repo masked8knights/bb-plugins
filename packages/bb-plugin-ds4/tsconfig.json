@@ -4,6 +4,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "lib": [
       "ES2022",
@@ -32,6 +33,7 @@
     "types",
     "components",
     "lib",
-    "hooks"
+    "hooks",
+    "src"
   ]
 }

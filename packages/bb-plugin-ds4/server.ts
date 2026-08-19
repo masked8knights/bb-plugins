@@ -31,6 +31,10 @@ import {
   appendPersistentLog,
   persistentLogPath,
 } from "./src/persistent-log";
+import {
+  matchesModelSelection,
+  parseIdleTimeoutMs,
+} from "./src/model-selection";
 
 // ---------------------------------------------------------------------------
 // Schemas / contract
@@ -71,7 +75,9 @@ const statusSchema = z.object({
   health: healthSchema.nullable(),
   config: configSchema,
   settings: z.object({
-    autoStart: z.boolean(),
+    providerId: z.string(),
+    modelSelector: z.string(),
+    idleTimeoutSeconds: z.string(),
     restartOnCrash: z.boolean(),
     configurePi: z.boolean(),
     configureOpencode: z.boolean(),
@@ -178,6 +184,27 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Absolute path, or relative to the DS4 directory. Empty = ds4flash.gguf.",
       default: "",
     },
+    modelSelector: {
+      type: "string",
+      label: "BB model selector",
+      description:
+        "Exact model id or namespace used in BB's model picker. The default `ds4/` matches `ds4/deepseek-v4-flash`.",
+      default: "ds4/",
+    },
+    providerId: {
+      type: "string",
+      label: "BB provider filter (optional)",
+      description:
+        "Leave empty to match the model across providers; set this only when the same model id is used elsewhere.",
+      default: "",
+    },
+    idleTimeoutSeconds: {
+      type: "string",
+      label: "Stop after idle (seconds)",
+      description:
+        "After the last DS4 turn finishes, keep the model warm for this long before stopping the local server. Default: 300.",
+      default: "300",
+    },
     backend: {
       type: "select",
       label: "Backend",
@@ -242,11 +269,6 @@ export default async function plugin(bb: BbPluginApi) {
       description: "0–1; the upstream default is 0.9.",
       default: "0.9",
     },
-    autoStart: {
-      type: "boolean",
-      label: "Auto-start server when BB launches",
-      default: false,
-    },
     restartOnCrash: {
       type: "boolean",
       label: "Restart automatically after a crash",
@@ -273,7 +295,11 @@ export default async function plugin(bb: BbPluginApi) {
   const proc = new Ds4Process(LOG_RING_LIMIT);
   let lastHealth: z.infer<typeof healthSchema> | null = null;
   let lastError: string | null = null;
-  let manualStop = false;
+  type StoredSettings = Awaited<ReturnType<typeof settings.get>>;
+  let latestSettings: StoredSettings = await settings.get();
+  const demandThreads = new Map<string, number>();
+  let lastDemandAt: number | null = null;
+  let startPromise: Promise<void> | null = null;
 
   const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     new Promise((resolve) => {
@@ -292,8 +318,8 @@ export default async function plugin(bb: BbPluginApi) {
       signal?.addEventListener("abort", onAbort, { once: true });
     });
 
-  async function currentSettings(): Promise<RunSettings> {
-    const s = await settings.get();
+  function toRunSettings(s: StoredSettings): RunSettings {
+    latestSettings = s;
     return {
       ds4Dir: s.ds4Dir ?? "",
       modelPath: s.modelPath ?? "",
@@ -309,12 +335,50 @@ export default async function plugin(bb: BbPluginApi) {
       dspark: s.dspark ?? true,
       dsparkSupportPath: s.dsparkSupportPath ?? "",
       dsparkConfidence: s.dsparkConfidence ?? "0.9",
-      autoStart: s.autoStart ?? false,
       restartOnCrash: s.restartOnCrash ?? true,
       configurePi: s.configurePi ?? true,
       configureOpencode: s.configureOpencode ?? false,
       configureCodex: s.configureCodex ?? false,
     };
+  }
+
+  async function currentSettings(): Promise<RunSettings> {
+    return toRunSettings(await settings.get());
+  }
+
+  function selectedModelIsDs4(providerId: string, model: string): boolean {
+    return matchesModelSelection(
+      { providerId, model },
+      latestSettings.providerId ?? "",
+      latestSettings.modelSelector ?? "ds4/",
+    );
+  }
+
+  function idleTimeoutMs(): number {
+    return parseIdleTimeoutMs(latestSettings.idleTimeoutSeconds ?? "300");
+  }
+
+  function acquireDemand(threadId: string): void {
+    demandThreads.set(threadId, (demandThreads.get(threadId) ?? 0) + 1);
+    lastDemandAt = Date.now();
+  }
+
+  function releaseDemand(threadId: string): void {
+    const count = demandThreads.get(threadId);
+    if (count === undefined) return;
+    if (count > 1) demandThreads.set(threadId, count - 1);
+    else demandThreads.delete(threadId);
+    if (demandThreads.size === 0) lastDemandAt = Date.now();
+  }
+
+  function releaseAllDemandFor(threadId: string): void {
+    if (!demandThreads.delete(threadId)) return;
+    if (demandThreads.size === 0) lastDemandAt = Date.now();
+  }
+
+  function releaseAllDemand(): void {
+    demandThreads.clear();
+    lastDemandAt = proc.isRunning ? Date.now() : null;
   }
 
   async function currentConfig(): Promise<ResolvedRunConfig> {
@@ -362,7 +426,9 @@ export default async function plugin(bb: BbPluginApi) {
       health: lastHealth,
       config: cfg,
       settings: {
-        autoStart: s.autoStart,
+        providerId: latestSettings.providerId ?? "",
+        modelSelector: latestSettings.modelSelector ?? "ds4/",
+        idleTimeoutSeconds: latestSettings.idleTimeoutSeconds ?? "300",
         restartOnCrash: s.restartOnCrash,
         configurePi: s.configurePi,
         configureOpencode: s.configureOpencode,
@@ -425,9 +491,9 @@ export default async function plugin(bb: BbPluginApi) {
       await publishState();
       return;
     }
-    manualStop = false;
     lastError = null;
     bb.log.info(`starting ds4-server: ${cfg.bin} ${cfg.args.join(" ")}`);
+    lastDemandAt ??= Date.now();
     proc.start({
       bin: cfg.bin,
       args: cfg.args,
@@ -442,6 +508,20 @@ export default async function plugin(bb: BbPluginApi) {
       },
     });
     await publishState();
+  }
+
+  /** Start at most one local server process when a model call creates demand. */
+  async function ensureStarted(cfg?: ResolvedRunConfig): Promise<void> {
+    if (proc.isRunning) return;
+    if (startPromise) return startPromise;
+
+    startPromise = (async () => {
+      if (proc.state === "stopping") await proc.stop();
+      await startProc(cfg ?? (await currentConfig()));
+    })().finally(() => {
+      startPromise = null;
+    });
+    await startPromise;
   }
 
   // --- realtime log fan-out (batched + throttled) ---
@@ -477,8 +557,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // -------------------------------------------------------------------------
-  // Supervisor service: auto-start, restart-on-crash, config-drift restart,
-  // health polling. Stops the server on plugin reload/disable/shutdown.
+  // Supervisor service: demand-driven start, restart-on-crash, config-drift
+  // restart, health polling, and idle shutdown. It always stops the server on
+  // plugin reload/disable/shutdown.
   // -------------------------------------------------------------------------
   bb.background.service("supervisor", {
     start: async (signal) => {
@@ -491,9 +572,9 @@ export default async function plugin(bb: BbPluginApi) {
         while (!signal.aborted) {
           const cfg = await currentConfig();
           const s = await currentSettings();
+          const hasDemand = demandThreads.size > 0;
 
-          // Config drift → restart so changes apply without a manual stop/start.
-          // (A manual stop sets manualStop and is never overridden.)
+          // Config drift → restart so changes apply before the next request.
           let restartAfterDrift = false;
           if (
             proc.isRunning &&
@@ -503,28 +584,42 @@ export default async function plugin(bb: BbPluginApi) {
             bb.log.info("config changed — restarting ds4-server");
             restartAfterDrift = true;
             await proc.stop();
+            lastHealth = null;
           }
           lastFingerprint = cfg.fingerprint;
 
           if (
-            (restartAfterDrift || (s.autoStart && !manualStop)) &&
-            proc.state === "stopped" &&
-            cfg.bin
+            cfg.bin &&
+            hasDemand &&
+            (restartAfterDrift || proc.state === "stopped" || proc.state === "exited")
           ) {
-            await startProc(cfg);
+            await ensureStarted(cfg);
           }
 
           if (
             s.restartOnCrash &&
-            !manualStop &&
+            hasDemand &&
             proc.state === "crashed" &&
             cfg.bin
           ) {
             const since = Date.now() - (proc.exitInfo?.at ?? 0);
             if (since >= crashBackoffMs) {
               bb.log.warn(`restarting after crash (backoff ${crashBackoffMs}ms)`);
-              await startProc(cfg);
+              await ensureStarted(cfg);
             }
+          }
+
+          if (
+            !hasDemand &&
+            proc.isRunning &&
+            lastDemandAt !== null &&
+            Date.now() - lastDemandAt >= idleTimeoutMs()
+          ) {
+            bb.log.info("stopping ds4-server after the configured idle period");
+            await proc.stop();
+            lastDemandAt = null;
+            lastHealth = null;
+            await publishState();
           }
 
           const health = await pollHealth(cfg);
@@ -537,7 +632,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (healthChanged) await publishState();
           if (health && health.ok && proc.isRunning) {
             crashBackoffMs = 2000; // healthy run resets the crash backoff
-          } else if (proc.state === "crashed" && !manualStop) {
+          } else if (proc.state === "crashed" && hasDemand) {
             crashBackoffMs = Math.min(30_000, crashBackoffMs * 2); // exponential
           }
           lastHealthSeen = health;
@@ -565,23 +660,25 @@ export default async function plugin(bb: BbPluginApi) {
       return buildStatus();
     },
     async start() {
-      await startProc(await currentConfig());
+      await ensureStarted(await currentConfig());
       return buildStatus();
     },
     async stop() {
-      manualStop = true;
+      releaseAllDemand();
       lastError = null;
       bb.log.info("manual stop requested");
       await proc.stop();
+      lastDemandAt = null;
+      lastHealth = null;
       await publishState();
       return buildStatus();
     },
     async restart() {
-      manualStop = false;
       lastError = null;
       bb.log.info("manual restart requested");
       await proc.stop();
-      await startProc(await currentConfig());
+      lastDemandAt = Date.now();
+      await ensureStarted(await currentConfig());
       return buildStatus();
     },
     async logs({ offset, limit }) {
@@ -711,19 +808,21 @@ export default async function plugin(bb: BbPluginApi) {
         case "status":
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         case "start": {
-          await startProc(await currentConfig());
+          await ensureStarted(await currentConfig());
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         }
         case "stop": {
-          manualStop = true;
+          releaseAllDemand();
           await proc.stop();
+          lastDemandAt = null;
+          lastHealth = null;
           await publishState();
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         }
         case "restart": {
-          manualStop = false;
           await proc.stop();
-          await startProc(await currentConfig());
+          lastDemandAt = Date.now();
+          await ensureStarted(await currentConfig());
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         }
         case "logs": {
@@ -880,10 +979,42 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  // The model picker resolves this callback immediately before a thread turn
+  // starts. That makes it the earliest plugin hook that knows which model the
+  // user actually selected, so use it to acquire a short-lived DS4 demand
+  // lease and kick the process supervisor without requiring a manual start.
+  bb.agents.configure((context) => {
+    if (selectedModelIsDs4(context.provider.id, context.provider.model)) {
+      acquireDemand(context.thread.id);
+      // Resolve from the cached settings so proc.start() is reached before
+      // the synchronous model-resolution callback returns to BB.
+      void ensureStarted(resolveConfig(toRunSettings(latestSettings))).catch((err) => {
+        lastError = `automatic ds4-server start failed: ${String(err)}`;
+        bb.log.error(lastError);
+        void publishState();
+      });
+    }
+    return {
+      tools: ["ds4_status", "ds4_complete"],
+      skills: [],
+    };
+  });
+
+  // A demand lease ends when the selected model's turn settles. Keep the
+  // process warm for the configured grace period so quick follow-up turns do
+  // not pay the model-load cost again; the supervisor performs the eventual
+  // stop. The archive/delete cases prevent a stale thread from holding the
+  // server open forever if its normal terminal event is not delivered.
+  bb.events.on("thread.idle", ({ thread }) => releaseDemand(thread.id));
+  bb.events.on("thread.failed", ({ thread }) => releaseDemand(thread.id));
+  bb.events.on("thread.archived", ({ thread }) => releaseAllDemandFor(thread.id));
+  bb.events.on("thread.deleted", ({ thread }) => releaseAllDemandFor(thread.id));
+
   // -------------------------------------------------------------------------
   // Settings change logging + dispose
   // -------------------------------------------------------------------------
   settings.onChange((next, prev) => {
+    latestSettings = next;
     const n = next as Record<string, unknown>;
     const p = prev as Record<string, unknown>;
     const changed = Object.keys(n).filter(
@@ -893,6 +1024,11 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.onDispose(() => {
+    releaseAllDemand();
+    if (logFlushTimer) {
+      clearTimeout(logFlushTimer);
+      logFlushTimer = null;
+    }
     bb.log.info("disposed");
   });
 }
@@ -939,6 +1075,8 @@ function renderStatus(st: StatusDto): string {
   lines.push(
     `agents:    pi=${st.settings.configurePi ? "on" : "off"} opencode=${st.settings.configureOpencode ? "on" : "off"} codex=${st.settings.configureCodex ? "on" : "off"}`,
   );
-  lines.push(`settings:  autoStart=${st.settings.autoStart ? "on" : "off"} restartOnCrash=${st.settings.restartOnCrash ? "on" : "off"} maxTokens=${st.settings.maxTokens}`);
+  lines.push(
+    `settings:  selector=${st.settings.modelSelector || "(none)"} idle=${st.settings.idleTimeoutSeconds}s restartOnCrash=${st.settings.restartOnCrash ? "on" : "off"} maxTokens=${st.settings.maxTokens}`,
+  );
   return lines.join("\n");
 }
