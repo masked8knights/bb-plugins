@@ -30,8 +30,16 @@ bb plugin build      # optional: precompile the frontend
   tuning, and optional external-agent configuration.
 - **Demand-driven supervision**: the local server starts when BB resolves a
   matching model for a turn, stays warm while matching turns are active, and
-  stops after the last one is idle. It stops as part of plugin reload/disable
-  and BB shutdown as well.
+  stops after the last one is idle. Plugin-owned processes also stop as part of
+  plugin reload/disable and BB shutdown.
+- **Disconnect recovery**: if the BB host daemon disconnects after starting
+  DwarfStar, the plugin records the managed PID and can reclaim that exact
+  server on the next matching turn instead of starting a second copy. It also
+  recognizes a compatible DS4 server already listening on the configured port,
+  including one that is still loading its model. Unmarked existing servers are
+  used but treated as external and are left running at idle; an explicit
+  `bb ds4 stop` can terminate one. Its original endpoint is retained when
+  settings change, so the explicit stop remains safe and effective.
 - **Lifecycle feedback**: BB shows a host toast for lifecycle transitions and
   a host-framed status banner above the composer while DwarfStar is starting,
   stopping, or unavailable. It also confirms when the server becomes ready.
@@ -69,19 +77,28 @@ A background `supervisor` service:
   **`restartOnCrash`** is on (exponential backoff
   2 s → 30 s, reset after a healthy run),
 - restarts automatically when settings that affect the command line change
-  (port, ctx, model, backend, …), so you never need a manual stop/start,
+  (port, ctx, model, backend, …) for plugin-owned processes. An external
+  process is left alone and reports an explicit `bb ds4 stop` instruction,
 - polls `/v1/models` every 2 s and flips the status to **ready** (green) once
   the HTTP API answers, showing "loading model…" while a big GGUF is still
   being read,
 - stops after `idleTimeoutSeconds` with no active matching turn,
 - stops the server cleanly (SIGTERM → SIGKILL after 12 s) on plugin
-  reload/disable and BB shutdown.
+  reload/disable and BB shutdown,
+- persists process metadata in `~/.bb/plugins/ds4/server.json` so an orphan can
+  be verified by PID, executable, full command line, and start signature before
+  it is reclaimed. Known external processes are recorded too, but remain
+  `ownership: external` and are not stopped by idle supervision.
+- keeps a recovered server in the loading state through transient health
+  failures while its process identity is still valid, then retries/restarts
+  only after the recovery grace period expires.
 
 The first matching turn starts the process asynchronously; subsequent turns
-reuse it while it is warm. BB surfaces the brief model-loading window with a
+reuse it while it is warm. BB surfaces the model-loading window with a host
 toast and composer banner so it is clear that the local server is working. The
-local provider/client should tolerate the brief model-loading window just like
-any other local model server.
+BB model configuration callback is synchronous, so a provider/client that does
+not retry while a local server warms up can still report a first-request
+connection error; retrying that turn uses the now-warm server.
 
 ## Settings (`bb plugin config ds4`)
 

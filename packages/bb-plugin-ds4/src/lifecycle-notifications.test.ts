@@ -19,6 +19,10 @@ test("maps process and health state to lifecycle phases", () => {
     "ready",
   );
   assert.equal(
+    ds4LifecyclePhase({ state: "running", hasError: true }),
+    "error",
+  );
+  assert.equal(
     ds4LifecyclePhase({ state: "stopped" }),
     "stopped",
   );

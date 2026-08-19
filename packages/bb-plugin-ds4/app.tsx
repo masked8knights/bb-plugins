@@ -33,7 +33,7 @@ function parseStatus(value: unknown): {
   const health = isRecord(value.health) ? value.health : null;
   const phase = ds4LifecyclePhase({
     state: value.state,
-    healthOk: health?.ok === true,
+    healthOk: health?.ok === true && value.displayState === "ready",
     hasError: typeof value.lastError === "string" && value.lastError.length > 0,
   });
   if (!phase) return null;
@@ -66,20 +66,26 @@ function useDwarfStarStatus(): DwarfStarStatus | null {
   useEffect(() => {
     if (realtimeConnection !== "connected") return;
     let cancelled = false;
+    let retryTimer: number | null = null;
     const revisionAtRequest = statusRevision.current;
-    void rpc
-      .call("status", null)
-      .then((value) => {
-        if (!cancelled && statusRevision.current === revisionAtRequest) {
-          applyStatus(value);
-        }
-      })
-      .catch(() => {
-        // Realtime remains the primary signal; a later connection transition
-        // or lifecycle event will reconcile the state.
-      });
+
+    const reconcile = () => {
+      void rpc
+        .call("status", null)
+        .then((value) => {
+          if (!cancelled && statusRevision.current === revisionAtRequest) {
+            applyStatus(value);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) retryTimer = window.setTimeout(reconcile, 1_500);
+        });
+    };
+    reconcile();
+
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, [applyStatus, realtimeConnection, rpc]);
 

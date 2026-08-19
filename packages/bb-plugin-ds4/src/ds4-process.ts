@@ -12,6 +12,8 @@ export type ProcessState =
   | "exited"
   | "crashed";
 
+export type ProcessOwnership = "managed" | "external";
+
 export interface Ds4LogLine {
   seq: number;
   ts: number; // epoch ms
@@ -33,6 +35,12 @@ export interface ExitInfo {
   at: number;
 }
 
+export interface StopOptions {
+  terminateExternal?: boolean;
+  /** Optional identity guard for childless adopted processes. */
+  verifyPid?: (pid: number) => boolean;
+}
+
 export class Ds4Process {
   private child: ChildProcess | null = null;
   private _state: ProcessState = "stopped";
@@ -41,6 +49,8 @@ export class Ds4Process {
   private _exitInfo: ExitInfo | null = null;
   private _cmdline: string[] | null = null;
   private _cwd: string | null = null;
+  private _ownership: ProcessOwnership = "managed";
+  private adopted = false;
   private ring: Ds4LogLine[] = [];
   private seq = 0;
   private bufs: Record<"stdout" | "stderr", string> = { stdout: "", stderr: "" };
@@ -69,10 +79,21 @@ export class Ds4Process {
   get isRunning(): boolean {
     return this._state === "starting" || this._state === "running";
   }
+  get ownership(): ProcessOwnership {
+    return this._ownership;
+  }
+  get isExternal(): boolean {
+    return this._ownership === "external";
+  }
+  get isAdopted(): boolean {
+    return this.adopted;
+  }
 
   start(opts: StartOptions): void {
     if (this.isRunning) return;
     this._state = "starting";
+    this._ownership = "managed";
+    this.adopted = false;
     this._cmdline = [opts.bin, ...opts.args];
     this._cwd = opts.cwd;
     this._exitInfo = null;
@@ -88,6 +109,8 @@ export class Ds4Process {
       this.appendLog("stderr", `spawn failed: ${String(err)}`);
       this._state = "crashed";
       this._exitInfo = { code: null, signal: null, at: Date.now() };
+      this._pid = null;
+      this._startedAt = null;
       opts.onExit?.(null, null);
       return;
     }
@@ -113,6 +136,9 @@ export class Ds4Process {
         this._state = "crashed";
         this._exitInfo = { code: null, signal: null, at: Date.now() };
         this.child = null;
+        this.adopted = false;
+        this._pid = null;
+        this._startedAt = null;
         opts.onExit?.(null, null);
       }
     });
@@ -121,16 +147,88 @@ export class Ds4Process {
       this._state = code === 0 ? "exited" : "crashed";
       this._exitInfo = { code, signal, at: Date.now() };
       this.child = null;
+      this.adopted = false;
+      this._pid = null;
+      this._startedAt = null;
       opts.onExit?.(code, signal);
     });
   }
 
-  /** SIGTERM, escalate to SIGKILL after timeoutMs. Resolves when the child is gone. */
-  async stop(timeoutMs = 12_000): Promise<void> {
+  /** Track an already-running server without attaching a child-process handle. */
+  adopt(
+    pid: number,
+    options: {
+      ownership: ProcessOwnership;
+      cmdline?: string[];
+      cwd?: string;
+      startedAt?: number;
+    },
+  ): void {
+    if (this.isRunning || !Number.isInteger(pid) || pid <= 0) return;
+    this.child = null;
+    this._state = "running";
+    this._ownership = options.ownership;
+    this.adopted = true;
+    this._pid = pid;
+    this._startedAt = options.startedAt ?? Date.now();
+    this._exitInfo = null;
+    this._cmdline = options.cmdline ?? null;
+    this._cwd = options.cwd ?? null;
+  }
+
+  /** Drop a childless adopted process after it is no longer reachable. */
+  detachAdopted(
+    state: Exclude<ProcessState, "starting" | "running" | "stopping"> = "exited",
+  ): void {
+    if (!this.adopted) return;
+    this.child = null;
+    this.adopted = false;
+    this._ownership = "managed";
+    this._state = state;
+    this._exitInfo = { code: null, signal: null, at: Date.now() };
+    this._pid = null;
+    this._startedAt = null;
+    this._cmdline = null;
+    this._cwd = null;
+  }
+
+  /** Drop an external process after it is no longer reachable. */
+  detachExternal(
+    state: Exclude<ProcessState, "starting" | "running" | "stopping"> = "exited",
+  ): void {
+    if (!this.isExternal) return;
+    this.detachAdopted(state);
+  }
+
+  /** SIGTERM, escalate to SIGKILL after timeoutMs. Resolves when the process is gone. */
+  async stop(
+    timeoutMs = 12_000,
+    options: StopOptions = {},
+  ): Promise<void> {
+    if (this.isExternal) {
+      if (!options.terminateExternal || !this._pid) return;
+      const pid = this._pid;
+      this._state = "stopping";
+      await this.stopPid(pid, timeoutMs, options.verifyPid);
+      this.adopted = false;
+      this._ownership = "managed";
+      this._state = "stopped";
+      this._pid = null;
+      this._startedAt = null;
+      return;
+    }
     const child = this.child;
     if (!child) {
       if (this._state === "stopping") this._state = "stopped";
+      if (this.adopted && this._pid) {
+        const pid = this._pid;
+        this._state = "stopping";
+        await this.stopPid(pid, timeoutMs, options.verifyPid);
+      }
+      this.adopted = false;
       this._state = "stopped";
+      this._pid = null;
+      this._startedAt = null;
       return;
     }
     this._state = "stopping";
@@ -169,6 +267,35 @@ export class Ds4Process {
     await exited;
     this._state = "stopped";
     this._pid = null;
+    this._startedAt = null;
+  }
+
+  private async stopPid(
+    pid: number,
+    timeoutMs: number,
+    verifyPid?: (pid: number) => boolean,
+  ): Promise<void> {
+    if (verifyPid && !verifyPid(pid)) return;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    if (verifyPid && !verifyPid(pid)) return;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
   }
 
   private handleData(

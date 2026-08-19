@@ -16,7 +16,7 @@
     "app": "./app.tsx"
   },
   "scripts": {
-    "test": "node --test src/model-selection.test.ts src/lifecycle-notifications.test.ts",
+    "test": "node --test src/model-selection.test.ts src/lifecycle-notifications.test.ts src/process-recovery.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

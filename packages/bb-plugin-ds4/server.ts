@@ -14,6 +14,16 @@ import {
   type ProcessState,
 } from "./src/ds4-process";
 import {
+  clearProcessRecord,
+  isProcessAlive,
+  listeningPid,
+  parseExistingDs4Pid,
+  processMatchesCommand,
+  processStartTime,
+  readProcessRecord,
+  writeProcessRecord,
+} from "./src/process-recovery";
+import {
   resolveConfig,
   agentCommand,
   shellQuote,
@@ -65,6 +75,7 @@ const configSchema = z.object({
 });
 const statusSchema = z.object({
   state: z.enum(["stopped", "starting", "running", "stopping", "exited", "crashed"]),
+  ownership: z.enum(["managed", "external"]),
   displayState: z.string(),
   pid: z.number().nullable(),
   startedAt: z.number().nullable(),
@@ -73,6 +84,7 @@ const statusSchema = z.object({
     .object({ code: z.number().nullable(), signal: z.string().nullable(), at: z.number() })
     .nullable(),
   health: healthSchema.nullable(),
+  activeEndpoint: z.object({ host: z.string(), port: z.number() }).nullable(),
   config: configSchema,
   settings: z.object({
     providerId: z.string(),
@@ -166,6 +178,9 @@ export type StatusDto = z.infer<typeof statusSchema>;
 // ---------------------------------------------------------------------------
 
 const LOG_RING_LIMIT = 5000;
+const ADOPTED_HEALTH_GRACE_MS = 120_000;
+
+type ServerEndpoint = { host: string; port: number };
 
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
@@ -297,10 +312,22 @@ export default async function plugin(bb: BbPluginApi) {
   let lastError: string | null = null;
   type StoredSettings = Awaited<ReturnType<typeof settings.get>>;
   let latestSettings: StoredSettings = await settings.get();
-  const demandThreads = new Map<string, number>();
+  const demandThreads = new Set<string>();
   let lastDemandAt: number | null = null;
   let startPromise: Promise<void> | null = null;
+  let startPromiseEpoch: number | null = null;
+  let activeStop: Promise<void> | null = null;
+  let stopWaitPromise: Promise<void> | null = null;
+  let resolveStopWait: (() => void) | null = null;
   let stopRequested = false;
+  let disposed = false;
+  let shuttingDown = false;
+  let lifecycleEpoch = 0;
+  let activeEndpoint: ServerEndpoint | null = null;
+  let activeProcessStartedAt: string | null = null;
+  let adoptedHealthFailureAt: number | null = null;
+  let adoptedHealthTimedOut = false;
+  let lastStartLogSeq = 0;
 
   const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     new Promise((resolve) => {
@@ -360,16 +387,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function acquireDemand(threadId: string): void {
-    demandThreads.set(threadId, (demandThreads.get(threadId) ?? 0) + 1);
+    demandThreads.add(threadId);
     lastDemandAt = Date.now();
-  }
-
-  function releaseDemand(threadId: string): void {
-    const count = demandThreads.get(threadId);
-    if (count === undefined) return;
-    if (count > 1) demandThreads.set(threadId, count - 1);
-    else demandThreads.delete(threadId);
-    if (demandThreads.size === 0) lastDemandAt = Date.now();
   }
 
   function releaseAllDemandFor(threadId: string): void {
@@ -384,6 +403,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function currentConfig(): Promise<ResolvedRunConfig> {
     return resolveConfig(await currentSettings());
+  }
+
+  function endpointFromArgs(args: string[], fallback: ServerEndpoint): ServerEndpoint {
+    const hostIndex = args.indexOf("--host");
+    const portIndex = args.indexOf("--port");
+    const host = hostIndex >= 0 && args[hostIndex + 1] ? args[hostIndex + 1] : fallback.host;
+    const parsedPort = portIndex >= 0 ? Number(args[portIndex + 1]) : Number.NaN;
+    return {
+      host,
+      port: Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : fallback.port,
+    };
   }
 
   function dsparkSupportError(cfg: ResolvedRunConfig): string | null {
@@ -410,7 +440,8 @@ export default async function plugin(bb: BbPluginApi) {
       case "crashed":
         return "crashed";
       case "running":
-        return lastHealth?.ok ? "ready" : "loading model…";
+        if (healthIsReady(lastHealth)) return "ready";
+        return adoptedHealthTimedOut || lastError ? "unavailable" : "loading model…";
     }
   }
 
@@ -419,12 +450,14 @@ export default async function plugin(bb: BbPluginApi) {
     const s = await currentSettings();
     return {
       state: proc.state,
+      ownership: proc.ownership,
       displayState: deriveDisplay(proc.state, cfg),
       pid: proc.pid,
       startedAt: proc.startedAt,
       uptimeMs: proc.startedAt ? Date.now() - proc.startedAt : 0,
       exitInfo: proc.exitInfo,
       health: lastHealth,
+      activeEndpoint,
       config: cfg,
       settings: {
         providerId: latestSettings.providerId ?? "",
@@ -449,9 +482,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function pollHealth(cfg: ResolvedRunConfig): Promise<z.infer<typeof healthSchema> | null> {
-    if (!proc.isRunning) return null;
-    const url = `http://${cfg.host}:${cfg.port}/v1/models`;
+  async function requestHealth(
+    cfg: ResolvedRunConfig,
+    endpointOverride?: ServerEndpoint,
+  ): Promise<z.infer<typeof healthSchema>> {
+    const endpoint = endpointOverride ?? (proc.isAdopted && activeEndpoint
+      ? activeEndpoint
+      : { host: cfg.host, port: cfg.port });
+    const url = `http://${endpoint.host}:${endpoint.port}/v1/models`;
     try {
       const t0 = Date.now();
       const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
@@ -470,7 +508,188 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function pollHealth(cfg: ResolvedRunConfig): Promise<z.infer<typeof healthSchema> | null> {
+    if (!proc.isRunning) return null;
+    return requestHealth(cfg);
+  }
+
+  function looksLikeDs4(health: z.infer<typeof healthSchema>): boolean {
+    return health.ok && health.models.some((model) => /deepseek-v4/i.test(model));
+  }
+
+  function healthIsReady(health: z.infer<typeof healthSchema> | null): boolean {
+    return health !== null && looksLikeDs4(health);
+  }
+
+  function recentCollisionPid(afterSeq = lastStartLogSeq): number | null {
+    const lines = proc.logs(0, LOG_RING_LIMIT).lines;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i].seq < afterSeq) continue;
+      const pid = parseExistingDs4Pid(lines[i].text);
+      if (pid) return pid;
+    }
+    return null;
+  }
+
+  /**
+   * Recover a compatible server left behind by a disconnected plugin worker,
+   * including one that is still loading its model.
+   * A matching process record is safe to reclaim. Without one, the server is
+   * treated as external and is never stopped by idle supervision.
+   */
+  async function recoverExistingServer(
+    cfg: ResolvedRunConfig,
+    options: { allowExternal?: boolean; isCurrent?: () => boolean } = {},
+  ): Promise<boolean> {
+    const record = readProcessRecord(bb.pluginId);
+    if (proc.isRunning) return false;
+    if (!cfg.bin && !(record?.ownership === "external" && options.allowExternal !== false)) {
+      return false;
+    }
+    const recordObservedStart = record ? processStartTime(record.pid) : null;
+    const recordStartMatches = Boolean(
+      record &&
+        (!record.processStartedAt ||
+          !recordObservedStart ||
+          recordObservedStart === record.processStartedAt),
+    );
+    const recordIdentityMatches = Boolean(
+      record &&
+        recordStartMatches &&
+        isProcessAlive(record.pid) &&
+        processMatchesCommand(record.pid, record.bin, record.args),
+    );
+    const recordMatches = Boolean(
+      recordIdentityMatches &&
+        record?.fingerprint === cfg.fingerprint &&
+        record.bin === cfg.bin &&
+        processMatchesCommand(record.pid, cfg.bin, cfg.args) &&
+        (record.ownership !== "external" || options.allowExternal !== false),
+    );
+    const canUseRecordedExternal =
+      recordIdentityMatches && record?.ownership === "external" && options.allowExternal !== false;
+    const useRecorded = recordMatches || canUseRecordedExternal;
+    let pid = useRecorded ? record?.pid ?? null : null;
+    let ownership: "managed" | "external" =
+      useRecorded && record?.ownership === "external" ? "external" : "managed";
+    let commandBin = useRecorded ? record?.bin ?? cfg.bin : cfg.bin;
+    let commandArgs = useRecorded ? record?.args ?? cfg.args : cfg.args;
+    let endpoint: ServerEndpoint = useRecorded && record
+      ? record.host && record.port
+        ? { host: record.host, port: record.port }
+        : endpointFromArgs(record.args, { host: cfg.host, port: cfg.port })
+      : { host: cfg.host, port: cfg.port };
+
+    if (!pid) {
+      if (options.allowExternal === false || !cfg.bin) return false;
+      ownership = "external";
+      commandBin = cfg.bin;
+      commandArgs = cfg.args;
+      endpoint = { host: cfg.host, port: cfg.port };
+      const candidates = [recentCollisionPid(), listeningPid(cfg.port)].filter(
+        (candidate, index, all): candidate is number =>
+          candidate !== null && all.indexOf(candidate) === index,
+      );
+      pid =
+        candidates.find(
+          (candidate) =>
+            isProcessAlive(candidate) && processMatchesCommand(candidate, commandBin!, commandArgs),
+        ) ?? null;
+      if (!pid) {
+        return false;
+      }
+    }
+
+    const processStartedAt =
+      (useRecorded ? record?.processStartedAt : undefined) ?? processStartTime(pid);
+    const health = await requestHealth(cfg, endpoint);
+    // An HTTP 200 with no models is a valid loading state for a recovered
+    // server. Only reject a live candidate when it has reported a different
+    // non-empty model namespace.
+    if (
+      !isProcessAlive(pid) ||
+      (health.ok && health.models.length > 0 && !looksLikeDs4(health) && !useRecorded)
+    ) {
+      return false;
+    }
+    // Re-check identity after the health request so a recycled PID cannot be
+    // adopted after the original process disappeared during the request.
+    if (!processMatchesCommand(pid, commandBin!, commandArgs)) {
+      return false;
+    }
+    const observedStart = processStartTime(pid);
+    if (processStartedAt && observedStart && processStartedAt !== observedStart) return false;
+    if (options.isCurrent && !options.isCurrent()) return false;
+
+    proc.adopt(pid, {
+      ownership,
+      cmdline: [commandBin!, ...commandArgs],
+      cwd: useRecorded ? record?.cwd ?? cfg.ds4Dir ?? homedir() : cfg.ds4Dir ?? homedir(),
+      startedAt: useRecorded ? record?.startedAt : undefined,
+    });
+    if (!proc.isAdopted || proc.pid !== pid) return false;
+    activeProcessStartedAt = processStartedAt ?? observedStart;
+    activeEndpoint = endpoint;
+    adoptedHealthFailureAt = null;
+    adoptedHealthTimedOut = false;
+    lastHealth = health;
+    lastError =
+      ownership === "external" && useRecorded && record?.fingerprint !== cfg.fingerprint
+        ? "An existing external ds4-server is using its previous settings. Run `bb ds4 stop` to apply the new settings."
+        : null;
+    writeProcessRecord(bb.pluginId, {
+      pid,
+      fingerprint: useRecorded ? record?.fingerprint ?? cfg.fingerprint : cfg.fingerprint,
+      bin: commandBin!,
+      args: commandArgs,
+      cwd: useRecorded ? record?.cwd ?? cfg.ds4Dir ?? homedir() : cfg.ds4Dir ?? homedir(),
+      startedAt: useRecorded ? record?.startedAt ?? Date.now() : Date.now(),
+      host: endpoint.host,
+      port: endpoint.port,
+      ownership,
+      processStartedAt: processStartedAt ?? observedStart ?? undefined,
+    });
+    if (ownership === "managed") {
+      bb.log.info(`recovered ds4-server orphan (pid ${pid})`);
+    } else {
+      bb.log.warn(`using existing ds4-server (pid ${pid}); it is not owned by this plugin`);
+    }
+    await publishState();
+    return true;
+  }
+
+  /** Adopt a previously managed process when settings changed before reload. */
+  function reclaimRecordedProcess(): boolean {
+    if (proc.isRunning) return false;
+    const record = readProcessRecord(bb.pluginId);
+    if (!record) return false;
+    if (record.ownership === "external") return false;
+    if (!isProcessAlive(record.pid)) {
+      clearProcessRecord(bb.pluginId, record.pid);
+      return false;
+    }
+    const observedStart = processStartTime(record.pid);
+    if (record.processStartedAt && observedStart && record.processStartedAt !== observedStart) {
+      return false;
+    }
+    if (!processMatchesCommand(record.pid, record.bin, record.args)) return false;
+    proc.adopt(record.pid, {
+      ownership: "managed",
+      cmdline: [record.bin, ...record.args],
+      cwd: record.cwd,
+      startedAt: record.startedAt,
+    });
+    activeProcessStartedAt = record.processStartedAt ?? processStartTime(record.pid);
+    activeEndpoint = record.host && record.port
+      ? { host: record.host, port: record.port }
+      : endpointFromArgs(record.args, { host: "127.0.0.1", port: 8000 });
+    adoptedHealthFailureAt = null;
+    adoptedHealthTimedOut = false;
+    return proc.isAdopted && proc.pid === record.pid;
+  }
+
   async function startProc(cfg: ResolvedRunConfig): Promise<void> {
+    if (disposed) return;
     if (proc.isRunning) return;
     if (!cfg.bin || !existsSync(cfg.bin)) {
       lastError =
@@ -494,8 +713,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
     lastError = null;
     lastHealth = null;
+    activeEndpoint = { host: cfg.host, port: cfg.port };
+    adoptedHealthFailureAt = null;
+    adoptedHealthTimedOut = false;
     bb.log.info(`starting ds4-server: ${cfg.bin} ${cfg.args.join(" ")}`);
     lastDemandAt ??= Date.now();
+    const startLogSeq = proc.logs(0, LOG_RING_LIMIT).nextOffset;
+    lastStartLogSeq = startLogSeq;
+    let managedPid: number | null = null;
     proc.start({
       bin: cfg.bin,
       args: cfg.args,
@@ -505,41 +730,222 @@ export default async function plugin(bb: BbPluginApi) {
         scheduleLogFlush();
       },
       onExit: (code, signal) => {
+        clearProcessRecord(bb.pluginId, managedPid);
+        lastHealth = null;
+        activeEndpoint = null;
+        activeProcessStartedAt = null;
+        adoptedHealthFailureAt = null;
+        adoptedHealthTimedOut = false;
         const message = `ds4-server exited (code=${code} signal=${signal})`;
         if (stopRequested) bb.log.info(message);
         else {
+          const conflictingPid = recentCollisionPid(startLogSeq);
+          lastError = conflictingPid
+            ? `Another ds4-server is already running (pid ${conflictingPid}).`
+            : message;
           bb.log.warn(message);
           void publishState();
         }
       },
     });
+    managedPid = proc.pid;
+    if (managedPid) {
+      activeProcessStartedAt = processStartTime(managedPid);
+      writeProcessRecord(bb.pluginId, {
+        pid: managedPid,
+        fingerprint: cfg.fingerprint,
+        bin: cfg.bin,
+        args: cfg.args,
+        cwd: cfg.ds4Dir ?? homedir(),
+        startedAt: proc.startedAt ?? Date.now(),
+        host: cfg.host,
+        port: cfg.port,
+        ownership: "managed",
+        processStartedAt: activeProcessStartedAt ?? undefined,
+      });
+    }
     await publishState();
   }
 
   /** Start at most one local server process when a model call creates demand. */
   async function ensureStarted(cfg?: ResolvedRunConfig): Promise<void> {
+    if (disposed) return;
+    if (stopWaitPromise) {
+      await stopWaitPromise;
+      return ensureStarted(cfg);
+    }
     if (proc.isRunning) return;
-    if (startPromise) return startPromise;
+    if (startPromise) {
+      const pending = startPromise;
+      if (startPromiseEpoch === lifecycleEpoch) return pending;
+      await pending.catch(() => undefined);
+      if (startPromise === pending) {
+        startPromise = null;
+        startPromiseEpoch = null;
+      }
+      return ensureStarted(cfg);
+    }
 
-    startPromise = (async () => {
-      if (proc.state === "stopping") await proc.stop();
-      await startProc(cfg ?? (await currentConfig()));
-    })().finally(() => {
-      startPromise = null;
+    const epoch = lifecycleEpoch;
+    const isCurrent = () => !disposed && !shuttingDown && lifecycleEpoch === epoch;
+    const run = (async () => {
+      if (!isCurrent()) return;
+      if (proc.state === "stopping") {
+        if (activeStop) await activeStop;
+        else await proc.stop();
+      }
+      if (!isCurrent()) return;
+      const resolved = cfg ?? (await currentConfig());
+      if (!isCurrent()) return;
+      if (await recoverExistingServer(resolved, { isCurrent })) return;
+      if (!isCurrent()) return;
+      // Another demand callback may have recovered or started the process
+      // while the recovery check was awaiting health.
+      if (proc.isRunning) return;
+      if (reclaimRecordedProcess()) {
+        bb.log.info("stopping the previous managed ds4-server before applying new settings");
+        await stopProc({ cancelPendingStart: false });
+      }
+      if (!isCurrent()) return;
+      await startProc(resolved);
+    })();
+    let tracked: Promise<void>;
+    tracked = run.finally(() => {
+      if (startPromise === tracked) {
+        startPromise = null;
+        startPromiseEpoch = null;
+      }
     });
+    startPromise = tracked;
+    startPromiseEpoch = epoch;
     await startPromise;
   }
 
   /** Transition the process to stopping before broadcasting its new state. */
-  async function stopProc(): Promise<void> {
-    stopRequested = true;
-    try {
-      const stopping = proc.stop();
-      await publishState();
-      await stopping;
-    } finally {
-      stopRequested = false;
+  async function stopProc(
+    options: {
+      terminateExternal?: boolean;
+      onlyIfNoDemand?: boolean;
+      cancelPendingStart?: boolean;
+    } = {},
+  ): Promise<boolean> {
+    if (proc.isExternal && !options.terminateExternal) {
+      bb.log.info("leaving the existing external ds4-server running");
+      return false;
     }
+    if (options.onlyIfNoDemand && demandThreads.size > 0) {
+      return false;
+    }
+    if (stopWaitPromise) {
+      await stopWaitPromise;
+      return true;
+    }
+    if (options.cancelPendingStart !== false) lifecycleEpoch += 1;
+    const stopWait = new Promise<void>((resolve) => {
+      resolveStopWait = resolve;
+    });
+    stopWaitPromise = stopWait;
+    const finishStopWait = () => {
+      if (stopWaitPromise !== stopWait) return;
+      stopWaitPromise = null;
+      const resolve = resolveStopWait;
+      resolveStopWait = null;
+      resolve?.();
+    };
+    const stoppedPid = proc.pid;
+    let expectedAdoptedCommand: string[] | null = null;
+    let expectedAdoptedProcessStartedAt: string | null = null;
+    if (proc.isAdopted && stoppedPid) {
+      let cfg: ResolvedRunConfig;
+      try {
+        cfg = await currentConfig();
+      } catch (error) {
+        finishStopWait();
+        throw error;
+      }
+      const expectedCommand = proc.cmdline;
+      const expectedBin = expectedCommand?.[0] ?? cfg.bin;
+      const expectedArgs = expectedCommand?.slice(1) ?? cfg.args;
+      expectedAdoptedProcessStartedAt =
+        activeProcessStartedAt ?? processStartTime(stoppedPid);
+      const observedStart = processStartTime(stoppedPid);
+      if (
+        !expectedBin ||
+        !isProcessAlive(stoppedPid) ||
+        !processMatchesCommand(stoppedPid, expectedBin, expectedArgs) ||
+        Boolean(
+          expectedAdoptedProcessStartedAt &&
+            observedStart &&
+            expectedAdoptedProcessStartedAt !== observedStart,
+        )
+      ) {
+        bb.log.warn("the adopted ds4-server process is no longer the expected process; not terminating it");
+        proc.detachAdopted("exited");
+        clearProcessRecord(bb.pluginId, stoppedPid);
+        activeEndpoint = null;
+        activeProcessStartedAt = null;
+        adoptedHealthFailureAt = null;
+        adoptedHealthTimedOut = false;
+        finishStopWait();
+        return false;
+      }
+      expectedAdoptedCommand = [expectedBin, ...expectedArgs];
+      if (options.onlyIfNoDemand && demandThreads.size > 0) {
+        finishStopWait();
+        return false;
+      }
+    }
+    if (activeStop) {
+      await activeStop;
+      finishStopWait();
+      return true;
+    }
+    const verifyPid =
+      stoppedPid && expectedAdoptedCommand
+        ? (pid: number) =>
+            processMatchesCommand(
+              pid,
+              expectedAdoptedCommand![0],
+              expectedAdoptedCommand!.slice(1),
+            ) &&
+            (() => {
+              if (!expectedAdoptedProcessStartedAt) return true;
+              const observedStart = processStartTime(pid);
+              return !observedStart || observedStart === expectedAdoptedProcessStartedAt;
+            })()
+        : undefined;
+    const ownsStop = activeStop === null;
+    if (ownsStop) stopRequested = true;
+    let stopping: Promise<void> | null = null;
+    try {
+      stopping =
+        activeStop ??
+        proc.stop(12_000, {
+          terminateExternal: options.terminateExternal,
+          verifyPid,
+        });
+      activeStop = stopping;
+      await publishState();
+      await stopping!;
+      clearProcessRecord(bb.pluginId, stoppedPid);
+      activeEndpoint = null;
+      activeProcessStartedAt = null;
+      adoptedHealthFailureAt = null;
+      adoptedHealthTimedOut = false;
+    } finally {
+      if (stopping && activeStop === stopping) activeStop = null;
+      if (ownsStop) stopRequested = false;
+      finishStopWait();
+    }
+    return true;
+  }
+
+  /** Make an explicit stop/restart able to find a server after plugin reload. */
+  async function recoverForExplicitStop(): Promise<void> {
+    if (proc.isRunning) return;
+    const cfg = await currentConfig();
+    if (await recoverExistingServer(cfg)) return;
+    reclaimRecordedProcess();
   }
 
   // --- realtime log fan-out (batched + throttled) ---
@@ -582,14 +988,38 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("supervisor", {
     start: async (signal) => {
       bb.log.info("supervisor started");
+      shuttingDown = false;
       let lastFingerprint: string | null = null;
       let crashBackoffMs = 2000;
+      let orphanCleanupDone = false;
 
       try {
         while (!signal.aborted) {
           const cfg = await currentConfig();
           const s = await currentSettings();
           const hasDemand = demandThreads.size > 0;
+
+          // A managed orphan may be all that remains after an abrupt host
+          // daemon disconnect. Reclaim it only when there is no active demand,
+          // then stop it so a fresh turn owns the next process cleanly. Do not
+          // scan for or interfere with unmarked, user-owned servers here.
+          if (!orphanCleanupDone && !hasDemand && proc.state === "stopped") {
+            orphanCleanupDone = true;
+            const recovered =
+              (await recoverExistingServer(cfg, {
+                allowExternal: false,
+                isCurrent: () => !disposed && !shuttingDown && !signal.aborted,
+              })) ||
+              reclaimRecordedProcess();
+            if (recovered && demandThreads.size === 0) {
+              const stopped = await stopProc({ onlyIfNoDemand: true });
+              if (stopped) {
+                lastDemandAt = null;
+                lastHealth = null;
+                await publishState();
+              }
+            }
+          }
 
           // Config drift → restart so changes apply before the next request.
           let restartAfterDrift = false;
@@ -598,9 +1028,15 @@ export default async function plugin(bb: BbPluginApi) {
             lastFingerprint !== null &&
             cfg.fingerprint !== lastFingerprint
           ) {
-            bb.log.info("config changed — restarting ds4-server");
-            restartAfterDrift = true;
-            await stopProc();
+            if (proc.isExternal) {
+              lastError =
+                "DS4 settings changed while an external server is in use. Run `bb ds4 stop` to apply the new settings.";
+              bb.log.warn(lastError);
+            } else {
+              bb.log.info("config changed — restarting ds4-server");
+              restartAfterDrift = true;
+              await stopProc();
+            }
             lastHealth = null;
           }
           lastFingerprint = cfg.fingerprint;
@@ -619,8 +1055,14 @@ export default async function plugin(bb: BbPluginApi) {
             proc.state === "crashed" &&
             cfg.bin
           ) {
+            const recovered = await recoverExistingServer(cfg, {
+              isCurrent: () => !disposed && !shuttingDown && !signal.aborted,
+            });
+            if (recovered) {
+              crashBackoffMs = 2000;
+            }
             const since = Date.now() - (proc.exitInfo?.at ?? 0);
-            if (since >= crashBackoffMs) {
+            if (!recovered && !signal.aborted && !shuttingDown && since >= crashBackoffMs) {
               bb.log.warn(`restarting after crash (backoff ${crashBackoffMs}ms)`);
               await ensureStarted(cfg);
             }
@@ -632,23 +1074,93 @@ export default async function plugin(bb: BbPluginApi) {
             lastDemandAt !== null &&
             Date.now() - lastDemandAt >= idleTimeoutMs()
           ) {
-            bb.log.info("stopping ds4-server after the configured idle period");
-            await stopProc();
-            lastDemandAt = null;
-            lastHealth = null;
-            await publishState();
+            let stopped = false;
+            if (proc.isExternal) {
+              bb.log.info("idle period reached; keeping the external ds4-server running");
+              stopped = true;
+            } else {
+              bb.log.info("stopping ds4-server after the configured idle period");
+              stopped = await stopProc({ onlyIfNoDemand: true });
+            }
+            if (stopped || (!proc.isRunning && demandThreads.size === 0)) {
+              lastDemandAt = null;
+            }
+            if (stopped && !proc.isExternal) {
+              lastHealth = null;
+              await publishState();
+            }
           }
 
           const health = await pollHealth(cfg);
           const previousHealth = lastHealth;
           lastHealth = health;
+          if (proc.isAdopted && health && !health.ok) {
+            const wasExternal = proc.isExternal;
+            const adoptedPid = proc.pid;
+            const adoptedCommand = proc.cmdline;
+            const identityStillMatches = Boolean(
+              adoptedPid &&
+                adoptedCommand?.[0] &&
+                isProcessAlive(adoptedPid) &&
+                processMatchesCommand(
+                  adoptedPid,
+                  adoptedCommand[0],
+                  adoptedCommand.slice(1),
+                ),
+            );
+            if (!identityStillMatches) {
+              proc.detachAdopted("crashed");
+              clearProcessRecord(bb.pluginId, adoptedPid);
+              activeEndpoint = null;
+              activeProcessStartedAt = null;
+              adoptedHealthFailureAt = null;
+              adoptedHealthTimedOut = false;
+              lastError = wasExternal
+                ? "The existing ds4-server is no longer reachable."
+                : "The recovered ds4-server is no longer reachable.";
+              bb.log.warn(lastError);
+              await publishState();
+            } else {
+              adoptedHealthFailureAt ??= Date.now();
+              if (Date.now() - adoptedHealthFailureAt >= ADOPTED_HEALTH_GRACE_MS) {
+                lastError = wasExternal
+                  ? "The existing ds4-server did not become reachable."
+                  : "The recovered ds4-server did not become reachable.";
+                if (wasExternal) {
+                  // Keep the external process adopted and probe it again. This
+                  // preserves an explicit stop path and avoids repeatedly
+                  // rediscovering the same unhealthy listener as external.
+                  if (!adoptedHealthTimedOut) {
+                    adoptedHealthTimedOut = true;
+                    bb.log.warn(lastError);
+                    await publishState();
+                  }
+                } else {
+                  bb.log.warn(lastError);
+                  await stopProc();
+                  lastHealth = null;
+                  adoptedHealthFailureAt = null;
+                  await publishState();
+                }
+              }
+            }
+          } else if (proc.isAdopted && health?.ok) {
+            adoptedHealthFailureAt = null;
+            if (adoptedHealthTimedOut) {
+              adoptedHealthTimedOut = false;
+              lastError = null;
+              await publishState();
+            }
+          } else if (!proc.isAdopted) {
+            adoptedHealthFailureAt = null;
+          }
           const healthChanged =
             health !== null &&
             (previousHealth === null ||
               health.ok !== previousHealth.ok ||
               JSON.stringify(health.models) !== JSON.stringify(previousHealth.models));
           if (healthChanged) await publishState();
-          if (health && health.ok && proc.isRunning) {
+          if (healthIsReady(health) && proc.isRunning) {
             crashBackoffMs = 2000; // healthy run resets the crash backoff
           } else if (proc.state === "crashed" && hasDemand) {
             crashBackoffMs = Math.min(30_000, crashBackoffMs * 2); // exponential
@@ -659,6 +1171,8 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.error(`supervisor error: ${String(err)}`);
       }
 
+      shuttingDown = true;
+      lifecycleEpoch += 1;
       flushLogs();
       if (proc.isRunning || proc.state === "stopping") {
         bb.log.info("stopping ds4-server (supervisor aborted)");
@@ -683,7 +1197,8 @@ export default async function plugin(bb: BbPluginApi) {
       releaseAllDemand();
       lastError = null;
       bb.log.info("manual stop requested");
-      await stopProc();
+      await recoverForExplicitStop();
+      await stopProc({ terminateExternal: true });
       lastDemandAt = null;
       lastHealth = null;
       await publishState();
@@ -692,7 +1207,8 @@ export default async function plugin(bb: BbPluginApi) {
     async restart() {
       lastError = null;
       bb.log.info("manual restart requested");
-      await stopProc();
+      await recoverForExplicitStop();
+      await stopProc({ terminateExternal: true });
       lastDemandAt = Date.now();
       await ensureStarted(await currentConfig());
       return buildStatus();
@@ -829,14 +1345,16 @@ export default async function plugin(bb: BbPluginApi) {
         }
         case "stop": {
           releaseAllDemand();
-          await stopProc();
+          await recoverForExplicitStop();
+          await stopProc({ terminateExternal: true });
           lastDemandAt = null;
           lastHealth = null;
           await publishState();
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
         }
         case "restart": {
-          await stopProc();
+          await recoverForExplicitStop();
+          await stopProc({ terminateExternal: true });
           lastDemandAt = Date.now();
           await ensureStarted(await currentConfig());
           return { exitCode: 0, stdout: renderStatus(await buildStatus()) };
@@ -917,7 +1435,7 @@ export default async function plugin(bb: BbPluginApi) {
               stderr: "missing prompt",
             };
           }
-          if (!(proc.state === "running" && lastHealth?.ok)) {
+          if (!(proc.state === "running" && healthIsReady(lastHealth))) {
             return {
               exitCode: 1,
               stdout: `ds4-server is not ready (state=${proc.state}). Run \`bb ds4 start\` first.`,
@@ -979,7 +1497,7 @@ export default async function plugin(bb: BbPluginApi) {
       })
       .strict(),
     async execute({ prompt, system, maxTokens, temperature }) {
-      if (!(proc.state === "running" && lastHealth?.ok)) {
+      if (!(proc.state === "running" && healthIsReady(lastHealth))) {
         return `DS4 server is not ready (state=${proc.state}). Start it with \`bb ds4 start\` first.`;
       }
       try {
@@ -1021,8 +1539,8 @@ export default async function plugin(bb: BbPluginApi) {
   // not pay the model-load cost again; the supervisor performs the eventual
   // stop. The archive/delete cases prevent a stale thread from holding the
   // server open forever if its normal terminal event is not delivered.
-  bb.events.on("thread.idle", ({ thread }) => releaseDemand(thread.id));
-  bb.events.on("thread.failed", ({ thread }) => releaseDemand(thread.id));
+  bb.events.on("thread.idle", ({ thread }) => releaseAllDemandFor(thread.id));
+  bb.events.on("thread.failed", ({ thread }) => releaseAllDemandFor(thread.id));
   bb.events.on("thread.archived", ({ thread }) => releaseAllDemandFor(thread.id));
   bb.events.on("thread.deleted", ({ thread }) => releaseAllDemandFor(thread.id));
 
@@ -1040,6 +1558,9 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.onDispose(() => {
+    disposed = true;
+    shuttingDown = true;
+    lifecycleEpoch += 1;
     releaseAllDemand();
     if (logFlushTimer) {
       clearTimeout(logFlushTimer);
@@ -1056,6 +1577,7 @@ export default async function plugin(bb: BbPluginApi) {
 function renderStatus(st: StatusDto): string {
   const lines: string[] = [];
   lines.push(`state:     ${st.displayState}`);
+  lines.push(`ownership: ${st.ownership}`);
   if (st.pid) lines.push(`pid:       ${st.pid}`);
   if (st.startedAt) {
     const s = Math.floor(st.uptimeMs / 1000);
@@ -1074,9 +1596,14 @@ function renderStatus(st: StatusDto): string {
   } else {
     lines.push(`health:    —`);
   }
+  const endpoint = st.activeEndpoint ?? { host: st.config.host, port: st.config.port };
   lines.push(
-    `endpoint:  http://${st.config.host}:${st.config.port}/v1`,
-    `port:      ${st.config.port}`,
+    `endpoint:  http://${endpoint.host}:${endpoint.port}/v1`,
+    `port:      ${endpoint.port}`,
+    ...(st.activeEndpoint &&
+    (st.activeEndpoint.host !== st.config.host || st.activeEndpoint.port !== st.config.port)
+      ? [`configured: http://${st.config.host}:${st.config.port}/v1`]
+      : []),
     `ctx:       ${st.config.ctx}`,
     `max out:   ${st.config.maxTokens}`,
     `dspark:    ${st.config.dspark ? `on (confidence ${st.config.dsparkConfidence})` : "off"}`,

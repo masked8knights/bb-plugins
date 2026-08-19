@@ -1,0 +1,222 @@
+// Best-effort helpers for recovering a ds4-server that survived the plugin
+// worker which spawned it. The process record is only used to reclaim
+// processes the plugin can positively identify; an unknown server is adopted
+// for use but is never terminated automatically.
+
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+
+export interface Ds4ProcessRecord {
+  pid: number;
+  fingerprint: string;
+  bin: string;
+  args: string[];
+  cwd: string;
+  startedAt: number;
+  host?: string;
+  port?: number;
+  ownership?: "managed" | "external";
+  processStartedAt?: string;
+}
+
+export function processRecordPath(pluginId: string): string {
+  return join(homedir(), ".bb", "plugins", pluginId, "server.json");
+}
+
+export function readProcessRecord(pluginId: string): Ds4ProcessRecord | null {
+  const path = processRecordPath(pluginId);
+  try {
+    if (!existsSync(path)) return null;
+    const value = JSON.parse(readFileSync(path, "utf8")) as Partial<Ds4ProcessRecord>;
+    const pid = value.pid;
+    if (
+      typeof pid !== "number" ||
+      !Number.isInteger(pid) ||
+      pid <= 0 ||
+      typeof value.fingerprint !== "string" ||
+      typeof value.bin !== "string" ||
+      !Array.isArray(value.args) ||
+      !value.args.every((arg) => typeof arg === "string") ||
+      typeof value.cwd !== "string" ||
+      typeof value.startedAt !== "number"
+    ) {
+      return null;
+    }
+    return {
+      pid,
+      fingerprint: value.fingerprint,
+      bin: value.bin,
+      args: value.args,
+      cwd: value.cwd,
+      startedAt: value.startedAt,
+      ...(typeof value.host === "string" ? { host: value.host } : {}),
+      ...(typeof value.port === "number" && Number.isInteger(value.port)
+        ? { port: value.port }
+        : {}),
+      ...(value.ownership === "managed" || value.ownership === "external"
+        ? { ownership: value.ownership }
+        : {}),
+      ...(typeof value.processStartedAt === "string"
+        ? { processStartedAt: value.processStartedAt }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeProcessRecord(pluginId: string, record: Ds4ProcessRecord): void {
+  try {
+    const path = processRecordPath(pluginId);
+    const directory = join(homedir(), ".bb", "plugins", pluginId);
+    mkdirSync(directory, { recursive: true });
+    const temporaryPath = join(directory, `server.json.tmp-${process.pid}`);
+    writeFileSync(temporaryPath, `${JSON.stringify(record)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    renameSync(temporaryPath, path);
+  } catch {
+    // Recovery metadata is best-effort and must never prevent startup.
+  }
+}
+
+export function clearProcessRecord(pluginId: string, pid?: number | null): void {
+  const path = processRecordPath(pluginId);
+  try {
+    if (pid !== undefined) {
+      const record = readProcessRecord(pluginId);
+      if (record && record.pid !== pid) return;
+    }
+    unlinkSync(path);
+  } catch {
+    // The record may already be gone.
+  }
+}
+
+export function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Return the command line for a PID on macOS/Linux, or null if unavailable. */
+export function processCommand(pid: number): string | null {
+  try {
+    const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return command || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Return the operating-system start signature for a PID when available. */
+export function processStartTime(pid: number): string | null {
+  try {
+    const startedAt = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return startedAt || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Find a listening TCP process without invoking a shell. */
+export function listeningPid(port: number): number | null {
+  try {
+    const output = execFileSync(
+      "lsof",
+      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const match = output.match(/^p(\d+)$/m);
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseExistingDs4Pid(text: string): number | null {
+  const match = text.match(/another ds4 process is already running \(pid (\d+)\)/i);
+  return match ? Number(match[1]) : null;
+}
+
+export function processMatchesCommand(
+  pid: number,
+  bin: string,
+  args: string[],
+): boolean {
+  const command = processCommand(pid);
+  if (!command) return false;
+  const tokens = tokenizeProcessCommand(command);
+  if (tokens.length !== args.length + 1) return false;
+  const executable = tokens[0];
+  const expectedExecutable = basename(bin);
+  if (executable !== bin && executable !== expectedExecutable) return false;
+  return args.every((arg, index) => tokens[index + 1] === arg);
+}
+
+/** Parse the argv-shaped output returned by `ps -o command=` without a shell. */
+function tokenizeProcessCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let started = false;
+
+  for (const char of command.trim()) {
+    if (escaped) {
+      token += char;
+      started = true;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else token += char;
+      started = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(token);
+        token = "";
+        started = false;
+      }
+      continue;
+    }
+    token += char;
+    started = true;
+  }
+  if (escaped) token += "\\";
+  if (started) tokens.push(token);
+  return tokens;
+}

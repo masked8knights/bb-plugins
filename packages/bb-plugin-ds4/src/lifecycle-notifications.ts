@@ -23,7 +23,8 @@ export function ds4LifecyclePhase(status: {
   if (status.state === "crashed" || status.state === "exited") return "error";
   if (status.state === "starting") return "starting";
   if (status.state === "running") {
-    return status.healthOk === true ? "ready" : "starting";
+    if (status.healthOk === true) return "ready";
+    return status.hasError ? "error" : "starting";
   }
   return null;
 }
