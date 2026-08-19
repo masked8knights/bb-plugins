@@ -6,15 +6,14 @@ import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
 export type TraceSourceId = "codex" | "claude" | "pi" | "omp" | "dsh" | "custom";
-export type RootKind = "session" | "artifact";
 export type TraceFormat = "jsonl" | "zstd";
 
 export type RootSpec = {
   id: string;
-  source: TraceSourceId | "artifacts";
+  source: TraceSourceId;
   label: string;
   path: string;
-  kind: RootKind;
+  kind: "session";
   format?: TraceFormat;
 };
 
@@ -72,21 +71,9 @@ export type EventSummary = NormalizedEvent & {
   rawTruncated: boolean;
 };
 
-export type ArtifactSummary = {
-  id: string;
-  source: "artifacts";
-  title: string;
-  filePath: string;
-  kind: "decision" | "context";
-  updatedAt: number;
-  sizeBytes: number;
-  preview: string;
-};
-
 export type IndexStats = {
   sessions: number;
   events: number;
-  artifacts: number;
   bytes: number;
   lastScanAt: number | null;
   indexing: boolean;
@@ -108,9 +95,8 @@ type DbRow = Record<string, unknown>;
 
 const MAX_RAW_JSON = 200_000;
 const MAX_EVENT_TEXT = 20_000;
-const MAX_ARTIFACT_PREVIEW = 40_000;
-const MAX_DISCOVERED_FILES = 20_000;
-const MAX_ARTIFACT_DEPTH = 9;
+const MAX_SESSION_FILES = 50_000;
+const MAX_SESSION_DEPTH = 32;
 const INDEXER_VERSION = 2;
 // v1 rows use the same durable schema and event identity as v2. Keep both
 // readable so a parser improvement does not turn the next plugin restart into
@@ -137,6 +123,7 @@ type DiscoveryResult = {
   files: string[];
   accessible: boolean;
   complete: boolean;
+  limited: boolean;
 };
 
 function yieldToEventLoop(): Promise<void> {
@@ -448,25 +435,11 @@ export function defaultSessionRoots(home = homedir()): RootSpec[] {
   ];
 }
 
-export function defaultArtifactRoots(home = homedir(), cwd = process.env.BB_WORKSPACE_PATH ?? process.cwd()): RootSpec[] {
-  const roots: RootSpec[] = [
-    { id: "bb-thread-storage", source: "artifacts", label: "BB thread storage", path: join(home, ".bb", "thread-storage"), kind: "artifact" },
-    { id: "bb-personal-workspaces", source: "artifacts", label: "BB personal workspaces", path: join(home, ".bb", "personal-workspaces"), kind: "artifact" },
-  ];
-  // The plugin host may start with the user's home directory as cwd. Never
-  // interpret that as the current project: scanning a home directory makes a
-  // local index appear to run forever and can ingest unrelated files. The
-  // explicit workspace-roots setting remains available for other projects.
-  if (resolve(cwd) !== resolve(home)) {
-    roots.push({ id: "current-workspace", source: "artifacts", label: "Current workspace", path: cwd, kind: "artifact" });
-  }
-  return roots;
-}
-
-async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Promise<DiscoveryResult> {
+async function walkFiles(root: string, signal?: AbortSignal): Promise<DiscoveryResult> {
   const output: string[] = [];
   let accessible = true;
   let complete = true;
+  let limited = false;
   let visitedEntries = 0;
   async function walk(directory: string, depth: number): Promise<void> {
     if (signal?.aborted) {
@@ -474,8 +447,14 @@ async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Pr
       complete = false;
       return;
     }
-    if (output.length >= MAX_DISCOVERED_FILES || depth > MAX_ARTIFACT_DEPTH) {
+    if (output.length >= MAX_SESSION_FILES) {
       complete = false;
+      limited = true;
+      return;
+    }
+    if (depth > MAX_SESSION_DEPTH) {
+      complete = false;
+      limited = true;
       return;
     }
     let entries;
@@ -487,6 +466,11 @@ async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Pr
       return;
     }
     for (const entry of entries) {
+      if (output.length >= MAX_SESSION_FILES) {
+        complete = false;
+        limited = true;
+        return;
+      }
       visitedEntries += 1;
       if (visitedEntries % 256 === 0) await yieldToEventLoop();
       if (signal?.aborted) {
@@ -494,56 +478,35 @@ async function walkFiles(root: string, kind: RootKind, signal?: AbortSignal): Pr
         complete = false;
         return;
       }
-      if (output.length >= MAX_DISCOVERED_FILES) {
-        complete = false;
-        return;
-      }
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) await walk(path, depth + 1);
+        if (!IGNORED_DIRECTORY_NAMES.has(entry.name)) {
+          await walk(path, depth + 1);
+          if (limited) return;
+        }
         continue;
       }
       if (!entry.isFile()) continue;
       const lower = entry.name.toLowerCase();
-      if (kind === "session") {
-        if (lower.endsWith(".jsonl") || lower.endsWith(".jsonl.zst") || lower.endsWith(".jsonl.zstd")) output.push(path);
-        continue;
-      }
-      if (!/\.(md|mdx|json|ya?ml)$/i.test(lower)) continue;
-      const normalized = path.toLowerCase();
-      if (
-        normalized.includes("/.plans/") ||
-        normalized.includes("/.agents/") ||
-        /(decision|plan|checkpoint|handoff|review|state|agent)/i.test(entry.name)
-      ) {
-        output.push(path);
-      }
+      if (lower.endsWith(".jsonl") || lower.endsWith(".jsonl.zst") || lower.endsWith(".jsonl.zstd")) output.push(path);
     }
   }
   try {
     const rootStat = await stat(root);
-    if (rootStat.isFile()) return { files: [root], accessible: true, complete: true };
+    if (rootStat.isFile()) return { files: [root], accessible: true, complete: true, limited: false };
   } catch {
-    return { files: [], accessible: false, complete: false };
+    return { files: [], accessible: false, complete: false, limited: false };
   }
   await walk(root, 0);
-  return { files: output, accessible, complete };
+  return { files: output, accessible, complete, limited };
 }
 
 export async function discoverSessionFiles(root: RootSpec, signal?: AbortSignal): Promise<string[]> {
-  return (await walkFiles(root.path, "session", signal)).files;
-}
-
-export async function discoverArtifactFiles(root: RootSpec, signal?: AbortSignal): Promise<string[]> {
-  return (await walkFiles(root.path, "artifact", signal)).files;
+  return (await walkFiles(root.path, signal)).files;
 }
 
 async function discoverSessionFilesWithStatus(root: RootSpec, signal?: AbortSignal): Promise<DiscoveryResult> {
-  return walkFiles(root.path, "session", signal);
-}
-
-async function discoverArtifactFilesWithStatus(root: RootSpec, signal?: AbortSignal): Promise<DiscoveryResult> {
-  return walkFiles(root.path, "artifact", signal);
+  return walkFiles(root.path, signal);
 }
 
 export async function* completeLines(
@@ -628,34 +591,6 @@ async function fileFingerprint(filePath: string, byteLength: number, signal?: Ab
   }
 }
 
-async function fingerprintAndPreview(
-  filePath: string,
-  signal?: AbortSignal,
-): Promise<{ hash: string; preview: string } | null> {
-  if (signal?.aborted) return null;
-  const hash = createHash("sha256");
-  const previewChunks: Buffer[] = [];
-  let previewBytes = 0;
-  const stream = createReadStream(filePath);
-  try {
-    for await (const chunk of stream) {
-      if (signal?.aborted) return null;
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      hash.update(bytes);
-      if (previewBytes < MAX_ARTIFACT_PREVIEW) {
-        const previewChunk = bytes.subarray(0, MAX_ARTIFACT_PREVIEW - previewBytes);
-        previewChunks.push(previewChunk);
-        previewBytes += previewChunk.length;
-      }
-    }
-    if (signal?.aborted) return null;
-    const preview = clip(Buffer.concat(previewChunks).toString("utf8").replace(/\0/g, ""), MAX_ARTIFACT_PREVIEW);
-    return { hash: hash.digest("hex"), preview };
-  } finally {
-    stream.destroy();
-  }
-}
-
 function sourceFromRow(row: DbRow): TraceSourceId {
   return String(row.source_id) as TraceSourceId;
 }
@@ -731,31 +666,6 @@ function rowToEvent(row: DbRow): EventSummary {
   };
 }
 
-function rowToArtifact(row: DbRow): ArtifactSummary {
-  return {
-    id: String(row.id),
-    source: "artifacts",
-    title: String(row.title),
-    filePath: String(row.file_path),
-    kind: row.kind === "decision" ? "decision" : "context",
-    updatedAt: numberValue(row.updated_at) ?? 0,
-    sizeBytes: numberValue(row.size_bytes) ?? 0,
-    preview: String(row.preview),
-  };
-}
-
-function artifactKind(filePath: string): "decision" | "context" {
-  return /(decision|plan|checkpoint|handoff|review|state)/i.test(basename(filePath)) ||
-    /\/(\.plans|\.agents)\//i.test(filePath)
-    ? "decision"
-    : "context";
-}
-
-function artifactTitle(filePath: string, preview: string): string {
-  const heading = preview.match(/^#{1,3}\s+(.+)$/m)?.[1]?.trim();
-  return clip(heading || basename(filePath).replace(/\.[^.]+$/, ""), 180);
-}
-
 export function ensureSchema(db: SqliteDb): boolean {
   db.exec(
     "CREATE TABLE IF NOT EXISTS trace_roots (" +
@@ -780,16 +690,14 @@ export function ensureSchema(db: SqliteDb): boolean {
       "usage_is_total INTEGER NOT NULL DEFAULT 0, turn INTEGER, step INTEGER, depth INTEGER NOT NULL DEFAULT 0, model TEXT, cwd TEXT, " +
       "raw_json TEXT NOT NULL, raw_truncated INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(session_id) REFERENCES trace_sessions(id) ON DELETE CASCADE" +
       ");" +
-      "CREATE TABLE IF NOT EXISTS trace_artifacts (" +
-      "id TEXT PRIMARY KEY, root_id TEXT NOT NULL, file_path TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, title TEXT NOT NULL, " +
-      "updated_at INTEGER NOT NULL, size_bytes INTEGER NOT NULL, content_hash TEXT, preview TEXT NOT NULL" +
-      ");" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);" +
       "CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line_number);" +
-      "CREATE INDEX IF NOT EXISTS trace_events_timestamp ON trace_events(timestamp);" +
-      "CREATE INDEX IF NOT EXISTS trace_artifacts_updated ON trace_artifacts(updated_at DESC);",
+      "CREATE INDEX IF NOT EXISTS trace_events_timestamp ON trace_events(timestamp);",
   );
+  // Artifact rows are derived cache data. Remove the retired table and its
+  // roots while leaving all source files untouched.
+  db.exec("DROP TABLE IF EXISTS trace_artifacts; DELETE FROM trace_roots WHERE kind = 'artifact' OR source_id = 'artifacts';");
   const traceFileColumns = new Set(
     (db.prepare("PRAGMA table_info(trace_files)").all() as DbRow[]).map((row) => String(row.name)),
   );
@@ -798,12 +706,6 @@ export function ensureSchema(db: SqliteDb): boolean {
   }
   if (!traceFileColumns.has("content_hash")) {
     db.exec("ALTER TABLE trace_files ADD COLUMN content_hash TEXT;");
-  }
-  const artifactColumns = new Set(
-    (db.prepare("PRAGMA table_info(trace_artifacts)").all() as DbRow[]).map((row) => String(row.name)),
-  );
-  if (!artifactColumns.has("content_hash")) {
-    db.exec("ALTER TABLE trace_artifacts ADD COLUMN content_hash TEXT;");
   }
   try {
     db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS trace_event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content);");
@@ -826,7 +728,6 @@ export class TraceIndexer {
 
   async scan(
     roots: RootSpec[],
-    artifactRoots: RootSpec[],
     signal?: AbortSignal,
     options: {
       forceFingerprintPaths?: ReadonlySet<string>;
@@ -836,8 +737,7 @@ export class TraceIndexer {
   ): Promise<boolean> {
     let changed = false;
     for (const root of roots) this.ensureRoot(root);
-    for (const root of artifactRoots) this.ensureRoot(root);
-    this.pruneInactiveRoots(roots, artifactRoots);
+    this.pruneInactiveRoots(roots);
 
     const seenSessionFiles = new Set<string>();
     const unavailableSessionRoots = new Set<string>();
@@ -850,7 +750,9 @@ export class TraceIndexer {
       let rootError = !discovery.accessible
         ? "Root is missing or not readable"
         : !discovery.complete
-          ? "Discovery limit reached; cached rows were preserved"
+          ? discovery.limited
+            ? "Discovery limit reached; cached rows were preserved"
+            : "Discovery incomplete; cached rows were preserved"
           : null;
       for (const [fileIndex, filePath] of files.entries()) {
         if (signal?.aborted) return changed;
@@ -874,41 +776,6 @@ export class TraceIndexer {
     this.removeMissingSessionFiles(
       roots.filter((root) => !unavailableSessionRoots.has(root.id)),
       seenSessionFiles,
-    );
-
-    const seenArtifacts = new Set<string>();
-    const unavailableArtifactRoots = new Set<string>();
-    for (const root of artifactRoots) {
-      if (signal?.aborted) return changed;
-      const discovery = await discoverArtifactFilesWithStatus(root, signal);
-      if (signal?.aborted) return changed;
-      const files = discovery.files;
-      let bytes = 0;
-      let rootError = !discovery.accessible
-        ? "Root is missing or not readable"
-        : !discovery.complete
-          ? "Discovery limit reached; cached rows were preserved"
-          : null;
-      for (const [fileIndex, filePath] of files.entries()) {
-        if (signal?.aborted) return changed;
-        if (fileIndex % 16 === 0) await yieldToEventLoop();
-        seenArtifacts.add(filePath);
-        try {
-          const fileStat = await stat(filePath);
-          bytes += fileStat.size;
-          changed = (await this.indexArtifact(root, filePath, fileStat.mtimeMs, fileStat.size, options.forceFingerprintAll === true, signal)) || changed;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          rootError = rootError ?? message;
-          this.log("Could not index artifact " + filePath + ": " + message);
-        }
-      }
-      this.updateRoot(root, files.length, bytes, rootError);
-      if (!discovery.complete) unavailableArtifactRoots.add(root.id);
-    }
-    this.removeMissingArtifacts(
-      artifactRoots.filter((root) => !unavailableArtifactRoots.has(root.id)),
-      seenArtifacts,
     );
     return changed;
   }
@@ -966,33 +833,6 @@ export class TraceIndexer {
     };
   }
 
-  listArtifacts(input: { query?: string; kind?: string; limit: number; offset: number }): { artifacts: ArtifactSummary[]; total: number } {
-    const query = input.query?.trim() ?? "";
-    const kind = input.kind?.trim() ?? "";
-    const clauses: string[] = [];
-    const params: unknown[] = [];
-    if (kind) {
-      clauses.push("kind = ?");
-      params.push(kind);
-    }
-    if (query) {
-      clauses.push("(title LIKE ? OR file_path LIKE ? OR preview LIKE ?)");
-      const like = "%" + query + "%";
-      params.push(like, like, like);
-    }
-    const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
-    const totalRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_artifacts" + where).get(...params) as DbRow;
-    const rows = this.db
-      .prepare("SELECT * FROM trace_artifacts" + where + " ORDER BY updated_at DESC LIMIT ? OFFSET ?")
-      .all(...params, input.limit, input.offset) as DbRow[];
-    return { artifacts: rows.map(rowToArtifact), total: numberValue(totalRow.count) ?? 0 };
-  }
-
-  getArtifact(id: string): ArtifactSummary | null {
-    const row = this.db.prepare("SELECT * FROM trace_artifacts WHERE id = ?").get(id) as DbRow | undefined;
-    return row ? rowToArtifact(row) : null;
-  }
-
   rawEvent(eventId: string, maxBytes = 2_000_000): { raw: string | null; truncated: boolean } {
     const row = this.db.prepare("SELECT raw_json, raw_truncated FROM trace_events WHERE id = ?").get(eventId) as DbRow | undefined;
     if (!row) return { raw: null, truncated: false };
@@ -1003,12 +843,10 @@ export class TraceIndexer {
   stats(lastScanAt: number | null, indexing: boolean, lastError: string | null): IndexStats {
     const sessions = this.db.prepare("SELECT COUNT(*) AS count FROM trace_sessions").get() as DbRow;
     const events = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events").get() as DbRow;
-    const artifacts = this.db.prepare("SELECT COUNT(*) AS count FROM trace_artifacts").get() as DbRow;
     const bytes = this.db.prepare("SELECT COALESCE(SUM(file_size_bytes), 0) AS total FROM trace_sessions").get() as DbRow;
     return {
       sessions: numberValue(sessions.count) ?? 0,
       events: numberValue(events.count) ?? 0,
-      artifacts: numberValue(artifacts.count) ?? 0,
       bytes: numberValue(bytes.total) ?? 0,
       lastScanAt,
       indexing,
@@ -1023,7 +861,7 @@ export class TraceIndexer {
       source: String(row.source_id) as RootSpec["source"],
       label: String(row.label),
       path: String(row.path),
-      kind: String(row.kind) as RootKind,
+      kind: "session",
       format: row.source_id === "dsh" ? "zstd" : "jsonl",
       exists: Boolean(row.exists_flag),
       fileCount: numberValue(row.file_count) ?? 0,
@@ -1288,31 +1126,6 @@ export class TraceIndexer {
     }
   }
 
-  private async indexArtifact(
-    root: RootSpec,
-    filePath: string,
-    mtimeMs: number,
-    sizeBytes: number,
-    forceFingerprint = false,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const existing = this.db.prepare("SELECT root_id, updated_at, size_bytes, content_hash FROM trace_artifacts WHERE file_path = ?").get(filePath) as DbRow | undefined;
-    const sameMetadata = existing && numberValue(existing.updated_at) === mtimeMs && numberValue(existing.size_bytes) === sizeBytes;
-    const existingHash = stringValue(existing?.content_hash);
-    if (sameMetadata && existingHash && !forceFingerprint) return false;
-    const content = await fingerprintAndPreview(filePath, signal);
-    if (!content) return false;
-    if (sameMetadata && existingHash && content.hash === existingHash) return false;
-    const contentHash = content.hash;
-    const preview = content.preview;
-    const id = createHash("sha1").update(filePath).digest("hex").slice(0, 24);
-    this.db.prepare(
-      "INSERT INTO trace_artifacts (id, root_id, file_path, kind, title, updated_at, size_bytes, content_hash, preview) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(file_path) DO UPDATE SET root_id = excluded.root_id, kind = excluded.kind, title = excluded.title, updated_at = excluded.updated_at, size_bytes = excluded.size_bytes, content_hash = excluded.content_hash, preview = excluded.preview",
-    ).run(id, root.id, filePath, artifactKind(filePath), artifactTitle(filePath, preview), mtimeMs, sizeBytes, contentHash, preview);
-    return true;
-  }
-
   private updateRoot(root: RootSpec, fileCount: number, byteCount: number, error: string | null): void {
     const existsFlag = existsSync(root.path) ? 1 : 0;
     this.db.prepare(
@@ -1343,18 +1156,8 @@ export class TraceIndexer {
     }
   }
 
-  private removeMissingArtifacts(roots: RootSpec[], seen: Set<string>): void {
-    const rootIds = roots.map((root) => root.id);
-    if (!rootIds.length) return;
-    const rows = this.db.prepare("SELECT id, file_path, root_id FROM trace_artifacts").all() as DbRow[];
-    for (const row of rows) {
-      if (!rootIds.includes(String(row.root_id)) || seen.has(String(row.file_path))) continue;
-      this.db.prepare("DELETE FROM trace_artifacts WHERE id = ?").run(String(row.id));
-    }
-  }
-
-  private pruneInactiveRoots(sessionRoots: RootSpec[], artifactRoots: RootSpec[]): void {
-    const active = new Set([...sessionRoots, ...artifactRoots].map((root) => root.id));
+  private pruneInactiveRoots(sessionRoots: RootSpec[]): void {
+    const active = new Set(sessionRoots.map((root) => root.id));
     const rootRows = this.db.prepare("SELECT id, kind FROM trace_roots").all() as DbRow[];
     for (const row of rootRows) {
       if (active.has(String(row.id))) continue;
@@ -1369,8 +1172,6 @@ export class TraceIndexer {
           if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
           this.db.prepare("DELETE FROM trace_sessions WHERE id = ?").run(sessionId);
         }
-      } else {
-        this.db.prepare("DELETE FROM trace_artifacts WHERE root_id = ?").run(rootId);
       }
       this.db.prepare("DELETE FROM trace_roots WHERE id = ?").run(rootId);
     }

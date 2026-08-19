@@ -12,7 +12,6 @@ const status: TraceStatus = {
   state: "idle",
   sessions: 2,
   events: 4,
-  artifacts: 1,
   bytes: 4_096,
   lastScanAt: 1_000,
   lastError: null,
@@ -175,7 +174,7 @@ describe("Traces app interactions", () => {
     expect(missing.getByRole("button", { name: /Back to sessions/ })).toBeTruthy();
     missing.unmount();
 
-    const collection = renderSlot(panel, { subPath: "artifacts" }, { rpc: commonRpc() as never });
+    const collection = renderSlot(panel, { subPath: "" }, { rpc: commonRpc() as never });
     await collection.findByRole("button", { name: /Inspect trace/ });
     expect(collection.queryByRole("button", { name: "Artifacts" })).toBeNull();
     expect(collection.queryByText("Plans, checkpoints, and context files")).toBeNull();

@@ -23,18 +23,3 @@ export function listSessionsInput(
     offset,
   };
 }
-
-export function listArtifactsInput(query: string, kind?: "decision" | "context", offset = 0, limit = PAGE_SIZE): {
-  query?: string;
-  kind?: "decision" | "context";
-  limit: number;
-  offset: number;
-} {
-  const normalizedQuery = query.trim();
-  return {
-    ...(normalizedQuery ? { query: normalizedQuery } : {}),
-    ...(kind ? { kind } : {}),
-    limit,
-    offset,
-  };
-}

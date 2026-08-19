@@ -5,12 +5,10 @@ const base: TraceSettingsSnapshot = {
   autoIndex: false,
   scanIntervalSeconds: "5",
   additionalSessionRoots: "",
-  workspaceRoots: "",
 };
 
 describe("trace settings scheduling", () => {
   it("scans a newly configured root even when auto-index is disabled", () => {
-    expect(shouldScanAfterSettingsChange({ ...base, workspaceRoots: "/tmp/workspace" }, base)).toBe(true);
     expect(shouldScanAfterSettingsChange({ ...base, additionalSessionRoots: "/tmp/sessions" }, base)).toBe(true);
   });
 

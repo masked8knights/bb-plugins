@@ -4,13 +4,11 @@ import { join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
-  defaultArtifactRoots,
   defaultSessionRoots,
   ensureSchema,
   expandConfiguredPaths,
   sourceLabel,
   TraceIndexer,
-  type ArtifactSummary,
   type RootSpec,
   type SessionSummary,
   type TraceSourceId,
@@ -22,7 +20,7 @@ const rootSchema = z.object({
   source: z.string(),
   label: z.string(),
   path: z.string(),
-  kind: z.enum(["session", "artifact"]),
+  kind: z.literal("session"),
   format: z.enum(["jsonl", "zstd"]).optional(),
   exists: z.boolean(),
   fileCount: z.number(),
@@ -75,23 +73,11 @@ const eventSchema = z.object({
   rawTruncated: z.boolean(),
 });
 
-const artifactSchema = z.object({
-  id: z.string(),
-  source: z.literal("artifacts"),
-  title: z.string(),
-  filePath: z.string(),
-  kind: z.enum(["decision", "context"]),
-  updatedAt: z.number(),
-  sizeBytes: z.number(),
-  preview: z.string(),
-});
-
 const statusSchema = z.object({
   localOnly: z.literal(true),
   state: z.enum(["idle", "indexing", "error"]),
   sessions: z.number(),
   events: z.number(),
-  artifacts: z.number(),
   bytes: z.number(),
   lastScanAt: z.number().nullable(),
   lastError: z.string().nullable(),
@@ -132,24 +118,6 @@ export const rpcContract = defineRpcContract({
       totalEvents: z.number(),
     }),
   },
-  listArtifacts: {
-    input: z
-      .object({
-        query: z.string().max(500).optional(),
-        kind: z.enum(["decision", "context"]).optional(),
-        limit: z.number().int().min(1).max(200).default(100),
-        offset: z.number().int().min(0).max(100_000).default(0),
-      })
-      .strict(),
-    output: z.object({
-      artifacts: z.array(artifactSchema),
-      total: z.number(),
-    }),
-  },
-  getArtifact: {
-    input: z.object({ id: z.string().min(1) }).strict(),
-    output: z.object({ artifact: artifactSchema.nullable() }),
-  },
   getEventRaw: {
     input: z.object({ id: z.string().min(1) }).strict(),
     output: z.object({ raw: z.string().nullable(), truncated: z.boolean() }),
@@ -163,7 +131,6 @@ export const rpcContract = defineRpcContract({
 export type TraceStatus = z.infer<typeof statusSchema>;
 export type TraceSession = z.infer<typeof sessionSchema>;
 export type TraceEvent = z.infer<typeof eventSchema>;
-export type TraceArtifact = z.infer<typeof artifactSchema>;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -185,14 +152,14 @@ function dedupeRoots(roots: RootSpec[]): RootSpec[] {
   });
 }
 
-function customRoots(raw: string, kind: "session" | "artifact"): RootSpec[] {
+function customRoots(raw: string): RootSpec[] {
   return expandConfiguredPaths(raw).map((path) => ({
-    id: "custom-" + kind + "-" + createHash("sha1").update(path).digest("hex").slice(0, 16),
-    source: kind === "session" ? "custom" : "artifacts",
-    label: kind === "session" ? "Custom session root" : "Custom workspace root",
+    id: "custom-session-" + createHash("sha1").update(path).digest("hex").slice(0, 16),
+    source: "custom",
+    label: "Custom session root",
     path,
-    kind,
-    ...(kind === "session" ? { format: "jsonl" as const } : {}),
+    kind: "session",
+    format: "jsonl",
   }));
 }
 
@@ -201,25 +168,19 @@ export default async function plugin(bb: BbPluginApi) {
     autoIndex: {
       type: "boolean",
       label: "Auto-index local traces",
-      description: "Keep the local session and artifact index fresh while BB is running.",
+      description: "Keep the local session index fresh while BB is running.",
       default: true,
     },
     scanIntervalSeconds: {
       type: "string",
       label: "Safety scan interval (seconds)",
-      description: "How often the local index performs a full discovery sweep. File changes trigger faster refreshes.",
+      description: "How often the local index checks session roots for new or changed files. File changes trigger faster refreshes.",
       default: "60",
     },
     additionalSessionRoots: {
       type: "string",
       label: "Additional session roots",
       description: "Optional absolute paths, one per line, containing JSONL sessions from another harness.",
-      default: "",
-    },
-    workspaceRoots: {
-      type: "string",
-      label: "Additional decision/workspace roots",
-      description: "Optional absolute paths, one per line. Decision, plan, handoff, and state files are indexed locally.",
       default: "",
     },
   });
@@ -241,12 +202,9 @@ export default async function plugin(bb: BbPluginApi) {
   let forceFingerprintAll = false;
   let watcherGeneration = 0;
 
-  async function roots(): Promise<{ sessions: RootSpec[]; artifacts: RootSpec[] }> {
+  async function roots(): Promise<RootSpec[]> {
     const current = await settings.get();
-    return {
-      sessions: dedupeRoots(defaultSessionRoots().concat(customRoots(current.additionalSessionRoots, "session"))),
-      artifacts: dedupeRoots(defaultArtifactRoots().concat(customRoots(current.workspaceRoots, "artifact"))),
-    };
+    return dedupeRoots(defaultSessionRoots().concat(customRoots(current.additionalSessionRoots)));
   }
 
   function publish(): void {
@@ -283,14 +241,12 @@ export default async function plugin(bb: BbPluginApi) {
     }, 250);
   }
 
-  function configureRootWatchers(configured: { sessions: RootSpec[]; artifacts: RootSpec[] }): void {
+  function configureRootWatchers(configured: RootSpec[]): void {
     if (!autoIndexEnabled) {
       closeRootWatchers();
       return;
     }
-    // Session roots are the high-frequency source. Artifact roots can include
-    // a whole workspace tree, so they stay on the slower safety sweep.
-    const rootsToWatch = configured.sessions;
+    const rootsToWatch = configured;
     const key = rootsToWatch
       .map((root) => root.kind + "\0" + root.path + "\0" + (existsSync(root.path) ? "1" : "0"))
       .sort()
@@ -329,7 +285,6 @@ export default async function plugin(bb: BbPluginApi) {
       state: indexing ? "indexing" : lastError ? "error" : "idle",
       sessions: stats.sessions,
       events: stats.events,
-      artifacts: stats.artifacts,
       bytes: stats.bytes,
       lastScanAt: stats.lastScanAt,
       lastError: stats.lastError,
@@ -364,7 +319,7 @@ export default async function plugin(bb: BbPluginApi) {
         dirtySessionPaths = new Set();
         forceFingerprintAll = false;
         scanDrainedWatcherState = true;
-        changed = (await indexer.scan(configured.sessions, configured.artifacts, signal, {
+        changed = (await indexer.scan(configured, signal, {
           forceFingerprintPaths: drainedDirtySessionPaths,
           forceFingerprintAll: drainedForceFingerprintAll,
           failedSessionPaths,
@@ -373,7 +328,7 @@ export default async function plugin(bb: BbPluginApi) {
         changed = changed || failedSessionPaths.size > 0;
         scanCompleted = !signal?.aborted;
         const after = indexer.stats(null, false, null);
-        changed = changed || before.sessions !== after.sessions || before.events !== after.events || before.artifacts !== after.artifacts || before.bytes !== after.bytes;
+        changed = changed || before.sessions !== after.sessions || before.events !== after.events || before.bytes !== after.bytes;
         if (!signal?.aborted) lastScanAt = Date.now();
       } catch (error) {
         restoreWatcherState();
@@ -397,12 +352,6 @@ export default async function plugin(bb: BbPluginApi) {
     getSession(input) {
       return indexer.getSession(input.id, input.limit, input.offset);
     },
-    listArtifacts(input) {
-      return indexer.listArtifacts(input);
-    },
-    getArtifact({ id }) {
-      return { artifact: indexer.getArtifact(id) };
-    },
     getEventRaw({ id }) {
       return indexer.rawEvent(id);
     },
@@ -423,7 +372,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   settings.onChange((next, previous) => {
     autoIndexEnabled = next.autoIndex;
-    const rootsChanged = next.additionalSessionRoots !== previous.additionalSessionRoots || next.workspaceRoots !== previous.workspaceRoots;
+    const rootsChanged = next.additionalSessionRoots !== previous.additionalSessionRoots;
     if (!next.autoIndex && !rootsChanged) scanRequested = false;
     else scanRequested = scanRequested || shouldScanAfterSettingsChange(next, previous);
     if (next.scanIntervalSeconds !== previous.scanIntervalSeconds) nextSafetyScanAt = 0;
@@ -442,7 +391,6 @@ export default async function plugin(bb: BbPluginApi) {
             configureRootWatchers(configured);
             if (current.autoIndex && Date.now() >= nextSafetyScanAt) {
               scanRequested = true;
-              forceFingerprintAll = true;
             }
             if (scanRequested) {
               scanRequested = false;
