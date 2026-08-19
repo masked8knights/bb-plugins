@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   definePluginApp,
   useBbNavigate,
@@ -191,6 +191,102 @@ function conversationContent(event: TraceEvent): string {
     return detail ? event.title + "  " + detail : event.title;
   }
   return shortText(event.summary || event.title, 360);
+}
+
+const ROLE_COLUMN_DEFAULT = 156;
+const ROLE_COLUMN_MIN = 128;
+const ROLE_COLUMN_MAX = 280;
+const STRUCTURED_FIELD_LIMIT = 80;
+const STRUCTURED_DEPTH_LIMIT = 8;
+const STRUCTURED_STRING_LIMIT = 24_000;
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonContainer(value: unknown): boolean {
+  return Array.isArray(value) || isJsonObject(value);
+}
+
+function structuredLabel(value: unknown): string {
+  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
+  if (isJsonObject(value)) {
+    const count = Object.keys(value).length;
+    return `${count} field${count === 1 ? "" : "s"}`;
+  }
+  return "value";
+}
+
+function parseStructuredPayload(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+function StructuredValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (depth > STRUCTURED_DEPTH_LIMIT) return <span className="text-[10px] text-muted-foreground">Nested payload omitted at this depth.</span>;
+  if (Array.isArray(value)) {
+    const visible = value.slice(0, STRUCTURED_FIELD_LIMIT);
+    return (
+      <div className="space-y-1">
+        {visible.map((item, index) => (
+          <div key={index} className="min-w-0 rounded-sm border border-border/60 bg-background/30 px-2 py-1.5">
+            <div className="mb-1 text-[10px] font-medium text-muted-foreground">[{index}]</div>
+            {isJsonContainer(item) ? (
+              <details open={depth <= 2}>
+                <summary className="cursor-pointer select-none text-[10px] text-muted-foreground">{structuredLabel(item)}</summary>
+                <div className="mt-1"><StructuredValue value={item} depth={depth + 1} /></div>
+              </details>
+            ) : <StructuredValue value={item} depth={depth + 1} />}
+          </div>
+        ))}
+        {value.length > visible.length ? <div className="text-[10px] text-muted-foreground">{value.length - visible.length} more items hidden. Use Raw to inspect the complete payload.</div> : null}
+      </div>
+    );
+  }
+  if (isJsonObject(value)) {
+    const entries = Object.entries(value);
+    const visible = entries.slice(0, STRUCTURED_FIELD_LIMIT);
+    return (
+      <dl className="divide-y divide-border/60 overflow-hidden rounded-sm border border-border/70">
+        {visible.map(([key, child]) => (
+          <div key={key} className="grid min-w-0 grid-cols-[minmax(7rem,0.34fr)_minmax(0,1fr)] gap-x-3 px-2 py-1.5">
+            <dt className="min-w-0 break-words font-mono text-[10px] text-muted-foreground" title={key}>{key}</dt>
+            <dd className="min-w-0 text-[11px] text-foreground">
+              {isJsonContainer(child) ? (
+                <details open={depth <= 2}>
+                  <summary className="cursor-pointer select-none text-[10px] text-muted-foreground hover:text-foreground">{structuredLabel(child)}</summary>
+                  <div className="mt-1"><StructuredValue value={child} depth={depth + 1} /></div>
+                </details>
+              ) : <StructuredValue value={child} depth={depth + 1} />}
+            </dd>
+          </div>
+        ))}
+        {entries.length > visible.length ? (
+          <div className="px-2 py-1.5 text-[10px] text-muted-foreground">{entries.length - visible.length} more fields hidden. Use Raw to inspect the complete payload.</div>
+        ) : null}
+      </dl>
+    );
+  }
+  if (typeof value === "string") {
+    const clipped = value.length > STRUCTURED_STRING_LIMIT;
+    return <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed text-foreground">{clipped ? value.slice(0, STRUCTURED_STRING_LIMIT) + "\n… text clipped; use Raw for the complete value." : value}</pre>;
+  }
+  if (value === null) return <span className="font-mono text-[10px] text-muted-foreground">null</span>;
+  if (typeof value === "boolean" || typeof value === "number") return <span className="font-mono text-[10px] text-foreground">{String(value)}</span>;
+  return <span className="text-[10px] text-muted-foreground">Unsupported value</span>;
+}
+
+function StructuredPayload({ event, raw }: { event: TraceEvent; raw: string | null }) {
+  const source = raw ?? event.rawJson;
+  return (
+    <div className="space-y-2">
+      {raw === null ? <div className="text-[10px] text-muted-foreground" role="status">Showing the indexed preview while the full payload loads…</div> : null}
+      <StructuredValue value={source ? parseStructuredPayload(source) : "No payload recorded."} />
+    </div>
+  );
 }
 
 function SessionRow({ session, onOpen }: { session: TraceSession; onOpen: () => void }) {
@@ -419,10 +515,54 @@ function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { event
 }
 
 function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showDuration: boolean; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
+  const [roleColumnWidth, setRoleColumnWidth] = useState(ROLE_COLUMN_DEFAULT);
+  const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
+  const setWidth = (value: number) => setRoleColumnWidth(Math.min(ROLE_COLUMN_MAX, Math.max(ROLE_COLUMN_MIN, value)));
+  const onResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragState.current = { startX: event.clientX, startWidth: roleColumnWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+  const onResizePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragState.current) setWidth(dragState.current.startWidth + event.clientX - dragState.current.startX);
+  };
+  const onResizePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragState.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const onResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft") setWidth(roleColumnWidth - 8);
+    else if (event.key === "ArrowRight") setWidth(roleColumnWidth + 8);
+    else if (event.key === "Home") setWidth(ROLE_COLUMN_MIN);
+    else if (event.key === "End") setWidth(ROLE_COLUMN_MAX);
+    else return;
+    event.preventDefault();
+  };
   if (!events.length) return <div className="flex min-h-40 flex-1 items-center justify-center text-sm text-muted-foreground">No events match this trajectory filter.</div>;
   let previousTurn: number | null = null;
   return (
-    <div className="min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
+    <div className="relative min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
+      <div className="relative sticky top-0 z-10 flex h-5 items-center border-b border-border bg-muted/40 text-[9px] uppercase tracking-wide text-muted-foreground">
+        <div className="shrink-0 border-r border-border px-2" style={{ width: roleColumnWidth }}>Role</div>
+        <div className="min-w-0 px-2">Event</div>
+        <div
+          role="separator"
+          aria-label="Resize role column"
+          aria-orientation="vertical"
+          aria-valuemin={ROLE_COLUMN_MIN}
+          aria-valuemax={ROLE_COLUMN_MAX}
+          aria-valuenow={roleColumnWidth}
+          aria-valuetext={`${roleColumnWidth}px`}
+          tabIndex={0}
+          className="absolute top-0 z-20 h-5 w-1 touch-none cursor-col-resize rounded-sm bg-border/70 hover:bg-primary focus-visible:bg-primary focus-visible:outline-none"
+          style={{ left: roleColumnWidth - 2 }}
+          onPointerDown={onResizePointerDown}
+          onPointerMove={onResizePointerMove}
+          onPointerUp={onResizePointerUp}
+          onPointerCancel={onResizePointerUp}
+          onKeyDown={onResizeKeyDown}
+        />
+      </div>
       {events.map((event) => {
         const turnStart = showTurns && event.turn !== null && event.turn !== previousTurn;
         previousTurn = event.turn;
@@ -433,13 +573,14 @@ function TrajectoryLedger({ events, selectedId, showDuration, showTurns, onSelec
               {event.turn !== null ? <span className={"pointer-events-none absolute inset-y-0 left-0 z-[1] w-px " + (selectedId === event.id ? "bg-primary" : "bg-primary/20")} aria-hidden="true" /> : null}
               <button
                 type="button"
-                className={"group grid min-h-[30px] w-full grid-cols-[118px_minmax(0,1fr)_auto] items-center gap-2 border-b border-border/80 px-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " + (selectedId === event.id ? "bg-primary/10" : "hover:bg-state-hover")}
+                className={"group grid min-h-[30px] w-full items-center gap-2 border-b border-border/80 px-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring " + (selectedId === event.id ? "bg-primary/10" : "hover:bg-state-hover")}
+                style={{ gridTemplateColumns: `${roleColumnWidth}px minmax(0, 1fr) auto` }}
                 onClick={() => onSelect(event)}
                 aria-pressed={selectedId === event.id}
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="w-8 shrink-0 text-right font-mono text-[9px] text-muted-foreground">#{event.line}</span>
-                  <span className={"inline-flex h-[19px] max-w-[76px] items-center truncate rounded-[3px] px-1.5 text-[10px] font-semibold tracking-[0.035em] " + eventTagClass(event)}>{eventKind(event)}</span>
+                  <span className={"inline-flex min-w-0 max-w-full items-center truncate rounded-[3px] px-1.5 text-[10px] font-semibold tracking-[0.035em] " + eventTagClass(event)} title={eventKind(event)}>{eventKind(event)}</span>
                 </div>
                 <div className={"min-w-0 truncate text-[11px] text-foreground " + (event.kind === "tool" ? "font-mono" : "")} title={event.summary || event.title} style={{ paddingLeft: Math.min(event.depth, 4) * 12 }}>
                   {conversationContent(event)}
@@ -478,9 +619,9 @@ function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: str
         {tabs.map((item) => <button key={item.id} type="button" className={(tab === item.id ? "border-b-2 border-primary text-primary " : "border-b-2 border-transparent text-muted-foreground ") + "h-8 shrink-0 px-2 text-[10px] font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"} onClick={() => setTab(item.id)}>{item.label}</button>)}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {tab === "summary" || tab === "preview" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || event.title}</div> : null}
-        {tab === "payload" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
-        {tab === "result" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || "No result payload recorded."}</div> : null}
+        {tab === "summary" ? <div className="space-y-3">{event.summary && event.summary !== event.title ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary}</div> : null}<StructuredPayload event={event} raw={raw} /></div> : null}
+        {tab === "preview" ? <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{event.summary || event.title}</div> : null}
+        {tab === "payload" || tab === "result" ? <StructuredPayload event={event} raw={raw} /> : null}
         {tab === "raw" ? <pre className="whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground">{raw ?? event.rawJson}</pre> : null}
         {tab === "timing" ? (
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[11px]">

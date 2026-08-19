@@ -160,6 +160,12 @@ describe("Traces app interactions", () => {
 
     await slot.findByLabelText("Trajectory event ledger");
     expect(calls[0]).toMatchObject({ id: session.id, limit: 100, offset: 0 });
+    const roleSeparator = slot.getByRole("separator", { name: "Resize role column" });
+    expect(roleSeparator.getAttribute("aria-valuenow")).toBe("156");
+    fireEvent.keyDown(roleSeparator, { key: "ArrowRight" });
+    expect(roleSeparator.getAttribute("aria-valuenow")).toBe("164");
+    fireEvent.keyDown(roleSeparator, { key: "Home" });
+    expect(roleSeparator.getAttribute("aria-valuenow")).toBe("128");
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(collectionCalls).toEqual([]);
     expect(slot.getAllByRole("button", { name: "Select USER event 1" }).length).toBeGreaterThan(0);
@@ -177,6 +183,29 @@ describe("Traces app interactions", () => {
     await slot.findByRole("button", { name: "Payload" });
     fireEvent.click(slot.getByRole("button", { name: "Result" }));
     expect(slot.getByRole("complementary", { name: "Selected event inspector" })).toBeTruthy();
+  });
+
+  it("renders structured JSON fields in the event inspector", async () => {
+    const systemEvent = event({ id: "event-system", line: 0, type: "session_meta", kind: "system", title: "Session Meta", summary: "Session Meta" });
+    const slot = renderSlot(panel, { subPath: "session/dsh%3Asession%2Fone" }, {
+      rpc: commonRpc({
+        getSession: () => ({ session, events: [systemEvent], totalEvents: 1 }),
+        getEventRaw: () => ({
+          raw: JSON.stringify({
+            timestamp: "2026-08-18T12:00:00.000Z",
+            type: "session_meta",
+            payload: { base_instructions: { text: "You are an agent with a readable system prompt." }, context_window: 258400 },
+          }),
+          truncated: false,
+        }),
+      }) as never,
+    });
+
+    await slot.findByLabelText("Trajectory event ledger");
+    fireEvent.click(slot.getByRole("button", { name: "Select SYSTEM event 0" }));
+    await slot.findByText("base_instructions");
+    expect(slot.getByText("You are an agent with a readable system prompt.")).toBeTruthy();
+    expect(slot.getByText("context_window")).toBeTruthy();
   });
 
   it("accepts decoded session IDs that contain path separators", async () => {
