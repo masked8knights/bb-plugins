@@ -2,10 +2,8 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
-  CliToolRecord,
   CliSourceRecord,
   CliSourceUpsertInput,
-  CliUpsertInput,
   JsonRecord,
   McpServerRecord,
   McpUpsertInput,
@@ -74,22 +72,6 @@ const mcpRowSchema = z
   })
   .strict();
 
-const cliRowSchema = z
-  .object({
-    id: z.string(),
-    name: z.string(),
-    description: z.string(),
-    command: z.string(),
-    args_template_json: z.string(),
-    input_schema_json: z.string(),
-    cwd: z.string().nullable(),
-    env_json: z.string(),
-    enabled: z.number(),
-    created_at: z.number(),
-    updated_at: z.number(),
-  })
-  .strict();
-
 const cliSourceRowSchema = z
   .object({
     id: z.string(),
@@ -127,27 +109,6 @@ function rowToMcp(row: unknown): McpServerRecord {
     args: parseJson(parsed.args_json, [], (value) => stringArraySchema.parse(value)),
     cwd: parsed.cwd,
     headers: parseJson(parsed.headers_json, {}, (value) => jsonRecordSchema.parse(value) as Record<string, string>),
-    env: parseJson(parsed.env_json, {}, (value) => jsonRecordSchema.parse(value) as Record<string, string>),
-    enabled: parsed.enabled === 1,
-    createdAt: parsed.created_at,
-    updatedAt: parsed.updated_at,
-  };
-}
-
-function rowToCli(row: unknown): CliToolRecord {
-  const parsed = cliRowSchema.parse(row);
-  return {
-    id: parsed.id,
-    name: parsed.name,
-    description: parsed.description,
-    command: parsed.command,
-    argsTemplate: parseJson(parsed.args_template_json, [], (value) => stringArraySchema.parse(value)),
-    inputSchema: parseJson(
-      parsed.input_schema_json,
-      { type: "object", properties: {}, additionalProperties: false },
-      (value) => jsonRecordSchema.parse(value),
-    ),
-    cwd: parsed.cwd,
     env: parseJson(parsed.env_json, {}, (value) => jsonRecordSchema.parse(value) as Record<string, string>),
     enabled: parsed.enabled === 1,
     createdAt: parsed.created_at,
@@ -256,66 +217,6 @@ export class ToolboxStore {
     return this.db.prepare("DELETE FROM toolbox_mcp_servers WHERE id = ?").run(id).changes > 0;
   }
 
-  listCliTools(): CliToolRecord[] {
-    return cliRowSchema
-      .array()
-      .parse(this.db.prepare("SELECT * FROM toolbox_cli_tools ORDER BY name COLLATE NOCASE").all())
-      .map(rowToCli);
-  }
-
-  getCliTool(id: string): CliToolRecord | null {
-    const row = this.db.prepare("SELECT * FROM toolbox_cli_tools WHERE id = ?").get(id);
-    return row === undefined ? null : rowToCli(row);
-  }
-
-  upsertCli(input: CliUpsertInput): CliToolRecord {
-    const now = Date.now();
-    const id = input.id?.trim() || `cli_${randomUUID()}`;
-    const name = nonEmpty(input.name, "CLI tool name");
-    const command = nonEmpty(input.command, "CLI command");
-    const argsTemplate = input.argsTemplate ?? [];
-    const inputSchema = input.inputSchema ?? { type: "object", properties: {}, additionalProperties: false };
-    if (inputSchema.type !== "object") throw new Error("CLI input schema must have type=object");
-    const existing = this.getCliTool(id);
-    const record = {
-      id,
-      name,
-      description: input.description.trim(),
-      command,
-      argsTemplate: JSON.stringify(argsTemplate),
-      inputSchema: JSON.stringify(inputSchema),
-      cwd: input.cwd?.trim() || null,
-      env: JSON.stringify(normalizeStringMap(input.env)),
-      enabled: input.enabled ? 1 : 0,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-    };
-    this.db
-      .prepare(
-        `INSERT INTO toolbox_cli_tools
-           (id, name, description, command, args_template_json, input_schema_json,
-            cwd, env_json, enabled, created_at, updated_at)
-         VALUES (@id, @name, @description, @command, @argsTemplate, @inputSchema,
-            @cwd, @env, @enabled, @createdAt, @updatedAt)
-         ON CONFLICT(id) DO UPDATE SET
-           name = excluded.name,
-           description = excluded.description,
-           command = excluded.command,
-           args_template_json = excluded.args_template_json,
-           input_schema_json = excluded.input_schema_json,
-           cwd = excluded.cwd,
-           env_json = excluded.env_json,
-           enabled = excluded.enabled,
-           updated_at = excluded.updated_at`,
-      )
-      .run(record);
-    return this.getCliTool(id)!;
-  }
-
-  deleteCli(id: string): boolean {
-    return this.db.prepare("DELETE FROM toolbox_cli_tools WHERE id = ?").run(id).changes > 0;
-  }
-
   listCliSources(): CliSourceRecord[] {
     return cliSourceRowSchema
       .array()
@@ -366,8 +267,4 @@ export class ToolboxStore {
   deleteCliSource(id: string): boolean {
     return this.db.prepare("DELETE FROM toolbox_cli_sources WHERE id = ?").run(id).changes > 0;
   }
-}
-
-export function defaultInputSchema(): JsonRecord {
-  return { type: "object", properties: {}, additionalProperties: false };
 }

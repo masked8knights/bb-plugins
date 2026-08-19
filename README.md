@@ -17,7 +17,7 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
   attach Excalidraw drawings in conversations.
 - [`bb-plugin-toolbox`](packages/bb-plugin-toolbox/) — manage MCP servers and
-  declared CLI operations through one provider-neutral agent bridge and
+  raw CLI sources through one provider-neutral agent bridge and
   aggregated MCP endpoint.
 - [`bb-plugin-comprehension`](packages/bb-plugin-comprehension/) — turn messages,
   selections, and threads into clear HTML, audio, and podcast explainers.

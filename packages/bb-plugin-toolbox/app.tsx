@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   definePluginApp,
   useRealtime,
@@ -15,8 +15,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 
-type Tab = "mcp" | "cli-source" | "cli";
+type Tab = "mcp" | "cli-source";
 
 interface McpFormState {
   id: string | null;
@@ -28,18 +35,6 @@ interface McpFormState {
   argsJson: string;
   cwd: string;
   headersJson: string;
-  envJson: string;
-  enabled: boolean;
-}
-
-interface CliFormState {
-  id: string | null;
-  name: string;
-  description: string;
-  command: string;
-  argsTemplateJson: string;
-  inputSchemaJson: string;
-  cwd: string;
   envJson: string;
   enabled: boolean;
 }
@@ -79,20 +74,6 @@ function emptyMcpForm(): McpFormState {
   };
 }
 
-function emptyCliForm(): CliFormState {
-  return {
-    id: null,
-    name: "",
-    description: "",
-    command: "",
-    argsTemplateJson: "[]",
-    inputSchemaJson: '{\n  "type": "object",\n  "properties": {},\n  "additionalProperties": false\n}',
-    cwd: "",
-    envJson: "",
-    enabled: true,
-  };
-}
-
 function emptyCliSourceForm(): CliSourceFormState {
   return {
     id: null,
@@ -127,6 +108,10 @@ function statusTone(status: string): string {
   if (status === "error") return "text-destructive";
   if (status === "disabled") return "text-muted-foreground";
   return "text-amber-700 dark:text-amber-300";
+}
+
+function toolLabel(tool: ToolboxSnapshot["tools"][number]): string {
+  return tool.sourceName !== tool.name ? `${tool.name} · ${tool.sourceName}` : tool.name;
 }
 
 function FormLabel({ children }: { children: ReactNode }) {
@@ -228,74 +213,6 @@ function McpForm({
   );
 }
 
-function CliForm({
-  form,
-  busy,
-  onChange,
-  onCancel,
-  onSubmit,
-}: {
-  form: CliFormState;
-  busy: boolean;
-  onChange: (next: CliFormState) => void;
-  onCancel: () => void;
-  onSubmit: (event: FormEvent) => void;
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{form.id ? "Edit CLI tool" : "Add CLI tool"}</CardTitle>
-        <CardDescription>Declare one safe, named operation. Toolbox validates inputs and never invokes a shell.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form className="grid gap-3" onSubmit={onSubmit}>
-          <div className="grid gap-3 md:grid-cols-2">
-            <FormLabel>
-              Name
-              <input className={fieldClass} value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="github_pr_view" required />
-            </FormLabel>
-            <FormLabel>
-              Command
-              <input className={fieldClass} value={form.command} onChange={(event) => onChange({ ...form, command: event.target.value })} placeholder="gh" required />
-            </FormLabel>
-          </div>
-          <FormLabel>
-            Description
-            <input className={fieldClass} value={form.description} onChange={(event) => onChange({ ...form, description: event.target.value })} placeholder="View a GitHub pull request" />
-          </FormLabel>
-          <div className="grid gap-3 md:grid-cols-2">
-            <FormLabel>
-              Arguments template JSON array
-              <textarea className={textareaClass} value={form.argsTemplateJson} onChange={(event) => onChange({ ...form, argsTemplateJson: event.target.value })} placeholder='["pr", "view", "{{number}}", "--json", "title"]' />
-            </FormLabel>
-            <FormLabel>
-              Input schema JSON object
-              <textarea className={`${textareaClass} min-h-32`} value={form.inputSchemaJson} onChange={(event) => onChange({ ...form, inputSchemaJson: event.target.value })} />
-            </FormLabel>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <FormLabel>
-              Working directory
-              <input className={fieldClass} value={form.cwd} onChange={(event) => onChange({ ...form, cwd: event.target.value })} placeholder="/path/to/project" />
-            </FormLabel>
-            <FormLabel>
-              Environment JSON object
-              <textarea className={textareaClass} value={form.envJson} onChange={(event) => onChange({ ...form, envJson: event.target.value })} placeholder='{"GH_TOKEN":"…"}' />
-            </FormLabel>
-          </div>
-          {form.id && form.envJson.trim() === "" ? <p className="text-xs text-muted-foreground">Leave environment blank to keep the existing values.</p> : null}
-          <div className="flex flex-wrap items-center gap-3">
-            <Toggle checked={form.enabled} onChange={(enabled) => onChange({ ...form, enabled })} />
-            <span className="flex-1" />
-            <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-            <Button type="submit" size="sm" disabled={busy}>{busy ? "Saving…" : "Save CLI tool"}</Button>
-          </div>
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
-
 function CliSourceForm({
   form,
   busy,
@@ -354,26 +271,181 @@ function CliSourceForm({
   );
 }
 
+type CatalogTool = ToolboxSnapshot["tools"][number];
+type McpSummary = ToolboxSnapshot["mcpServers"][number];
+type CliSourceSummary = ToolboxSnapshot["cliSources"][number];
+
+function statusIndicator(status: string) {
+  return (
+    <span className={`inline-flex items-center gap-2 text-xs ${statusTone(status)}`}>
+      <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${status === "ready" ? "bg-emerald-500" : status === "error" ? "bg-destructive" : status === "disabled" ? "bg-muted-foreground" : "bg-amber-500"}`} />
+      {status}
+    </span>
+  );
+}
+
+function EmptySourceState({ tab, onAdd }: { tab: Tab; onAdd: () => void }) {
+  const label = tab === "mcp" ? "MCP server" : "CLI source";
+  const description = tab === "mcp"
+    ? "Connect an HTTP or local MCP server."
+    : "Expose an executable directly so agents can use its own commands.";
+  return (
+    <div className="rounded-md border border-dashed border-border px-4 py-10 text-center">
+      <p className="text-sm font-medium text-foreground">No {label.toLowerCase()}s yet</p>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      <Button className="mt-4" variant="outline" size="sm" onClick={onAdd}>Add source</Button>
+    </div>
+  );
+}
+
+function SourceTable({
+  tab,
+  snapshot,
+  onAdd,
+  onEditMcp,
+  onRefreshMcp,
+  onDeleteMcp,
+  onEditCliSource,
+  onDeleteCliSource,
+}: {
+  tab: Tab;
+  snapshot: ToolboxSnapshot;
+  onAdd: () => void;
+  onEditMcp: (source: McpSummary) => void;
+  onRefreshMcp: (source: McpSummary) => void;
+  onDeleteMcp: (source: McpSummary) => void;
+  onEditCliSource: (source: CliSourceSummary) => void;
+  onDeleteCliSource: (source: CliSourceSummary) => void;
+}) {
+  if (tab === "mcp" && snapshot.mcpServers.length === 0) return <EmptySourceState tab={tab} onAdd={onAdd} />;
+  if (tab === "cli-source" && snapshot.cliSources.length === 0) return <EmptySourceState tab={tab} onAdd={onAdd} />;
+
+  return (
+    <div className="overflow-x-auto rounded-md border border-border">
+      <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+        <thead className="border-b border-border bg-muted/20 text-xs text-muted-foreground">
+          <tr>
+            <th className="px-4 py-3 font-medium">Source</th>
+            <th className="px-4 py-3 font-medium">{tab === "mcp" ? "Endpoint" : "Executable"}</th>
+            <th className="px-4 py-3 font-medium">Description</th>
+            <th className="px-4 py-3 font-medium">Status</th>
+            <th className="w-1 px-4 py-3"><span className="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border">
+          {tab === "mcp" ? snapshot.mcpServers.map((source) => (
+            <tr key={source.id} className="align-top hover:bg-state-hover/50">
+              <td className="px-4 py-3"><div className="font-medium text-foreground">{source.name}</div><div className="mt-1 text-xs text-muted-foreground">{source.transport === "http" ? "Streamable HTTP" : "Local stdio"}</div></td>
+              <td className="max-w-[18rem] px-4 py-3"><code className="block truncate text-xs text-muted-foreground" title={source.endpoint ?? source.command ?? ""}>{source.endpoint ?? source.command ?? "—"}</code></td>
+              <td className="max-w-[22rem] px-4 py-3 text-muted-foreground"><span className="block truncate" title={source.description}>{source.description || "—"}</span>{source.lastError ? <span className="mt-1 block truncate text-xs text-destructive" title={source.lastError}>{source.lastError}</span> : null}</td>
+              <td className="px-4 py-3">{statusIndicator(source.status)}</td>
+              <td className="px-4 py-3"><div className="flex justify-end gap-1"><Button variant="ghost" size="sm" onClick={() => onRefreshMcp(source)}>Refresh</Button><Button variant="ghost" size="sm" onClick={() => onEditMcp(source)}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => onDeleteMcp(source)}>Delete</Button></div></td>
+            </tr>
+          )) : null}
+          {tab === "cli-source" ? snapshot.cliSources.map((source) => (
+            <tr key={source.id} className="align-top hover:bg-state-hover/50">
+              <td className="px-4 py-3"><div className="font-medium text-foreground">{source.name}</div><div className="mt-1 text-xs text-muted-foreground">CLI source</div></td>
+              <td className="px-4 py-3"><code className="text-xs text-muted-foreground">{source.command}</code></td>
+              <td className="max-w-[28rem] px-4 py-3 text-muted-foreground"><span className="block truncate" title={source.description}>{source.description || "—"}</span></td>
+              <td className="px-4 py-3">{statusIndicator(source.status)}</td>
+              <td className="px-4 py-3"><div className="flex justify-end gap-1"><Button variant="ghost" size="sm" onClick={() => onEditCliSource(source)}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => onDeleteCliSource(source)}>Delete</Button></div></td>
+            </tr>
+          )) : null}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AvailableToolsSummary({ tools, onRun }: { tools: CatalogTool[]; onRun: (tool: CatalogTool) => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-y border-border py-4">
+      <div className="shrink-0">
+        <div className="text-sm font-medium text-foreground">Available tools</div>
+        <div className="text-xs text-muted-foreground">{tools.length === 0 ? "None enabled" : `${tools.length} enabled`}</div>
+      </div>
+      {tools.length ? <div className="flex min-w-0 flex-1 flex-wrap gap-2">{tools.map((tool) => <button key={tool.exposedName} className="rounded-md border border-border px-2.5 py-1 text-left text-xs text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" onClick={() => onRun(tool)}>{toolLabel(tool)}</button>)}</div> : <span className="flex-1 text-sm text-muted-foreground">Add a source to make a tool available to agents.</span>}
+      {tools.length ? <Button variant="outline" size="sm" onClick={() => onRun(tools[0]!)}>Run a tool</Button> : null}
+    </div>
+  );
+}
+
+function ToolRunnerDrawer({
+  open,
+  onOpenChange,
+  tool,
+  jsonArguments,
+  rawArguments,
+  result,
+  busy,
+  onJsonArgumentsChange,
+  onRawArgumentsChange,
+  onRun,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  tool: CatalogTool | null;
+  jsonArguments: string;
+  rawArguments: string;
+  result: string | null;
+  busy: boolean;
+  onJsonArgumentsChange: (value: string) => void;
+  onRawArgumentsChange: (value: string) => void;
+  onRun: () => void;
+}) {
+  const raw = tool?.sourceKind === "cli-source";
+  return (
+    <Drawer open={open} onOpenChange={onOpenChange}>
+      <DrawerContent>
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-5 pb-6 pt-2">
+          <div>
+            <DrawerTitle>Run {tool ? toolLabel(tool) : "a tool"}</DrawerTitle>
+            <DrawerDescription className="mt-1">{raw ? "Enter one direct CLI argument per line. Toolbox does not invoke a shell." : "Provide the JSON object required by this tool."}</DrawerDescription>
+          </div>
+          {tool ? (
+            <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); onRun(); }}>
+              <label className="flex flex-col gap-1 text-xs font-medium text-foreground">
+                {raw ? "Arguments" : "Arguments JSON"}
+                <textarea className={`${textareaClass} min-h-28`} value={raw ? rawArguments : jsonArguments} onChange={(event) => raw ? onRawArgumentsChange(event.target.value) : onJsonArgumentsChange(event.target.value)} placeholder={raw ? "--help\nsearch\nfrom:OpenAI\n--json" : "{}"} autoFocus />
+              </label>
+              <div className="flex items-center justify-end gap-2">
+                <DrawerClose asChild><Button type="button" variant="ghost">Cancel</Button></DrawerClose>
+                <Button type="submit" disabled={busy}>{busy ? "Running…" : "Run tool"}</Button>
+              </div>
+            </form>
+          ) : <p className="text-sm text-muted-foreground">Select a tool first.</p>}
+          {result ? <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-xs text-foreground">{result}</pre> : null}
+        </div>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
 function ToolboxPanel({}: PluginNavPanelProps) {
   const rpc = useRpc<typeof rpcContract>();
-  const [tab, setTab] = useState<Tab>("mcp");
+  const [tab, setTab] = useState<Tab | null>(null);
   const [snapshot, setSnapshot] = useState<ToolboxSnapshot | null>(null);
   const [mcpForm, setMcpForm] = useState<McpFormState | null>(null);
-  const [cliForm, setCliForm] = useState<CliFormState | null>(null);
   const [cliSourceForm, setCliSourceForm] = useState<CliSourceFormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTool, setSelectedTool] = useState("");
   const [toolArguments, setToolArguments] = useState("{}");
+  const [rawArguments, setRawArguments] = useState("");
   const [toolResult, setToolResult] = useState<string | null>(null);
+  const [toolDrawerOpen, setToolDrawerOpen] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+
+  const activeTab = tab ?? (snapshot?.cliSources.length ? "cli-source" : "mcp");
+  const activeTool = snapshot?.tools.find((tool) => tool.exposedName === selectedTool) ?? null;
 
   const load = useCallback(async () => {
     try {
       setError(null);
       const next = await rpc.call("snapshot");
       setSnapshot(next);
-      setSelectedTool((current) => current || next.tools[0]?.exposedName || "");
+      setSelectedTool((current) => next.tools.some((tool) => tool.exposedName === current) ? current : next.tools[0]?.exposedName || "");
     } catch (loadError) {
       setError(errorText(loadError));
     } finally {
@@ -388,6 +460,46 @@ function ToolboxPanel({}: PluginNavPanelProps) {
   useRealtime("toolbox-catalog-changed", () => {
     void load();
   });
+
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddMenuOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [addMenuOpen]);
+
+  const clearForms = () => {
+    setMcpForm(null);
+    setCliSourceForm(null);
+  };
+
+  const switchTab = (nextTab: Tab) => {
+    setTab(nextTab);
+    clearForms();
+  };
+
+  const startAdd = (nextTab: Tab) => {
+    setAddMenuOpen(false);
+    setTab(nextTab);
+    setError(null);
+    setMcpForm(nextTab === "mcp" ? emptyMcpForm() : null);
+    setCliSourceForm(nextTab === "cli-source" ? emptyCliSourceForm() : null);
+  };
+
+  const openToolRunner = (tool: CatalogTool) => {
+    setSelectedTool(tool.exposedName);
+    setToolResult(null);
+    if (tool.sourceKind === "cli-source") setRawArguments("");
+    else setToolArguments("{}");
+    setToolDrawerOpen(true);
+  };
+
+  const closeToolRunner = (open: boolean) => {
+    setToolDrawerOpen(open);
+    if (!open) setToolResult(null);
+  };
 
   const saveMcp = async (event: FormEvent) => {
     event.preventDefault();
@@ -410,32 +522,6 @@ function ToolboxPanel({}: PluginNavPanelProps) {
       });
       setSnapshot(next);
       setMcpForm(null);
-    } catch (saveError) {
-      setError(errorText(saveError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveCli = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!cliForm) return;
-    try {
-      setBusy(true);
-      setError(null);
-      const next = await rpc.call("saveCli", {
-        id: cliForm.id,
-        name: cliForm.name,
-        description: cliForm.description,
-        command: cliForm.command,
-        argsTemplate: parseJson<string[]>(cliForm.argsTemplateJson, "Arguments template"),
-        inputSchema: parseJson<Record<string, unknown>>(cliForm.inputSchemaJson, "Input schema"),
-        cwd: cliForm.cwd || null,
-        env: parseOptionalMap(cliForm.envJson, "Environment"),
-        enabled: cliForm.enabled,
-      });
-      setSnapshot(next);
-      setCliForm(null);
     } catch (saveError) {
       setError(errorText(saveError));
     } finally {
@@ -468,12 +554,14 @@ function ToolboxPanel({}: PluginNavPanelProps) {
   };
 
   const invoke = async () => {
-    if (!selectedTool) return;
+    if (!selectedTool || !activeTool) return;
     try {
       setBusy(true);
       setToolResult(null);
-      const args = parseJson<Record<string, unknown>>(toolArguments, "Tool arguments");
-      const result = await rpc.call("invoke", { toolName: selectedTool, arguments: args });
+      const argumentsValue = activeTool.sourceKind === "cli-source"
+        ? { argv: rawArguments.split(/\r?\n/gu).filter((argument) => argument.trim().length > 0) }
+        : parseJson<Record<string, unknown>>(toolArguments, "Tool arguments");
+      const result = await rpc.call("invoke", { toolName: selectedTool, arguments: argumentsValue });
       setToolResult(result.text);
     } catch (invokeError) {
       setToolResult(errorText(invokeError));
@@ -482,107 +570,96 @@ function ToolboxPanel({}: PluginNavPanelProps) {
     }
   };
 
-  const toolsBySource = useMemo(() => {
-    const groups = new Map<string, number>();
-    for (const tool of snapshot?.tools ?? []) groups.set(tool.sourceName, (groups.get(tool.sourceName) ?? 0) + 1);
-    return groups;
-  }, [snapshot]);
+  const refreshMcp = async (source: McpSummary) => {
+    try {
+      setBusy(true);
+      setError(null);
+      const next = await rpc.call("refreshMcp", { id: source.id });
+      setSnapshot(next);
+    } catch (refreshError) {
+      setError(errorText(refreshError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteMcp = async (source: McpSummary) => {
+    if (!window.confirm(`Delete ${source.name}?`)) return;
+    try {
+      setBusy(true);
+      const next = await rpc.call("deleteMcp", { id: source.id });
+      setSnapshot(next);
+    } catch (deleteError) {
+      setError(errorText(deleteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteCliSource = async (source: CliSourceSummary) => {
+    if (!window.confirm(`Delete ${source.name}?`)) return;
+    try {
+      setBusy(true);
+      const next = await rpc.call("deleteCliSource", { id: source.id });
+      setSnapshot(next);
+    } catch (deleteError) {
+      setError(errorText(deleteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const editMcp = (source: McpSummary) => {
+    setTab("mcp");
+    setCliSourceForm(null);
+    setMcpForm({ ...emptyMcpForm(), id: source.id, name: source.name, description: source.description, transport: source.transport, url: source.endpoint ?? "", command: source.command ?? "", argsJson: JSON.stringify(source.args, null, 2), cwd: source.cwd ?? "", enabled: source.enabled, headersJson: source.hasHeaders ? "// existing headers kept when blank" : "", envJson: source.hasEnv ? "// existing environment kept when blank" : "" });
+  };
+
+  const editCliSource = (source: CliSourceSummary) => {
+    setTab("cli-source");
+    setMcpForm(null);
+    setCliSourceForm({ ...emptyCliSourceForm(), id: source.id, name: source.name, description: source.description, command: source.command, cwd: source.cwd ?? "", enabled: source.enabled, envJson: source.hasEnv ? "// existing environment kept when blank" : "" });
+  };
 
   if (loading && !snapshot) return <div className="p-5 text-sm text-muted-foreground">Loading Toolbox…</div>;
+  if (!snapshot) return <div className="grid gap-3 p-5 text-sm text-muted-foreground"><p>{error ?? "Toolbox could not be loaded."}</p><Button className="w-fit" variant="outline" size="sm" onClick={() => void load()}>Retry</Button></div>;
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto bg-background p-4 text-foreground md:p-5">
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-lg font-semibold">Toolbox</h1>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">One repository for MCP servers, raw CLI sources, and optional typed operations. BB agents use the same catalog through native tools.</p>
+    <>
+      <div className="h-full min-h-0 overflow-y-auto bg-background p-4 text-foreground md:p-5">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-lg font-semibold">Toolbox</h1>
+              <p className="mt-1 max-w-2xl text-sm text-muted-foreground">Connect servers and make command-line tools available to BB agents.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Button size="sm" aria-expanded={addMenuOpen} aria-haspopup="menu" onClick={() => setAddMenuOpen((open) => !open)}>Add source <span aria-hidden="true">⌄</span></Button>
+                {addMenuOpen ? <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" role="menu">
+                  <button className="w-full rounded-md p-3 text-left hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" role="menuitem" onClick={() => startAdd("mcp")}><span className="block text-sm font-medium">MCP server</span><span className="mt-1 block text-xs text-muted-foreground">Connect an HTTP or local server.</span></button>
+                  <button className="w-full rounded-md p-3 text-left hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" role="menuitem" onClick={() => startAdd("cli-source")}><span className="block text-sm font-medium">CLI source</span><span className="mt-1 block text-xs text-muted-foreground">Expose an executable and its own commands.</span></button>
+                </div> : null}
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => void load()}>Refresh</Button>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => void load()}>Refresh</Button>
-            <Button size="sm" onClick={() => { setTab("mcp"); setMcpForm(emptyMcpForm()); setCliForm(null); }}>Add MCP</Button>
-            <Button variant="outline" size="sm" onClick={() => { setTab("cli"); setCliForm(emptyCliForm()); setMcpForm(null); }}>Add CLI</Button>
-            <Button variant="outline" size="sm" onClick={() => { setTab("cli-source"); setCliSourceForm(emptyCliSourceForm()); setMcpForm(null); setCliForm(null); }}>Add CLI source</Button>
+
+          {error ? <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</div> : null}
+
+          <div role="tablist" aria-label="Toolbox sources" className="flex gap-1 border-b border-border">
+            {([ ["mcp", "MCP servers"], ["cli-source", "CLI sources"] ] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={activeTab === id} className={`${buttonClass} rounded-b-none ${activeTab === id ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => switchTab(id)}>{label}</button>)}
           </div>
+
+          {activeTab === "mcp" && mcpForm ? <McpForm form={mcpForm} busy={busy} onChange={setMcpForm} onCancel={() => setMcpForm(null)} onSubmit={(event) => void saveMcp(event)} /> : null}
+          {activeTab === "cli-source" && cliSourceForm ? <CliSourceForm form={cliSourceForm} busy={busy} onChange={setCliSourceForm} onCancel={() => setCliSourceForm(null)} onSubmit={(event) => void saveCliSource(event)} /> : null}
+
+          <SourceTable tab={activeTab} snapshot={snapshot} onAdd={() => setAddMenuOpen(true)} onEditMcp={editMcp} onRefreshMcp={(source) => void refreshMcp(source)} onDeleteMcp={(source) => void deleteMcp(source)} onEditCliSource={editCliSource} onDeleteCliSource={(source) => void deleteCliSource(source)} />
+          <AvailableToolsSummary tools={snapshot.tools} onRun={openToolRunner} />
         </div>
-
-        {error ? <div className="border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error}</div> : null}
-
-        <Card>
-          <CardContent className="flex flex-col gap-2 py-4 text-xs text-muted-foreground">
-            <div><span className="font-medium text-foreground">MCP proxy:</span> <code>{snapshot?.mcpEndpoint}</code></div>
-            <div>Authenticate clients with <code>bb plugin token toolbox</code>. The proxy exposes tools from enabled MCP and CLI entries.</div>
-          </CardContent>
-        </Card>
-
-        <div className="flex gap-1 border-b border-border">
-          <button className={`${buttonClass} rounded-b-none ${tab === "mcp" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("mcp")}>MCP servers ({snapshot?.mcpServers.length ?? 0})</button>
-          <button className={`${buttonClass} rounded-b-none ${tab === "cli" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("cli")}>CLI tools ({snapshot?.cliTools.length ?? 0})</button>
-          <button className={`${buttonClass} rounded-b-none ${tab === "cli-source" ? "border-b-2 border-foreground text-foreground" : "text-muted-foreground"}`} onClick={() => setTab("cli-source")}>CLI sources ({snapshot?.cliSources.length ?? 0})</button>
-        </div>
-
-        {tab === "mcp" && mcpForm ? <McpForm form={mcpForm} busy={busy} onChange={setMcpForm} onCancel={() => setMcpForm(null)} onSubmit={(event) => void saveMcp(event)} /> : null}
-        {tab === "cli" && cliForm ? <CliForm form={cliForm} busy={busy} onChange={setCliForm} onCancel={() => setCliForm(null)} onSubmit={(event) => void saveCli(event)} /> : null}
-        {tab === "cli-source" && cliSourceForm ? <CliSourceForm form={cliSourceForm} busy={busy} onChange={setCliSourceForm} onCancel={() => setCliSourceForm(null)} onSubmit={(event) => void saveCliSource(event)} /> : null}
-
-        {tab === "mcp" ? (
-          <div className="grid gap-3">
-            {snapshot?.mcpServers.length ? snapshot.mcpServers.map((source) => (
-              <Card key={source.id}>
-                <CardContent className="flex flex-wrap items-start gap-3 py-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{source.name}</span><span className={`text-xs ${statusTone(source.status)}`}>{source.status}</span></div>
-                    <p className="mt-1 text-sm text-muted-foreground">{source.description || (source.transport === "http" ? source.endpoint : source.command)}</p>
-                    <p className="mt-2 text-xs text-muted-foreground">{source.toolCount} tools · {source.transport === "http" ? source.endpoint : `${source.command}${source.cwd ? ` · ${source.cwd}` : ""}`}{source.hasHeaders ? " · headers configured" : ""}{source.hasEnv ? " · environment configured" : ""}</p>
-                    {source.lastError ? <p className="mt-2 text-xs text-destructive">{source.lastError}</p> : null}
-                  </div>
-              <div className="flex gap-1"><Button variant="ghost" size="sm" onClick={() => void rpc.call("refreshMcp", { id: source.id }).then(setSnapshot).catch((refreshError) => setError(errorText(refreshError)))}>Refresh</Button><Button variant="ghost" size="sm" onClick={() => { setMcpForm({ ...emptyMcpForm(), id: source.id, name: source.name, description: source.description, transport: source.transport, url: source.endpoint ?? "", command: source.command ?? "", argsJson: JSON.stringify(source.args, null, 2), cwd: source.cwd ?? "", enabled: source.enabled, headersJson: source.hasHeaders ? "// existing headers kept when blank" : "", envJson: source.hasEnv ? "// existing environment kept when blank" : "" }); setCliForm(null); }}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => { if (window.confirm(`Delete ${source.name}?`)) void rpc.call("deleteMcp", { id: source.id }).then(setSnapshot).catch((deleteError) => setError(errorText(deleteError))); }}>Delete</Button></div>
-                </CardContent>
-              </Card>
-            )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No MCP servers yet. Add a URL or a local stdio command.</CardContent></Card>}
-          </div>
-        ) : tab === "cli" ? (
-          <div className="grid gap-3">
-            {snapshot?.cliTools.length ? snapshot.cliTools.map((tool) => (
-              <Card key={tool.id}>
-                <CardContent className="flex flex-wrap items-start gap-3 py-4">
-                  <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{tool.name}</span><span className={`text-xs ${statusTone(tool.status)}`}>{tool.status}</span></div><p className="mt-1 text-sm text-muted-foreground">{tool.description || tool.command}</p><p className="mt-2 font-mono text-xs text-muted-foreground">{tool.command} {tool.argsTemplate.join(" ")}{tool.cwd ? ` · ${tool.cwd}` : ""}{tool.hasEnv ? " · environment configured" : ""}</p></div>
-                  <div className="flex gap-1"><Button variant="ghost" size="sm" onClick={() => { setCliForm({ ...emptyCliForm(), id: tool.id, name: tool.name, description: tool.description, command: tool.command, argsTemplateJson: JSON.stringify(tool.argsTemplate, null, 2), inputSchemaJson: JSON.stringify(tool.inputSchema, null, 2), cwd: tool.cwd ?? "", enabled: tool.enabled, envJson: tool.hasEnv ? "// existing environment kept when blank" : "" }); setMcpForm(null); }}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => { if (window.confirm(`Delete ${tool.name}?`)) void rpc.call("deleteCli", { id: tool.id }).then(setSnapshot).catch((deleteError) => setError(errorText(deleteError))); }}>Delete</Button></div>
-                </CardContent>
-              </Card>
-            )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No CLI tools yet. Define a named operation with a JSON input schema.</CardContent></Card>}
-          </div>
-        ) : (
-          <div className="grid gap-3">
-            {snapshot?.cliSources.length ? snapshot.cliSources.map((source) => (
-              <Card key={source.id}>
-                <CardContent className="flex flex-wrap items-start gap-3 py-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{source.name}</span><span className={`text-xs ${statusTone(source.status)}`}>{source.status}</span></div>
-                    <p className="mt-1 text-sm text-muted-foreground">{source.description || source.command}</p>
-                    <p className="mt-2 font-mono text-xs text-muted-foreground">{source.command}{source.cwd ? ` · ${source.cwd}` : ""}{source.hasEnv ? " · environment configured" : ""}</p>
-                  </div>
-                  <div className="flex gap-1"><Button variant="ghost" size="sm" onClick={() => { setCliSourceForm({ ...emptyCliSourceForm(), id: source.id, name: source.name, description: source.description, command: source.command, cwd: source.cwd ?? "", enabled: source.enabled, envJson: source.hasEnv ? "// existing environment kept when blank" : "" }); setMcpForm(null); setCliForm(null); }}>Edit</Button><Button variant="ghost" size="sm" className="text-destructive" onClick={() => { if (window.confirm(`Delete ${source.name}?`)) void rpc.call("deleteCliSource", { id: source.id }).then(setSnapshot).catch((deleteError) => setError(errorText(deleteError))); }}>Delete</Button></div>
-                </CardContent>
-              </Card>
-            )) : <Card><CardContent className="py-8 text-center text-sm text-muted-foreground">No raw CLI sources yet. Add an executable and agents can use its own subcommands.</CardContent></Card>}
-          </div>
-        )}
-
-        <Card>
-          <CardHeader><CardTitle>Exposed catalog</CardTitle><CardDescription>{snapshot?.tools.length ?? 0} enabled tools are available to the native agent bridge and MCP proxy.</CardDescription></CardHeader>
-          <CardContent className="grid gap-3">
-            {snapshot?.tools.length ? <div className="divide-y divide-border border-y border-border">{snapshot.tools.map((tool) => <button key={tool.exposedName} className="flex w-full items-start gap-3 py-3 text-left hover:bg-state-hover" onClick={() => setSelectedTool(tool.exposedName)}><span className="min-w-0 flex-1"><span className="block truncate font-mono text-xs text-foreground">{tool.exposedName}</span><span className="mt-1 block text-xs text-muted-foreground">{tool.description}</span></span><span className="shrink-0 text-xs text-muted-foreground">{tool.sourceName}</span></button>)}</div> : <p className="text-sm text-muted-foreground">Add a source to populate the catalog.</p>}
-            <p className="text-xs text-muted-foreground">{[...toolsBySource.entries()].map(([name, count]) => `${name}: ${count}`).join(" · ")}</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader><CardTitle>Try a tool</CardTitle><CardDescription>Run one catalog entry from the server and inspect its result.</CardDescription></CardHeader>
-          <CardContent className="grid gap-3"><select className={fieldClass} value={selectedTool} onChange={(event) => setSelectedTool(event.target.value)}><option value="">Choose a tool</option>{snapshot?.tools.map((tool) => <option key={tool.exposedName} value={tool.exposedName}>{tool.exposedName}</option>)}</select><textarea className={`${textareaClass} min-h-24`} value={toolArguments} onChange={(event) => setToolArguments(event.target.value)} /><div><Button size="sm" disabled={!selectedTool || busy} onClick={() => void invoke()}>{busy ? "Running…" : "Run tool"}</Button></div>{toolResult ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-xs text-foreground">{toolResult}</pre> : null}</CardContent>
-        </Card>
       </div>
-    </div>
+      <ToolRunnerDrawer open={toolDrawerOpen} onOpenChange={closeToolRunner} tool={activeTool} jsonArguments={toolArguments} rawArguments={rawArguments} result={toolResult} busy={busy} onJsonArgumentsChange={setToolArguments} onRawArgumentsChange={setRawArguments} onRun={() => void invoke()} />
+    </>
   );
 }
 

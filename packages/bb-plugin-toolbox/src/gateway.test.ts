@@ -45,7 +45,6 @@ describe("MCP gateway", () => {
     };
     const store = {
       listMcpServers: () => [source],
-      listCliTools: () => [],
       listCliSources: () => [],
     } as unknown as ToolboxStore;
     const gateway = new McpGateway(store, log, options);
@@ -68,7 +67,6 @@ describe("MCP gateway", () => {
     };
     const store = {
       listMcpServers: () => [],
-      listCliTools: () => [],
       listCliSources: () => [source],
     } as unknown as ToolboxStore;
     const gateway = new McpGateway(store, log, options);

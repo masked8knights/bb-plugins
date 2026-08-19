@@ -1,8 +1,7 @@
 # bb-plugin-toolbox
 
-Toolbox keeps MCP servers, raw CLI sources, and optional typed CLI operations in
-one repository. Enabled entries appear in a provider-neutral BB agent bridge and
-an aggregated MCP endpoint.
+Toolbox keeps MCP servers and raw CLI sources in one repository. Enabled entries
+appear in a provider-neutral BB agent bridge and an aggregated MCP endpoint.
 
 ## Install
 
@@ -65,45 +64,17 @@ The native agent tool is `toolbox_run_cli`:
 Use `toolbox_list_sources` first to find the source id. The same source appears
 as one `argv`-based tool in the MCP proxy.
 
-## Curated CLI tools
-
-Curated CLI entries are still useful when a stable, typed operation is better
-than exposing a whole executable. Each entry includes:
-
-- a binary, such as `gh` or `jq`;
-- a JSON input schema;
-- an argument template;
-- an optional working directory and environment.
-
-Templates use `{{name}}` for one value, `{{json:name}}` for JSON encoding, and
-`{{args:name}}` to expand a string array into multiple arguments. For example:
-
-```json
-[
-  "pr",
-  "view",
-  "{{number}}",
-  "--json",
-  "title"
-]
-```
-
-Toolbox validates the input with the declared JSON schema and starts the binary
-without a shell. It enforces the configured timeout and output limit.
-
-Curated CLI operation names are exposed as `cli_<entry-id>__<entry-name>_<stable-suffix>`.
 Raw CLI sources appear as one `argv`-based catalog tool per source.
 
 ## Agent tools
 
-BB agents receive native tools for both use and administration:
+BB agents receive native tools for use and administration:
 
 - `toolbox_list_tools` — list the current catalog and schemas;
 - `toolbox_run_cli` — run a raw CLI source with direct argv arguments.
-- `toolbox_call` — call one exposed MCP or CLI tool.
+- `toolbox_call` — call one exposed MCP tool or raw CLI source.
 - `toolbox_list_sources` — list configured sources without credential values;
 - `toolbox_save_mcp` / `toolbox_delete_mcp` / `toolbox_refresh_mcp` — manage MCP servers;
-- `toolbox_save_cli` / `toolbox_delete_cli` — manage curated CLI operations.
 - `toolbox_save_cli_source` / `toolbox_delete_cli_source` — manage raw CLI sources.
 
 This bridge gives providers the same catalog even when they do not have native
@@ -120,8 +91,6 @@ bb toolbox call <tool-name> '{"number":42}'
 bb toolbox refresh <mcp-source-id> --json
 bb toolbox save-mcp '{"name":"GitHub MCP","transport":"http","url":"https://example.com/mcp"}'
 bb toolbox delete-mcp <mcp-source-id>
-bb toolbox save-cli '{"name":"github_pr_view","command":"gh","argsTemplate":["pr","view","{{number}}"]}'
-bb toolbox delete-cli <cli-tool-id>
 bb toolbox save-cli-source '{"name":"Bird","command":"bird","description":"Twitter CLI"}'
 bb toolbox delete-cli-source <cli-source-id>
 ```
@@ -129,10 +98,10 @@ bb toolbox delete-cli-source <cli-source-id>
 The command-line administration surface also supports `save-cli-source` and
 `delete-cli-source` for raw executables.
 
-`save-mcp` and `save-cli` upsert when an `id` is supplied, and otherwise create
-new entries. JSON inputs may include `headers` and `env`, but prefer the UI or
-an explicitly supplied user credential for secrets; command arguments can be
-recorded by the invoking shell or agent host.
+`save-mcp` and `save-cli-source` upsert when an `id` is supplied, and otherwise
+create new entries. JSON inputs may include `headers` and `env`, but prefer the
+UI or an explicitly supplied user credential for secrets; command arguments can
+be recorded by the invoking shell or agent host.
 
 ## Security notes
 

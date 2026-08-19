@@ -16,7 +16,7 @@ function makeStore() {
 }
 
 describe("ToolboxStore", () => {
-  it("round-trips MCP and CLI definitions", () => {
+  it("round-trips MCP and CLI source definitions", () => {
     const { db, store } = makeStore();
     const mcp = store.upsertMcp({
       name: "Docs MCP",
@@ -26,16 +26,6 @@ describe("ToolboxStore", () => {
       args: ["server.mjs"],
       cwd: "/tmp/docs",
       env: { API_KEY: "secret" },
-      enabled: true,
-    });
-    const cli = store.upsertCli({
-      name: "pr_view",
-      description: "View a pull request",
-      command: "gh",
-      argsTemplate: ["pr", "view", "{{number}}"],
-      inputSchema: { type: "object", properties: { number: { type: "integer" } } },
-      cwd: "/tmp/repo",
-      env: { GH_TOKEN: "secret" },
       enabled: true,
     });
     const source = store.upsertCliSource({
@@ -53,11 +43,6 @@ describe("ToolboxStore", () => {
       args: ["server.mjs"],
       env: { API_KEY: "secret" },
     });
-    expect(store.getCliTool(cli.id)).toMatchObject({
-      name: "pr_view",
-      argsTemplate: ["pr", "view", "{{number}}"],
-      inputSchema: expect.objectContaining({ type: "object" }),
-    });
     expect(store.getCliSource(source.id)).toMatchObject({
       name: "bird",
       command: "bird",
@@ -65,31 +50,25 @@ describe("ToolboxStore", () => {
     });
 
     store.deleteMcp(mcp.id);
-    store.deleteCli(cli.id);
     store.deleteCliSource(source.id);
     expect(store.listMcpServers()).toHaveLength(0);
-    expect(store.listCliTools()).toHaveLength(0);
     expect(store.listCliSources()).toHaveLength(0);
     db.close();
   });
 
-  it("updates an existing record without changing its id", () => {
+  it("updates a CLI source without changing its id", () => {
     const { db, store } = makeStore();
-    const created = store.upsertCli({
+    const created = store.upsertCliSource({
       name: "echo",
       description: "Echo text",
       command: "printf",
-      argsTemplate: ["{{text}}"],
-      inputSchema: { type: "object" },
       enabled: true,
     });
-    const updated = store.upsertCli({
+    const updated = store.upsertCliSource({
       id: created.id,
       name: "echo_text",
       description: "Echo text twice",
       command: "printf",
-      argsTemplate: ["{{text}}", "{{text}}"],
-      inputSchema: { type: "object" },
       enabled: false,
     });
     expect(updated.id).toBe(created.id);
