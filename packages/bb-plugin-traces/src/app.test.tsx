@@ -258,11 +258,11 @@ describe("Traces app interactions", () => {
     await slot.findByLabelText("Trajectory event ledger");
     const filterTrigger = slot.getByRole("button", { name: "Event filters" });
     expect(filterTrigger.className).toContain("text-muted-foreground");
-    expect(filterTrigger.className).not.toContain("border-border");
+    expect(filterTrigger.className).toContain("border-border");
     fireEvent.click(filterTrigger);
     fireEvent.click(slot.getByRole("checkbox", { name: "Errors only" }));
     await waitFor(() => expect(calls.some((input) => input.errorFilter === "only")).toBe(true));
-    expect(slot.getByRole("button", { name: "Event filters" }).className).toContain("bg-primary/15");
+    expect(slot.getByRole("button", { name: "Event filters" }).className).toContain("bg-primary/10");
     expect(slot.queryByRole("button", { name: "Select USER event 1" })).toBeNull();
     expect(slot.getAllByRole("button", { name: "Select TOOL event 4" }).length).toBeGreaterThan(0);
 

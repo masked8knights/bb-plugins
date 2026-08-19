@@ -18,8 +18,8 @@ import { getSessionInput, listSessionsInput, type EventFilters, type SessionList
 
 const buttonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
-const quietButtonClass =
-  "inline-flex min-h-8 items-center justify-center rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
+const toolbarButtonClass =
+  "inline-flex h-7 items-center justify-center rounded-md border border-border bg-transparent px-2 text-xs font-medium shadow-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const inputClass =
   "h-8 w-full rounded-md border border-border bg-background px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring";
 type TraceRoute =
@@ -452,11 +452,11 @@ function SessionRow({ session, onOpen }: { session: TraceSession; onOpen: () => 
 
 function FilterPopover({ label, activeCount, children }: { label: string; activeCount: number; children: ReactNode }) {
   const triggerStateClass = activeCount > 0
-    ? "bg-primary/15 text-primary"
+    ? "border-primary/40 bg-primary/10 text-primary hover:bg-primary/15"
     : "text-muted-foreground hover:bg-state-hover hover:text-foreground";
   return (
     <details className="relative z-20 shrink-0">
-      <summary role="button" aria-label={label} className={`${quietButtonClass} cursor-pointer list-none gap-1.5 ${triggerStateClass} [&::-webkit-details-marker]:hidden`}>
+      <summary role="button" aria-label={label} className={`${toolbarButtonClass} cursor-pointer list-none gap-1.5 ${triggerStateClass} [&::-webkit-details-marker]:hidden`}>
         {label}
         {activeCount > 0 ? <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">{activeCount}</span> : null}
       </summary>
