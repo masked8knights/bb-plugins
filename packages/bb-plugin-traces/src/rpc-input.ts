@@ -1,3 +1,5 @@
+import type { TraceEventCategory } from "./indexer";
+
 const PAGE_SIZE = 100;
 
 export type SessionListFilters = {
@@ -8,7 +10,7 @@ export type SessionListFilters = {
 
 export type EventFilters = {
   query?: string;
-  categories?: string[];
+  categories?: TraceEventCategory[];
   toolTypes?: string[];
   errorFilter?: "all" | "only";
 };
@@ -47,7 +49,7 @@ export function listSessionsInput(
 export function getSessionInput(id: string, limit: number, offset: number, filters: EventFilters = {}): {
   id: string;
   query?: string;
-  categories?: string[];
+  categories?: TraceEventCategory[];
   toolTypes?: string[];
   errorFilter?: "all" | "only";
   limit: number;

@@ -1,28 +1,44 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   definePluginApp,
   useBbNavigate,
   useRpc,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
-import type { rpcContract, TraceEvent, TraceSession, TraceStatus } from "./server";
-import { listSessionsInput } from "./src/rpc-input";
+import type { rpcContract, TraceEvent, TraceSession, TraceSessionFacets, TraceStatus } from "./server";
+import type { TraceEventCategory } from "./src/indexer";
+import { getSessionInput, listSessionsInput, type EventFilters, type SessionListFilters } from "./src/rpc-input";
 
 const buttonClass =
   "inline-flex min-h-8 items-center justify-center rounded-md border border-border px-3 text-sm font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const inputClass =
   "h-8 w-full rounded-md border border-border bg-background px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring";
-const toolbarButtonClass =
-  "inline-flex h-5 items-center gap-1 rounded-[3px] px-1.5 text-[11px] text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
-const toolbarButtonActiveClass = toolbarButtonClass + " bg-state-hover text-foreground";
-
 type TraceRoute =
   | { kind: "sessions" }
   | { kind: "session"; id: string };
 
-type SessionSort = "updated" | "started" | "events" | "duration";
+type SessionSort = "updated" | "started" | "events" | "duration" | "errors";
 type InspectorTab = "json" | "raw" | "timing";
 type TimelineLane = "input" | "model" | "tools";
+type ErrorFilter = "all" | "only";
+
+type TrajectoryFilters = EventFilters & {
+  categories: TraceEventCategory[];
+  toolTypes: string[];
+  errorFilter: ErrorFilter;
+};
+
+const EVENT_CATEGORY_OPTIONS: Array<{ value: TraceEventCategory; label: string }> = [
+  { value: "user", label: "User" },
+  { value: "assistant", label: "Assistant" },
+  { value: "tool", label: "Tools" },
+  { value: "system", label: "System" },
+  { value: "context", label: "Context" },
+  { value: "telemetry", label: "Telemetry" },
+  { value: "step", label: "Steps" },
+  { value: "turn", label: "Turns" },
+  { value: "other", label: "Other" },
+];
 const DETAIL_EVENT_PAGE_SIZE = 2_000;
 const DETAIL_REQUEST_TIMEOUT_MS = 15_000;
 const countFormatter = new Intl.NumberFormat();
@@ -251,6 +267,30 @@ function SessionRow({ session, onOpen }: { session: TraceSession; onOpen: () => 
   );
 }
 
+function FilterPopover({ label, activeCount, children }: { label: string; activeCount: number; children: ReactNode }) {
+  return (
+    <details className="relative z-20 shrink-0">
+      <summary role="button" aria-label={label} className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-foreground hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+        {label}
+        {activeCount > 0 ? <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">{activeCount}</span> : null}
+      </summary>
+      <div className="absolute right-0 top-full mt-1 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-md border border-border bg-background p-2 shadow-lg">
+        {children}
+      </div>
+    </details>
+  );
+}
+
+function FilterCheck({ label, checked, onChange, count }: { label: string; checked: boolean; onChange: (checked: boolean) => void; count?: number }) {
+  return (
+    <label className="flex min-h-8 items-center gap-2 rounded px-2 text-xs text-foreground hover:bg-state-hover">
+      <input type="checkbox" aria-label={label} className="size-3.5 accent-primary" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {count !== undefined ? <span className="font-mono text-[10px] text-muted-foreground">{formatCount(count)}</span> : null}
+    </label>
+  );
+}
+
 function CollectionHeader({
   status,
   busy,
@@ -258,9 +298,11 @@ function CollectionHeader({
   source,
   sourceFilters,
   sort,
+  filters,
   onQuery,
   onSource,
   onSort,
+  onFilters,
   onRescan,
   error,
 }: {
@@ -270,13 +312,16 @@ function CollectionHeader({
   source: string;
   sourceFilters: string[];
   sort: SessionSort;
+  filters: SessionListFilters;
   onQuery: (value: string) => void;
   onSource: (value: string) => void;
   onSort: (value: SessionSort) => void;
+  onFilters: (value: SessionListFilters) => void;
   onRescan: () => void;
   error: string | null;
 }) {
   const sourceErrors = (status?.sources ?? []).filter((root) => root.error && root.exists);
+  const activeFilterCount = Number(filters.errorFilter === "only") + Number(filters.status === "active") + Number(filters.hasTools === true);
   return (
     <header className="shrink-0 border-b border-border bg-muted/20 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -317,8 +362,17 @@ function CollectionHeader({
             <option value="started">Recently started</option>
             <option value="events">Most events</option>
             <option value="duration">Longest duration</option>
+            <option value="errors">Most errors</option>
           </select>
         </label>
+        <FilterPopover label="Filters" activeCount={activeFilterCount}>
+          <div className="space-y-1">
+            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Session filters</div>
+            <FilterCheck label="Errors only" checked={filters.errorFilter === "only"} onChange={(checked) => onFilters({ ...filters, errorFilter: checked ? "only" : "all" })} />
+            <FilterCheck label="Active sessions" checked={filters.status === "active"} onChange={(checked) => onFilters({ ...filters, status: checked ? "active" : undefined })} />
+            <FilterCheck label="Has tool calls" checked={filters.hasTools === true} onChange={(checked) => onFilters({ ...filters, hasTools: checked || undefined })} />
+          </div>
+        </FilterPopover>
       </div>
       {status?.lastError ? <div className="mt-2 text-xs text-destructive" role="alert">{status.lastError}</div> : null}
       {sourceErrors.length ? <div className="mt-2 text-xs text-warning" role="status">{sourceErrors.length} local source{sourceErrors.length === 1 ? "" : "s"} need attention: {sourceErrors.map((root) => root.label + " — " + root.error).join("; ")}</div> : null}
@@ -384,39 +438,50 @@ function SessionCollection({
   );
 }
 
-function TrajectoryToolbar({
-  query,
-  showDuration,
-  showTurns,
-  showCalls,
-  onQuery,
-  onDuration,
-  onTurns,
-  onCalls,
-}: {
-  query: string;
-  showDuration: boolean;
-  showTurns: boolean;
-  showCalls: boolean;
+function TrajectoryToolbar({ filters, facets, onQuery, onToggleCategory, onToggleToolType, onErrorFilter, onClearFilters }: {
+  filters: TrajectoryFilters;
+  facets: TraceSessionFacets | null;
   onQuery: (value: string) => void;
-  onDuration: () => void;
-  onTurns: () => void;
-  onCalls: () => void;
+  onToggleCategory: (category: TraceEventCategory, checked: boolean) => void;
+  onToggleToolType: (toolType: string, checked: boolean) => void;
+  onErrorFilter: (checked: boolean) => void;
+  onClearFilters: () => void;
 }) {
+  const activeFilterCount = Number(Boolean(filters.query?.trim())) + filters.categories.length + filters.toolTypes.length + Number(filters.errorFilter === "only");
+  const categoryOptions = facets === null
+    ? EVENT_CATEGORY_OPTIONS
+    : EVENT_CATEGORY_OPTIONS.filter((option) => facets.categories.some((item) => item.value === option.value && item.count > 0) || filters.categories.includes(option.value));
   return (
-    <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-border bg-muted/20 px-2">
-      <button type="button" className={showDuration ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onDuration} aria-pressed={showDuration}>Duration</button>
-      <button type="button" className={showTurns ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onTurns} aria-pressed={showTurns}>Turns</button>
-      <button type="button" className={showCalls ? toolbarButtonActiveClass : toolbarButtonClass} onClick={onCalls} aria-pressed={showCalls}>Calls</button>
+    <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/20 px-2 py-1">
+      <FilterPopover label="Event filters" activeCount={activeFilterCount}>
+        <div className="max-h-[min(70vh,28rem)] space-y-3 overflow-auto">
+          <section>
+            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Event state</div>
+            <FilterCheck label="Errors only" checked={filters.errorFilter === "only"} onChange={onErrorFilter} count={facets?.errorCount} />
+          </section>
+          <section>
+            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Event categories</div>
+            {categoryOptions.length ? categoryOptions.map((option) => {
+              const facet = facets?.categories.find((item) => item.value === option.value);
+              return <FilterCheck key={option.value} label={option.label} checked={filters.categories.includes(option.value)} onChange={(checked) => onToggleCategory(option.value, checked)} count={facet?.count ?? 0} />;
+            }) : <div className="px-2 text-[11px] text-muted-foreground">No categorized events in this session.</div>}
+          </section>
+          <section>
+            <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Tool types</div>
+            {facets?.toolTypes.length ? facets.toolTypes.map((item) => <FilterCheck key={item.value} label={item.value} checked={filters.toolTypes.includes(item.value)} onChange={(checked) => onToggleToolType(item.value, checked)} count={item.count} />) : <div className="px-2 text-[11px] text-muted-foreground">No tool calls in this session.</div>}
+          </section>
+          {activeFilterCount ? <button type="button" className="w-full rounded px-2 py-1.5 text-left text-xs font-medium text-primary hover:bg-state-hover" onClick={onClearFilters}>Clear filters</button> : null}
+        </div>
+      </FilterPopover>
       <label className="ml-auto flex h-[22px] w-44 items-center rounded border border-border bg-muted/30 px-1.5 focus-within:border-ring focus-within:bg-background">
         <span className="sr-only">Search trajectory</span>
-        <input className="min-w-0 w-full bg-transparent px-0.5 text-[11px] text-foreground outline-none placeholder:text-muted-foreground" value={query} onChange={(event) => onQuery(event.target.value)} maxLength={500} placeholder="Search" aria-label="Search trajectory" />
+        <input className="min-w-0 w-full bg-transparent px-0.5 text-[11px] text-foreground outline-none placeholder:text-muted-foreground" value={filters.query ?? ""} onChange={(event) => onQuery(event.target.value)} maxLength={500} placeholder="Search events, tools, and messages" aria-label="Search trajectory" />
       </label>
     </div>
   );
 }
 
-function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { events: TraceEvent[]; selectedId: string | null; showTurns: boolean; onSelect: (event: TraceEvent) => void }) {
+function TrajectoryTimeline({ events, selectedId, onSelect }: { events: TraceEvent[]; selectedId: string | null; onSelect: (event: TraceEvent) => void }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const timed = events.filter((event) => event.timestamp !== null);
   const start = timed.length ? Math.min(...timed.map((event) => event.timestamp ?? 0)) : 0;
@@ -424,7 +489,7 @@ function TrajectoryTimeline({ events, selectedId, showTurns, onSelect }: { event
   const span = Math.max(1, end - start);
   const lanes: TimelineLane[] = ["input", "model", "tools"];
   const labels: Record<TimelineLane, string> = { input: "Input", model: "Model", tools: "Tools" };
-  const turnBoundaries = showTurns ? events.filter((event, index) => event.turn !== null && event.turn !== events[index - 1]?.turn) : [];
+  const turnBoundaries = events.filter((event, index) => event.turn !== null && event.turn !== events[index - 1]?.turn);
   const hoveredIndex = hoveredId === null ? -1 : events.findIndex((event) => event.id === hoveredId);
   const hoveredEvent = hoveredIndex >= 0 ? events[hoveredIndex] : null;
   const hoveredPosition = hoveredEvent
@@ -499,7 +564,7 @@ function EventLoadMoreRow({ loadedEventCount, totalEvents, eventsLoading, onLoad
   );
 }
 
-function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading, eventsHasMore, selectedId, showDuration, showTurns, onSelect, onLoadMore }: { events: TraceEvent[]; loadedEventCount: number; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedId: string | null; showDuration: boolean; showTurns: boolean; onSelect: (event: TraceEvent) => void; onLoadMore: () => void }) {
+function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading, eventsHasMore, selectedId, onSelect, onLoadMore }: { events: TraceEvent[]; loadedEventCount: number; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedId: string | null; onSelect: (event: TraceEvent) => void; onLoadMore: () => void }) {
   const [roleColumnWidth, setRoleColumnWidth] = useState(ROLE_COLUMN_DEFAULT);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const setWidth = (value: number) => setRoleColumnWidth(Math.min(ROLE_COLUMN_MAX, Math.max(ROLE_COLUMN_MIN, value)));
@@ -526,7 +591,7 @@ function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading
   if (!events.length) {
     return (
       <div className="min-w-0 flex-1 overflow-auto bg-background" aria-label="Trajectory event ledger">
-        <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">No events match this trajectory filter.</div>
+        <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">{eventsLoading ? "Loading events…" : "No events match this trajectory filter."}</div>
         {eventsHasMore ? <EventLoadMoreRow loadedEventCount={loadedEventCount} totalEvents={totalEvents} eventsLoading={eventsLoading} onLoadMore={onLoadMore} /> : null}
       </div>
     );
@@ -556,7 +621,7 @@ function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading
         />
       </div>
       {events.map((event) => {
-        const turnStart = showTurns && event.turn !== null && event.turn !== previousTurn;
+        const turnStart = event.turn !== null && event.turn !== previousTurn;
         previousTurn = event.turn;
         return (
           <div key={event.id}>
@@ -579,7 +644,7 @@ function TrajectoryLedger({ events, loadedEventCount, totalEvents, eventsLoading
                 </div>
                 <div className="flex shrink-0 items-center gap-2 text-[9px] text-muted-foreground">
                   <span>{formatClock(event.timestamp)}</span>
-                  {showDuration && event.durationMs !== null ? <span>{formatDuration(event.durationMs)}</span> : null}
+                  {event.durationMs !== null ? <span>{formatDuration(event.durationMs)}</span> : null}
                 </div>
               </button>
             </div>
@@ -627,33 +692,42 @@ function SessionInspector({ event, raw, onClose }: { event: TraceEvent; raw: str
   );
 }
 
-function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsHasMore, selectedEvent, raw, error, onSelectEvent, onLoadMore, onCloseInspector, onBack }: { session: TraceSession; events: TraceEvent[]; totalEvents: number; eventsLoading: boolean; eventsHasMore: boolean; selectedEvent: TraceEvent | null; raw: string | null; error: string | null; onSelectEvent: (event: TraceEvent) => void; onLoadMore: () => void; onCloseInspector: () => void; onBack: () => void }) {
-  const [query, setQuery] = useState("");
-  const [showDuration, setShowDuration] = useState(true);
-  const [showTurns, setShowTurns] = useState(true);
-  const [showCalls, setShowCalls] = useState(true);
-  const filteredEvents = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return events.filter((event) => {
-      if (!showCalls && event.kind === "tool") return false;
-      if (!normalized) return true;
-      return [event.type, event.title, event.summary, event.role ?? "", event.model ?? ""].some((value) => value.toLowerCase().includes(normalized));
-    });
-  }, [events, query, showCalls]);
+function TrajectoryScreen({ session, events, totalEvents, eventsLoading, eventsHasMore, selectedEvent, raw, error, facets, filters, onQuery, onToggleCategory, onToggleToolType, onErrorFilter, onClearFilters, onSelectEvent, onLoadMore, onCloseInspector, onBack }: {
+  session: TraceSession;
+  events: TraceEvent[];
+  totalEvents: number;
+  eventsLoading: boolean;
+  eventsHasMore: boolean;
+  selectedEvent: TraceEvent | null;
+  raw: string | null;
+  error: string | null;
+  facets: TraceSessionFacets | null;
+  filters: TrajectoryFilters;
+  onQuery: (value: string) => void;
+  onToggleCategory: (category: TraceEventCategory, checked: boolean) => void;
+  onToggleToolType: (toolType: string, checked: boolean) => void;
+  onErrorFilter: (checked: boolean) => void;
+  onClearFilters: () => void;
+  onSelectEvent: (event: TraceEvent) => void;
+  onLoadMore: () => void;
+  onCloseInspector: () => void;
+  onBack: () => void;
+}) {
+  const filtersActive = Boolean(filters.query?.trim() || filters.categories.length || filters.toolTypes.length || filters.errorFilter === "only");
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
       <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
         <button type="button" className="shrink-0 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" onClick={onBack}>← Sessions</button>
         <SourceBadge source={session.source} />
         <span className="min-w-0 flex-1 truncate text-sm font-medium" title={session.filePath}>{session.title}</span>
-        <span className="hidden shrink-0 text-[10px] text-muted-foreground md:inline">{totalEvents} events · {session.toolCount} tools · {formatDuration(session.durationMs)}</span>
+        <span className="hidden shrink-0 text-[10px] text-muted-foreground md:inline">{filtersActive ? `${formatCount(totalEvents)} matching · ${formatCount(session.eventCount)} total` : `${formatCount(session.eventCount)} events`} · {session.toolCount} tools · {formatDuration(session.durationMs)}</span>
         {session.status === "active" ? <span className="shrink-0 text-[10px] text-success">active</span> : null}
       </header>
-      <TrajectoryToolbar query={query} showDuration={showDuration} showTurns={showTurns} showCalls={showCalls} onQuery={setQuery} onDuration={() => setShowDuration((value) => !value)} onTurns={() => setShowTurns((value) => !value)} onCalls={() => setShowCalls((value) => !value)} />
-      <TrajectoryTimeline events={showCalls ? events : events.filter((event) => event.kind !== "tool")} selectedId={selectedEvent?.id ?? null} showTurns={showTurns} onSelect={onSelectEvent} />
+      <TrajectoryToolbar filters={filters} facets={facets} onQuery={onQuery} onToggleCategory={onToggleCategory} onToggleToolType={onToggleToolType} onErrorFilter={onErrorFilter} onClearFilters={onClearFilters} />
+      <TrajectoryTimeline events={events} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} />
       {error ? <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[10px] text-destructive" role="alert">{error}</div> : null}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <TrajectoryLedger events={filteredEvents} loadedEventCount={events.length} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedId={selectedEvent?.id ?? null} showDuration={showDuration} showTurns={showTurns} onSelect={onSelectEvent} onLoadMore={onLoadMore} />
+        <TrajectoryLedger events={events} loadedEventCount={events.length} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedId={selectedEvent?.id ?? null} onSelect={onSelectEvent} onLoadMore={onLoadMore} />
         {selectedEvent ? <div className="max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-10 max-lg:w-[min(92%,420px)] lg:w-[clamp(320px,34%,440px)]"><SessionInspector event={selectedEvent} raw={raw} onClose={onCloseInspector} /></div> : null}
       </div>
     </div>
@@ -672,11 +746,14 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [sort, setSort] = useState<SessionSort>("updated");
+  const [sessionFilters, setSessionFilters] = useState<SessionListFilters>({});
   const [session, setSession] = useState<TraceSession | null>(null);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [totalEvents, setTotalEvents] = useState(0);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsHasMore, setEventsHasMore] = useState(false);
+  const [trajectoryFilters, setTrajectoryFilters] = useState<TrajectoryFilters>({ categories: [], toolTypes: [], errorFilter: "all" });
+  const [eventFacets, setEventFacets] = useState<TraceSessionFacets | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TraceEvent | null>(null);
   const [raw, setRaw] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(() => route.kind === "session");
@@ -703,7 +780,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     const requestId = ++sessionRequest.current;
     setSessionLoading(true);
     try {
-      const next = await rpc.call("listSessions", listSessionsInput(query, source, sort, offset));
+      const next = await rpc.call("listSessions", listSessionsInput(query, source, sort, offset, 100, sessionFilters));
       if (requestId !== sessionRequest.current) return;
       setSessionTotal(next.total);
       setSessionHasMore(offset + next.sessions.length < next.total);
@@ -721,7 +798,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     } finally {
       if (requestId === sessionRequest.current) setSessionLoading(false);
     }
-  }, [rpc, query, source, sort]);
+  }, [rpc, query, source, sort, sessionFilters]);
 
   const refresh = useCallback(async (preserveLoadedRows = false) => {
     await Promise.all([refreshMetadata(), loadSessionPage(0, !preserveLoadedRows, preserveLoadedRows)]);
@@ -761,7 +838,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     const offset = events.length;
     setEventsLoading(true);
     void withTimeout(
-      rpc.call("getSession", { id: routeSessionId, limit: DETAIL_EVENT_PAGE_SIZE, offset }),
+      rpc.call("getSession", getSessionInput(routeSessionId, DETAIL_EVENT_PAGE_SIZE, offset, trajectoryFilters)),
       DETAIL_REQUEST_TIMEOUT_MS,
       "Timed out while loading more events. The local index may still be busy.",
     ).then((result) => {
@@ -778,7 +855,7 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     }).finally(() => {
       if (requestId === eventRequest.current) setEventsLoading(false);
     });
-  }, [eventRequest, events.length, eventsHasMore, eventsLoading, routeSessionId, rpc]);
+  }, [eventRequest, events.length, eventsHasMore, eventsLoading, routeSessionId, rpc, trajectoryFilters]);
 
   useEffect(() => {
     if (route.kind !== "session") {
@@ -795,13 +872,18 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     }
     let cancelled = false;
     const requestId = ++eventRequest.current;
-    setDetailLoading(true);
+    const sameSession = session?.id === route.id;
+    setDetailLoading(!sameSession);
     setEventsLoading(true);
     setEventsHasMore(false);
-    setSession(null);
+    setEvents([]);
+    setTotalEvents(0);
+    if (!sameSession) setSession(null);
+    setSelectedEvent(null);
+    setRaw(null);
     setError(null);
     void withTimeout(
-      rpc.call("getSession", { id: route.id, limit: DETAIL_EVENT_PAGE_SIZE, offset: 0 }),
+      rpc.call("getSession", getSessionInput(route.id, DETAIL_EVENT_PAGE_SIZE, 0, trajectoryFilters)),
       DETAIL_REQUEST_TIMEOUT_MS,
       "Timed out while loading the trace. The local index may still be busy.",
     ).then((result) => {
@@ -825,7 +907,28 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [detailRetry, eventRequest, rpc, route.kind, route.kind === "session" ? route.id : null]);
+  }, [detailRetry, eventRequest, rpc, route.kind, route.kind === "session" ? route.id : null, trajectoryFilters]);
+
+  useEffect(() => {
+    if (route.kind !== "session") {
+      setEventFacets(null);
+      return;
+    }
+    let cancelled = false;
+    setEventFacets(null);
+    void withTimeout(
+      rpc.call("getSessionFacets", { id: route.id }),
+      DETAIL_REQUEST_TIMEOUT_MS,
+      "Timed out while loading trace filters.",
+    ).then((facets) => {
+      if (!cancelled) setEventFacets(facets);
+    }).catch(() => {
+      if (!cancelled) setEventFacets(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailRetry, rpc, route.kind, route.kind === "session" ? route.id : null]);
 
   useEffect(() => {
     if (!selectedEvent) {
@@ -849,6 +952,36 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
     for (const root of status?.sources ?? []) if (root.kind === "session") values.set(root.source, root.source);
     return [...values.keys()];
   }, [status]);
+
+  const updateTrajectoryFilters = useCallback((update: Partial<TrajectoryFilters>) => {
+    setTrajectoryFilters((current) => ({ ...current, ...update }));
+    setSelectedEvent(null);
+    setRaw(null);
+  }, []);
+
+  const toggleTrajectoryCategory = useCallback((category: TraceEventCategory, checked: boolean) => {
+    setTrajectoryFilters((current) => ({
+      ...current,
+      categories: checked ? [...current.categories, category] : current.categories.filter((item) => item !== category),
+    }));
+    setSelectedEvent(null);
+    setRaw(null);
+  }, []);
+
+  const toggleTrajectoryToolType = useCallback((toolType: string, checked: boolean) => {
+    setTrajectoryFilters((current) => ({
+      ...current,
+      toolTypes: checked ? [...current.toolTypes, toolType] : current.toolTypes.filter((item) => item !== toolType),
+    }));
+    setSelectedEvent(null);
+    setRaw(null);
+  }, []);
+
+  const clearTrajectoryFilters = useCallback(() => {
+    setTrajectoryFilters({ categories: [], toolTypes: [], errorFilter: "all" });
+    setSelectedEvent(null);
+    setRaw(null);
+  }, []);
 
   async function rescan() {
     setBusy(true);
@@ -875,13 +1008,13 @@ function TracesPanel({ subPath }: PluginNavPanelProps) {
         </div>
       </div>
     );
-    return <TrajectoryScreen session={session} events={events} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedEvent={selectedEvent} raw={raw} error={error} onSelectEvent={setSelectedEvent} onLoadMore={loadMoreEvents} onCloseInspector={() => setSelectedEvent(null)} onBack={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })} />;
+    return <TrajectoryScreen session={session} events={events} totalEvents={totalEvents} eventsLoading={eventsLoading} eventsHasMore={eventsHasMore} selectedEvent={selectedEvent} raw={raw} error={error} facets={eventFacets} filters={trajectoryFilters} onQuery={(value) => updateTrajectoryFilters({ query: value })} onToggleCategory={toggleTrajectoryCategory} onToggleToolType={toggleTrajectoryToolType} onErrorFilter={(checked) => updateTrajectoryFilters({ errorFilter: checked ? "only" : "all" })} onClearFilters={clearTrajectoryFilters} onSelectEvent={setSelectedEvent} onLoadMore={loadMoreEvents} onCloseInspector={() => setSelectedEvent(null)} onBack={() => navigate.toPluginPanel("traces", { subPath: "", replace: true })} />;
   }
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground">
-      <CollectionHeader status={status} busy={busy} query={query} source={source} sourceFilters={sourceFilters} sort={sort} onQuery={setQuery} onSource={setSource} onSort={setSort} onRescan={() => void rescan()} error={error} />
-      <SessionCollection sessions={sessions} total={sessionTotal} status={status} loading={sessionLoading} hasMore={sessionHasMore} hasFilter={Boolean(query.trim() || source)} onLoadMore={loadMoreSessions} onOpen={(item) => navigate.toPluginPanel("traces", { subPath: `session/${encodeURIComponent(item.id)}` })} />
+      <CollectionHeader status={status} busy={busy} query={query} source={source} sourceFilters={sourceFilters} sort={sort} filters={sessionFilters} onQuery={setQuery} onSource={setSource} onSort={setSort} onFilters={setSessionFilters} onRescan={() => void rescan()} error={error} />
+      <SessionCollection sessions={sessions} total={sessionTotal} status={status} loading={sessionLoading} hasMore={sessionHasMore} hasFilter={Boolean(query.trim() || source || sessionFilters.errorFilter === "only" || sessionFilters.status || sessionFilters.hasTools)} onLoadMore={loadMoreSessions} onOpen={(item) => navigate.toPluginPanel("traces", { subPath: `session/${encodeURIComponent(item.id)}` })} />
     </div>
   );
 }

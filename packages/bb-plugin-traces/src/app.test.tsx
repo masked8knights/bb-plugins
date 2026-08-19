@@ -88,12 +88,23 @@ const event = (value: Partial<TraceEvent> & Pick<TraceEvent, "id" | "line" | "ty
 const userEvent = event({ id: "event-user", line: 1, type: "user/message", kind: "message", role: "user", title: "User", summary: "Inspect the local trace" });
 const assistantEvent = event({ id: "event-assistant", line: 2, type: "assistant/message", kind: "message", role: "assistant", title: "Assistant", summary: "I found the trace." });
 const toolEvent = event({ id: "event-tool", line: 3, type: "tool/call", kind: "tool", title: "bash", summary: "pwd", depth: 1 });
+const errorToolEvent = event({ id: "event-error-tool", line: 4, type: "tool/result", kind: "tool", title: "bash", summary: "pwd: permission denied", depth: 1 });
 
 function commonRpc(overrides: Record<string, unknown> = {}) {
   return {
     status: () => status,
     listSessions: () => ({ sessions: [session], total: 1 }),
     getSession: () => ({ session, events: [userEvent, assistantEvent, toolEvent], totalEvents: 3 }),
+    getSessionFacets: () => ({
+      categories: [
+        { value: "user", count: 1 },
+        { value: "assistant", count: 1 },
+        { value: "tool", count: 1 },
+      ],
+      toolTypes: [{ value: "bash", count: 1 }],
+      errorCount: 0,
+      totalEvents: 3,
+    }),
     getEventRaw: ({ id }: { id: string }) => ({ raw: `raw:${id}`, truncated: false }),
     ...overrides,
   };
@@ -134,6 +145,32 @@ describe("Traces app interactions", () => {
       path: "traces",
       options: { subPath: "session/dsh%3Asession%2Fone" },
     });
+  });
+
+  it("sends collection filter state to the server", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: commonRpc({
+        listSessions: (input: Record<string, unknown>) => {
+          calls.push(input);
+          return { sessions: [session], total: 1 };
+        },
+      }) as never,
+    });
+
+    await slot.findByRole("button", { name: /Inspect trace/ });
+    fireEvent.click(slot.getByRole("button", { name: "Filters" }));
+    fireEvent.click(slot.getByRole("checkbox", { name: "Errors only" }));
+    await waitFor(() => expect(calls.some((input) => input.errorFilter === "only")).toBe(true));
+
+    fireEvent.click(slot.getByRole("checkbox", { name: "Active sessions" }));
+    await waitFor(() => expect(calls.some((input) => input.status === "active" && input.errorFilter === "only")).toBe(true));
+
+    fireEvent.click(slot.getByRole("checkbox", { name: "Has tool calls" }));
+    await waitFor(() => expect(calls.some((input) => input.hasTools === true && input.status === "active")).toBe(true));
+
+    fireEvent.change(slot.getByRole("combobox", { name: "Sort sessions" }), { target: { value: "errors" } });
+    await waitFor(() => expect(calls.some((input) => input.sort === "errors")).toBe(true));
   });
 
   it("renders the trajectory, selects events, switches inspector tabs, and appends event pages", async () => {
@@ -196,6 +233,39 @@ describe("Traces app interactions", () => {
     expect(slot.queryByRole("button", { name: "Payload" })).toBeNull();
     expect(slot.queryByRole("button", { name: "Result" })).toBeNull();
     expect(slot.getByRole("complementary", { name: "Selected event inspector" })).toBeTruthy();
+  });
+
+  it("sends trajectory category, tool, error, and text filters to the server", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const slot = renderSlot(panel, { subPath: "session/dsh%3Asession%2Fone" }, {
+      rpc: commonRpc({
+        getSession: (input: Record<string, unknown>) => {
+          calls.push(input);
+          let filteredEvents = [userEvent, assistantEvent, toolEvent, errorToolEvent];
+          if (input.errorFilter === "only") filteredEvents = [errorToolEvent];
+          if (Array.isArray(input.categories) && input.categories.includes("tool")) filteredEvents = filteredEvents.filter((item) => item.kind === "tool");
+          if (Array.isArray(input.toolTypes) && input.toolTypes.includes("bash")) filteredEvents = filteredEvents.filter((item) => item.title === "bash");
+          if (input.query === "pwd") filteredEvents = filteredEvents.filter((item) => item.summary.includes("pwd"));
+          return { session, events: filteredEvents, totalEvents: filteredEvents.length };
+        },
+      }) as never,
+    });
+
+    await slot.findByLabelText("Trajectory event ledger");
+    fireEvent.click(slot.getByRole("button", { name: "Event filters" }));
+    fireEvent.click(slot.getByRole("checkbox", { name: "Errors only" }));
+    await waitFor(() => expect(calls.some((input) => input.errorFilter === "only")).toBe(true));
+    expect(slot.queryByRole("button", { name: "Select USER event 1" })).toBeNull();
+    expect(slot.getAllByRole("button", { name: "Select TOOL event 4" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(slot.getByRole("checkbox", { name: "Tools" }));
+    await waitFor(() => expect(calls.some((input) => Array.isArray(input.categories) && input.categories.includes("tool"))).toBe(true));
+
+    fireEvent.click(slot.getByRole("checkbox", { name: "bash" }));
+    await waitFor(() => expect(calls.some((input) => Array.isArray(input.toolTypes) && input.toolTypes.includes("bash"))).toBe(true));
+
+    fireEvent.change(slot.getByRole("textbox", { name: "Search trajectory" }), { target: { value: "pwd" } });
+    await waitFor(() => expect(calls.some((input) => input.query === "pwd")).toBe(true));
   });
 
   it("renders structured JSON fields in the event inspector", async () => {
