@@ -1,6 +1,6 @@
 // bb-plugin-ds4 — setup guidance for the demand-driven DwarfStar server.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   definePluginApp,
@@ -43,6 +43,49 @@ function parseStatus(value: unknown): {
   };
 }
 
+type DwarfStarStatus = {
+  phase: Ds4LifecyclePhase;
+  error: string | null;
+};
+
+function useDwarfStarStatus(): DwarfStarStatus | null {
+  const rpc = useRpc<typeof rpcContract>();
+  const realtimeConnection = useRealtimeConnectionState();
+  const [status, setStatus] = useState<DwarfStarStatus | null>(null);
+  const statusRevision = useRef(0);
+
+  const applyStatus = useCallback((value: unknown) => {
+    const parsed = parseStatus(value);
+    if (!parsed) return;
+    statusRevision.current += 1;
+    setStatus(parsed);
+  }, []);
+
+  useRealtime(DS4_STATUS_CHANNEL, applyStatus);
+
+  useEffect(() => {
+    if (realtimeConnection !== "connected") return;
+    let cancelled = false;
+    const revisionAtRequest = statusRevision.current;
+    void rpc
+      .call("status", null)
+      .then((value) => {
+        if (!cancelled && statusRevision.current === revisionAtRequest) {
+          applyStatus(value);
+        }
+      })
+      .catch(() => {
+        // Realtime remains the primary signal; a later connection transition
+        // or lifecycle event will reconcile the state.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyStatus, realtimeConnection, rpc]);
+
+  return status;
+}
+
 function showLifecycleNotice(notice: ReturnType<typeof ds4LifecycleNotice>): void {
   if (!notice) return;
   const options = {
@@ -74,41 +117,72 @@ function showLifecycleNotice(notice: ReturnType<typeof ds4LifecycleNotice>): voi
 function DwarfStarLifecycleBridge({
   threadId: _threadId,
 }: PluginThreadHeaderActionProps) {
-  const rpc = useRpc<typeof rpcContract>();
-  const realtimeConnection = useRealtimeConnectionState();
+  const status = useDwarfStarStatus();
   const phaseRef = useRef<Ds4LifecyclePhase | null>(null);
 
-  const applyStatus = useCallback((value: unknown, initial = false) => {
-    const parsed = parseStatus(value);
-    if (!parsed) return;
-    const notice = ds4LifecycleNotice(parsed.phase, phaseRef.current, {
-      initial,
-      error: parsed.error,
-    });
-    phaseRef.current = parsed.phase;
-    showLifecycleNotice(notice);
-  }, []);
-
-  useRealtime(DS4_STATUS_CHANNEL, (value) => applyStatus(value));
-
   useEffect(() => {
-    if (realtimeConnection !== "connected") return;
-    let cancelled = false;
-    void rpc
-      .call("status", null)
-      .then((status) => {
-        if (!cancelled) applyStatus(status, phaseRef.current === null);
-      })
-      .catch(() => {
-        // The realtime signal is best-effort; the next lifecycle signal will
-        // still update the toast if the initial status request races startup.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [applyStatus, realtimeConnection, rpc]);
+    if (!status) return;
+    const notice = ds4LifecycleNotice(status.phase, phaseRef.current, {
+      initial: phaseRef.current === null,
+      error: status.error,
+    });
+    phaseRef.current = status.phase;
+    showLifecycleNotice(notice);
+  }, [status]);
 
   return null;
+}
+
+function DwarfStarLifecycleBanner() {
+  const status = useDwarfStarStatus();
+  const phaseRef = useRef<Ds4LifecyclePhase | null>(null);
+  const [visiblePhase, setVisiblePhase] =
+    useState<Ds4LifecyclePhase | null>(null);
+
+  useEffect(() => {
+    if (!status || status.phase === phaseRef.current) return;
+    const notice = ds4LifecycleNotice(status.phase, phaseRef.current, {
+      initial: phaseRef.current === null,
+      error: status.error,
+    });
+    phaseRef.current = status.phase;
+    if (!notice) return;
+
+    setVisiblePhase(status.phase);
+    if (status.phase !== "ready" && status.phase !== "stopped") return;
+    const timeout = window.setTimeout(() => setVisiblePhase(null), 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [status]);
+
+  if (visiblePhase === null) return null;
+  const notice = ds4LifecycleNotice(visiblePhase, null, {
+    error: status?.error,
+  });
+  if (!notice) return null;
+
+  const isLoading = notice.kind === "loading";
+  return (
+    <div
+      className="flex items-start gap-2 text-xs"
+      role="status"
+      aria-live={notice.kind === "error" ? "assertive" : "polite"}
+    >
+      <span
+        aria-hidden="true"
+        className={
+          isLoading
+            ? "mt-0.5 size-3 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent"
+            : "mt-0.5 shrink-0 text-sm leading-3"
+        }
+      >
+        {isLoading ? null : notice.kind === "error" ? "!" : "✓"}
+      </span>
+      <span className="min-w-0">
+        <span className="font-medium">{notice.title}</span>
+        <span className="ml-1 text-muted-foreground">{notice.description}</span>
+      </span>
+    </div>
+  );
 }
 
 function SetupSection() {
@@ -176,5 +250,16 @@ export default definePluginApp((app) => {
     id: "lifecycle-bridge",
     title: "DwarfStar lifecycle",
     component: DwarfStarLifecycleBridge,
+  });
+  app.composer.customize({
+    id: "lifecycle-status",
+    scopes: ["thread", "new-thread"],
+    banners: [
+      {
+        id: "dwarfstar-lifecycle",
+        chrome: "card",
+        component: DwarfStarLifecycleBanner,
+      },
+    ],
   });
 });

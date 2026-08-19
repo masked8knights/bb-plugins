@@ -32,10 +32,11 @@ bb plugin build      # optional: precompile the frontend
   matching model for a turn, stays warm while matching turns are active, and
   stops after the last one is idle. It stops as part of plugin reload/disable
   and BB shutdown as well.
-- **Lifecycle feedback**: BB shows a toast while DwarfStar is starting and
-  loading the model, when it becomes ready, and when it is stopping or has
-  stopped. Startup feedback is especially useful because loading a large GGUF
-  can take several seconds.
+- **Lifecycle feedback**: BB shows a host toast for lifecycle transitions and
+  a host-framed status banner above the composer while DwarfStar is starting,
+  stopping, or unavailable. It also confirms when the server becomes ready.
+  Startup feedback is especially useful because loading a large GGUF can take
+  several seconds.
 - **`bb ds4` diagnostics** (kept for troubleshooting):
   - `bb ds4 status` — state, pid, uptime, health, served models
   - `bb ds4 start | stop | restart`
@@ -78,9 +79,9 @@ A background `supervisor` service:
 
 The first matching turn starts the process asynchronously; subsequent turns
 reuse it while it is warm. BB surfaces the brief model-loading window with a
-toast so it is clear that the local server is working. The local provider/client
-should tolerate the brief model-loading window just like any other local model
-server.
+toast and composer banner so it is clear that the local server is working. The
+local provider/client should tolerate the brief model-loading window just like
+any other local model server.
 
 ## Settings (`bb plugin config ds4`)
 
