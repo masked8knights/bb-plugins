@@ -414,7 +414,7 @@ export default async function plugin(bb: BbPluginApi) {
           } catch {}
         }
         if (!hostId) throw new Error("No host available for folder picker");
-        const res = (await (bb.sdk.hosts as unknown as { pickFolder: (args: { hostId: string }) => Promise<{ path: string | null }> }).pickFolder({ hostId })) as unknown as { path?: string | null };
+        const res = (await (bb.sdk.hosts as unknown as { pickFolder: (args: { hostId: string; clientHostId: string }) => Promise<{ path: string | null }> }).pickFolder({ hostId, clientHostId: hostId })) as unknown as { path?: string | null };
         const picked = (res as { path?: string | null }).path ?? null;
         return { path: typeof picked === "string" ? picked : null };
       } catch (e) {
