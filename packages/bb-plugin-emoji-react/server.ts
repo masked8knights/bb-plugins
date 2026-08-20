@@ -26,7 +26,7 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Quote the highlighted text in the reply",
       default: true,
       description:
-        "When enabled, reacting drafts the selected text as a quote block, so the agent sees exactly what you reacted to.",
+        "When enabled, reacting drafts the highlighted text as a quote block, so the agent sees exactly what you reacted to.",
     },
     quotePosition: {
       type: "select",
@@ -36,11 +36,32 @@ export default async function plugin(bb: BbPluginApi) {
       description:
         "Where the quote block goes relative to the reaction text: \"before\" drafts the quote first, then the reaction; \"after\" drafts the reaction first, then the quote.",
     },
+    showInSelectionMenu: {
+      type: "boolean",
+      label: "Show in text selection menu",
+      default: true,
+      description:
+        "When enabled, reactions appear in the floating text-selection menu (when you select text) and in the right-click context menu.",
+    },
+    showInAssistantBar: {
+      type: "boolean",
+      label: "Show at bottom of assistant messages",
+      default: true,
+      description:
+        "When enabled, reactions appear as buttons at the bottom of assistant messages (the per-message action bar).",
+    },
+    showInUserBar: {
+      type: "boolean",
+      label: "Show at bottom of user messages",
+      default: true,
+      description:
+        "When enabled, reactions appear as buttons at the bottom of your own messages.",
+    },
   });
 
   settings.onChange((next) => {
     bb.log.info(
-      `emoji reactions updated (${String(next.emojiItems ?? "").split(/[,;\n]/).filter((part) => part.trim().length > 0).length} items, quoteSelection=${String(next.quoteSelection)}, quotePosition=${String(next.quotePosition)})`,
+      `emoji reactions updated (${String(next.emojiItems ?? "").split(/[,;\n]/).filter((part) => part.trim().length > 0).length} items, quoteSelection=${String(next.quoteSelection)}, quotePosition=${String(next.quotePosition)}, showInSelectionMenu=${String(next.showInSelectionMenu)}, showInAssistantBar=${String(next.showInAssistantBar)}, showInUserBar=${String(next.showInUserBar)})`,
     );
   });
 }
