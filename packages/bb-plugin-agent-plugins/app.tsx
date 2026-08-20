@@ -20,7 +20,7 @@ type Snapshot = {
     lastError: string | null;
   }[];
   skills: { pluginId: string; skillName: string; status: string; lastError: string | null }[];
-  mcpServers: { pluginId: string; serverId: string; type: string; status: string; lastError: string | null; approved: number }[];
+  mcpServers: { pluginId: string; serverId: string; type: string; status: string; lastError: string | null; approved: number; configJson: string }[];
   dataDir: string | null;
 };
 
@@ -235,26 +235,51 @@ function PluginRow({
           )}
 
           {servers.length > 0 && (
-            <div className="mt-3 space-y-1.5">
-              {servers.map((srv) => (
-                <div key={srv.serverId} className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="truncate font-mono text-xs">{srv.serverId}</span>
-                      <span className="text-[11px] text-muted-foreground">· {srv.type}</span>
-                      <Dot status={srv.status} />
-                      <span className="text-[11px] text-muted-foreground">{srv.status}</span>
+            <div className="mt-3">
+              <div className="text-xs font-medium">MCP servers · needs approval to run</div>
+              <p className="mt-1 text-[11px] leading-snug text-muted-foreground">Each server is code or a remote connection. We show what it will run before it starts.</p>
+              <div className="mt-2 space-y-1.5">
+                {servers.map((srv) => {
+                  let cfg: Record<string, unknown> | null = null;
+                  try { cfg = JSON.parse(srv.configJson) as Record<string, unknown>; } catch {}
+                  const isStdio = srv.type === "stdio";
+                  return (
+                    <div key={srv.serverId} className="rounded-md border border-border bg-background px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium">MCP: <span className="font-mono">{srv.serverId}</span></span>
+                        <span className="inline-flex items-center gap-1.5 text-[11px]">
+                          <Dot status={srv.status} />
+                          <span className="text-muted-foreground">{srv.status}</span>
+                          <span className={srv.approved ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}>
+                            {srv.approved ? "approved" : "needs approval"}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="mt-1.5 space-y-1 font-mono text-[11px] leading-snug text-muted-foreground">
+                        {isStdio ? (
+                          <>
+                            <div>Command: {(cfg?.command as string) ?? "—"}</div>
+                            {cfg?.args !== undefined && <div>Args: {JSON.stringify(cfg.args)}</div>}
+                            {cfg?.cwd !== undefined && <div>Cwd: {String(cfg.cwd)}</div>}
+                            {cfg?.env !== undefined && <div>Env keys: {Object.keys(cfg.env as Record<string, unknown>).join(", ") || "—"} (values redacted)</div>}
+                          </>
+                        ) : (
+                          <>
+                            <div>URL: {(cfg?.url as string) ?? "—"}</div>
+                            {cfg?.headers !== undefined && <div>Headers: {Object.keys(cfg.headers as Record<string, unknown>).join(", ") || "—"} (values redacted)</div>}
+                          </>
+                        )}
+                      </div>
+                      {srv.lastError && <p className="mt-1.5 text-[11px] leading-snug text-destructive">{srv.lastError}</p>}
+                      {srv.approved !== 1 && srv.status !== "error" && (
+                        <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => onApprove(plugin.id, srv.serverId)}>
+                          Approve &amp; start {srv.serverId}
+                        </Button>
+                      )}
                     </div>
-                    {srv.lastError && <p className="mt-0.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{srv.lastError}</p>}
-                  </div>
-                  {srv.approved !== 1 && srv.status !== "error" && (
-                    <Button size="sm" variant="outline" className="h-7 shrink-0 text-xs" onClick={() => onApprove(plugin.id, srv.serverId)}>
-                      Approve
-                    </Button>
-                  )}
-                  {srv.approved === 1 && <span className="shrink-0 text-[11px] text-emerald-600 dark:text-emerald-400">approved</span>}
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
           )}
 
