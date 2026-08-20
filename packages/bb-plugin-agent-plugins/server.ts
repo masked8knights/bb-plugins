@@ -150,19 +150,20 @@ export default async function plugin(bb: BbPluginApi) {
     const dd = await getDataDir();
     const parsed = parseSource(sourceInput, tagPrefix);
     const lockKey = parsed.normalized;
-    if (installLocks.has(lockKey)) throw new Error(`install already in progress for ${lockKey}`);
+    if (installLocks.has(lockKey)) throw new Error(`An install for ${lockKey} is already running — please wait for it to finish. If it seems stuck, run bb plugin reload agent-plugins to clear it.`);
     installLocks.add(lockKey);
     let fetchRes: { stagingPath: string; resolved: string; contentHash: string } | null = null;
     let pluginRoot: string | null = null;
     let installId: string | null = null;
-    const stagingBase = path.join(dd, "plugins", "agent-plugins", "staging");
-    await ensureDir(stagingBase);
-    fetchRes = await fetchSource(parsed, stagingBase);
-    const stagingPath = fetchRes.stagingPath;
     let cleanupStaging = true;
+    let stagingPath: string | null = null;
     try {
+      const stagingBase = path.join(dd, "plugins", "agent-plugins", "staging");
+      await ensureDir(stagingBase);
+      fetchRes = await fetchSource(parsed, stagingBase);
+      stagingPath = fetchRes.stagingPath;
       // Validate manifest
-      const pluginJsonPath = path.join(stagingPath, "plugin.json");
+      const pluginJsonPath = path.join(stagingPath!, "plugin.json");
       let manifestRaw: unknown;
       try { manifestRaw = await readJsonLimited(pluginJsonPath); } catch (e) { throw new Error(`plugin.json missing or invalid: ${errorText(e)}`); }
       const mRes = validateManifest(manifestRaw);
@@ -174,7 +175,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (existingByName) throw new Error(`plugin already installed as ${existingByName.id} (name: ${name}); remove or update instead`);
 
       // Content hash for generation
-      const contentHash = await hashDirectory(stagingPath);
+      const contentHash = await hashDirectory(stagingPath!);
 
       // Determine persistent paths — stable installId
       installId = randomId();
@@ -186,7 +187,7 @@ export default async function plugin(bb: BbPluginApi) {
       await ensureDir(pluginData);
 
       // Discover skills
-      const skillsRootInStaging = path.join(stagingPath, "skills");
+      const skillsRootInStaging = path.join(stagingPath!, "skills");
       const discoveredSkills: { dirName: string; srcDir: string; frontmatter: unknown; bodyHash: string; valid: boolean; errors: string[] }[] = [];
       let skillsDisabled = false;
       try {
@@ -229,7 +230,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
 
       // Validate MCP envelope + per-server
-      const mcpJsonPath = path.join(stagingPath, "mcp.json");
+      const mcpJsonPath = path.join(stagingPath!, "mcp.json");
       let mcpServers: { id: string; raw: unknown; valid: boolean; errors: string[]; type: string | null }[] = [];
       let mcpDisabled = false;
       let mcpEnvelopeValid = true;
@@ -261,7 +262,7 @@ export default async function plugin(bb: BbPluginApi) {
       await ensureDir(path.dirname(pluginRoot));
       // If pluginRoot exists (shouldn't), remove
       await rimraf(pluginRoot).catch(() => {});
-      await atomicRename(stagingPath, pluginRoot);
+      await atomicRename(stagingPath!, pluginRoot!);
       cleanupStaging = false; // now owned
 
       // Materialize skills (full-tree, owned, collision-safe)

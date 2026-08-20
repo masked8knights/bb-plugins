@@ -137,8 +137,15 @@ export async function fetchSource(parsed: ParsedSource, stagingBase: string): Pr
     cloneArgs.push(url, stagingPath);
     await rimraf(stagingPath);
     const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
-    const result = await run("git", cloneArgs, { env, timeoutMs: 120_000, maxBytes: 5 * 1024 * 1024 });
-    if (result.exitCode !== 0) throw new Error(`git clone failed: ${result.stderr || result.stdout}`);
+    const result = await run("git", cloneArgs, { env, timeoutMs: 30_000, maxBytes: 5 * 1024 * 1024 });
+    if (result.exitCode !== 0) {
+      const raw = result.stderr || result.stdout;
+      const isAuth = raw.includes("could not read Username") || raw.includes("Authentication failed") || raw.includes("Invalid username") || raw.includes("Repository not found");
+      if (isAuth) {
+        throw new Error(`Git repository not found or not accessible: ${url} — check the URL is a public git repository containing plugin.json at its root (tried ${url}). ${raw.slice(0, 300)}`);
+      }
+      throw new Error(`git clone failed: ${raw.slice(0, 500)}`);
+    }
     if (parsed.tagPrefix !== null && parsed.tagPrefix !== undefined) {
       try {
         const tagRes = await run("git", ["tag", "--list", `${parsed.tagPrefix}v*`], { cwd: stagingPath });
