@@ -1,9 +1,8 @@
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as yaml from "js-yaml";
-import { ensureDir, safeCopyDir, atomicRename, stagingDir, rimraf, hashDirectory } from "./safe-fs.js";
+import { ensureDir, safeCopyDir, atomicRename, stagingDir, rimraf } from "./safe-fs.js";
 import { validateSkillFrontmatter } from "./loader.js";
 
 export interface MaterializeArgs {
@@ -13,7 +12,6 @@ export interface MaterializeArgs {
   srcDir: string; // absolute path to skills/<name> inside staging pluginRoot
   dataDir: string; // bb dataDir
   specVersion: string;
-  bodyHash: string; // not used but track
 }
 
 export interface MaterializeResult {
@@ -135,11 +133,11 @@ export async function unmaterializeSkill(args: { installId: string; skillName: s
   try {
     const curHash = await hashDirExcludingMarker(dest);
     if (marker.contentHash && curHash !== marker.contentHash) return false;
-  } catch {}
+  } catch {
+    // A tree we cannot verify is not safe to delete. Treat hash/read errors
+    // like a user modification and leave the skill in place.
+    return false;
+  }
   await rimraf(dest);
   return true;
-}
-
-export async function hashSkillDir(skillDir: string): Promise<string> {
-  return hashDirectory(skillDir);
 }

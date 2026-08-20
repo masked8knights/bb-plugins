@@ -2,8 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import * as crypto from "node:crypto";
-import { ensureDir, safeCopyDir, stagingDir, rimraf, LIMITS, auditTree } from "./safe-fs.js";
+import { ensureDir, safeCopyDir, stagingDir, rimraf, LIMITS, auditTree, hashDirectory } from "./safe-fs.js";
 
 export type SourceType = "path" | "git" | "npm";
 
@@ -42,6 +41,8 @@ export function parseSource(input: string, tagPrefix?: string): ParsedSource {
       }
     }
     if (url.includes("\0") || url.includes("\r") || url.includes("\n")) throw new Error("invalid git url: control chars");
+    if (ref && (ref.length > 256 || /[\0\r\n]/.test(ref))) throw new Error("invalid git ref");
+    if (tagPrefix !== undefined && (tagPrefix.length > 128 || /[\0\r\n]/.test(tagPrefix))) throw new Error("invalid tag prefix");
     const isHttps = url.startsWith("https://");
     const isSsh = url.startsWith("git@") || url.startsWith("ssh://");
     if (!isHttps && !isSsh) throw new Error("git url must be https:// or git@ / ssh:// (got: " + url + ")");
@@ -102,7 +103,7 @@ function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
   const timeoutMs = opts.timeoutMs ?? 120_000;
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
-    let out = ""; let err = ""; let killed = false;
+    let killed = false;
     const timer = setTimeout(() => { killed = true; child.kill("SIGKILL"); reject(new Error(`${cmd} timed out after ${timeoutMs}ms`)); }, timeoutMs);
     const cap = (chunk: Buffer, holder: { v: string }) => { holder.v += chunk.toString(); if (holder.v.length > maxBytes) holder.v = holder.v.slice(0, maxBytes); };
     const outH = { v: "" }; const errH = { v: "" };
@@ -113,30 +114,81 @@ function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
   });
 }
 
+interface ReleaseTag {
+  tag: string;
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: boolean;
+}
+
+function parseReleaseTag(tag: string, prefix: string): ReleaseTag | null {
+  const version = tag.slice(prefix.length);
+  const match = /^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
+  if (!match) return null;
+  return {
+    tag,
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] !== undefined,
+  };
+}
+
+function compareReleaseTags(a: ReleaseTag, b: ReleaseTag): number {
+  for (const key of ["major", "minor", "patch"] as const) {
+    if (a[key] !== b[key]) return b[key] - a[key];
+  }
+  if (a.prerelease !== b.prerelease) return a.prerelease ? 1 : -1;
+  return a.tag.localeCompare(b.tag);
+}
+
+async function resolveReleaseTag(url: string, prefix: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const result = await run("git", ["ls-remote", "--tags", "--refs", url, `${prefix}v*`], {
+    env,
+    timeoutMs: 30_000,
+    maxBytes: 5 * 1024 * 1024,
+  });
+  if (result.exitCode !== 0) throw new Error(`git tag lookup failed: ${result.stderr || result.stdout}`.slice(0, 600));
+  const tags = result.stdout
+    .split("\n")
+    .map((line) => line.split("\t")[1]?.replace(/^refs\/tags\//, "").trim())
+    .filter((tag): tag is string => tag !== undefined)
+    .map((tag) => parseReleaseTag(tag, prefix))
+    .filter((tag): tag is ReleaseTag => tag !== null)
+    .sort(compareReleaseTags);
+  if (tags.length === 0) throw new Error(`no release tag matching ${prefix}vX.Y.Z found for ${url}`);
+  return tags[0].tag;
+}
+
 export async function fetchSource(parsed: ParsedSource, stagingBase: string): Promise<FetchResult> {
   await ensureDir(stagingBase);
   const stagingPath = stagingDir(stagingBase, `src-${parsed.type}`);
   await ensureDir(stagingPath);
 
+  try {
   if (parsed.type === "path") {
     const src = path.resolve(parsed.localPath!);
     let stat: fs.Stats;
     try { stat = await fsp.stat(src); } catch (e) { throw new Error(`path not found: ${src}: ${(e as Error).message}`); }
     if (!stat.isDirectory()) throw new Error(`path must be directory: ${src}`);
-    const { bytes } = await safeCopyDir(src, stagingPath, { maxBytes: LIMITS.maxStagingBytes });
+    await safeCopyDir(src, stagingPath, { maxBytes: LIMITS.maxStagingBytes });
     await auditTree(stagingPath);
-    const h = crypto.createHash("sha256").update(src).update(String(stat.mtimeMs)).update(String(bytes)).digest("hex").slice(0, 16);
+    const h = await hashDirectory(stagingPath);
     return { stagingPath, resolved: `path:${src}#${h}`, contentHash: h };
   }
 
   if (parsed.type === "git") {
     const url = parsed.gitUrl!;
     const ref = parsed.gitRef;
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+    const selectedRef = ref ?? (parsed.tagPrefix !== null && parsed.tagPrefix !== undefined
+      ? await resolveReleaseTag(url, parsed.tagPrefix, env)
+      : undefined);
     const cloneArgs = ["clone", "--depth", "1", "--no-tags"];
-    if (ref) cloneArgs.push("--branch", ref);
+    if (selectedRef) cloneArgs.push("--branch", selectedRef);
     cloneArgs.push(url, stagingPath);
     await rimraf(stagingPath);
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
     const result = await run("git", cloneArgs, { env, timeoutMs: 30_000, maxBytes: 5 * 1024 * 1024 });
     if (result.exitCode !== 0) {
       const raw = result.stderr || result.stdout;
@@ -146,30 +198,12 @@ export async function fetchSource(parsed: ParsedSource, stagingBase: string): Pr
       }
       throw new Error(`git clone failed: ${raw.slice(0, 500)}`);
     }
-    if (parsed.tagPrefix !== null && parsed.tagPrefix !== undefined) {
-      try {
-        const tagRes = await run("git", ["tag", "--list", `${parsed.tagPrefix}v*`], { cwd: stagingPath });
-        if (tagRes.exitCode === 0) {
-          const tags = tagRes.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-          if (tags.length > 0) {
-            const semver = tags.map(t => ({ t, v: t.slice(parsed.tagPrefix!.length) })).sort((a,b) => {
-              const ap = a.v.replace(/^v/, "").split(".").map(n => parseInt(n,10)||0);
-              const bp = b.v.replace(/^v/, "").split(".").map(n => parseInt(n,10)||0);
-              for (let i=0;i<3;i++) if ((bp[i]||0)!==(ap[i]||0)) return (bp[i]||0)-(ap[i]||0);
-              return 0;
-            });
-            const best = semver[0].t;
-            const co = await run("git", ["checkout", best], { cwd: stagingPath });
-            if (co.exitCode !== 0) throw new Error(`checkout tag ${best} failed: ${co.stderr}`);
-          }
-        }
-      } catch {}
-    }
-    await rimraf(path.join(stagingPath, ".git")).catch(() => {});
+    const rev = await run("git", ["rev-parse", "HEAD"], { cwd: stagingPath, env, timeoutMs: 30_000 });
+    if (rev.exitCode !== 0 || !rev.stdout.trim()) throw new Error(`git clone did not produce a commit: ${rev.stderr || rev.stdout}`.slice(0, 600));
+    const commit = rev.stdout.trim();
+    await rimraf(path.join(stagingPath, ".git"));
     await auditTree(stagingPath);
-    const rev = await run("git", ["rev-parse", "HEAD"], { cwd: stagingPath }).catch(() => ({ stdout: "unknown", stderr: "", exitCode: 0 }));
-    const commit = rev.stdout.trim() || "unknown";
-    const contentHash = crypto.createHash("sha256").update(commit).digest("hex").slice(0, 16);
+    const contentHash = await hashDirectory(stagingPath);
     return { stagingPath, resolved: `git:${url}@${commit}`, contentHash };
   }
 
@@ -210,9 +244,13 @@ export async function fetchSource(parsed: ParsedSource, stagingBase: string): Pr
       const pkgJson = JSON.parse(await fsp.readFile(path.join(stagingPath, "package.json"), "utf8")) as { version?: string };
       if (pkgJson.version) version = pkgJson.version;
     } catch {}
-    const contentHash = crypto.createHash("sha256").update(`${pkg}@${version}`).digest("hex").slice(0, 16);
+    const contentHash = await hashDirectory(stagingPath);
     return { stagingPath, resolved: `npm:${pkg}@${version}`, contentHash };
   }
 
   throw new Error(`unsupported source type: ${(parsed as { type: string }).type}`);
+  } catch (e) {
+    await rimraf(stagingPath).catch(() => {});
+    throw e;
+  }
 }

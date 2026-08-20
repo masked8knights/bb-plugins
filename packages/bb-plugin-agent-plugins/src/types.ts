@@ -34,6 +34,7 @@ export interface PluginSkillRecord {
   materializedPath: string | null;
   status: "active" | "conflicted" | "skipped" | "error";
   lastError: string | null;
+  enabled: number; // 0/1
 }
 
 export interface McpServerRecord {
@@ -44,6 +45,7 @@ export interface McpServerRecord {
   status: "idle" | "ready" | "error" | "disabled" | "needs-approval";
   lastError: string | null;
   approved: number; // 0/1
+  enabled: number; // 0/1
 }
 
 export interface AgentPluginSnapshot {

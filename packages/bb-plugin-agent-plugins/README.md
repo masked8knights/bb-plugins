@@ -21,10 +21,12 @@ bb plugin install git:https://github.com/patleeman/bb-plugins.git --subdirectory
 
 ## Use
 
-- **UI:** Open **Agent Plugins** in the sidebar → paste a location (`/abs/path`, `https://github.com/acme/my-plugin`, `npm:my-plugin@^1.0`) or **Browse…** for a local folder → **Install**. Skills appear next session; MCP servers need **Approve & start**.
+- **UI:** Open **Agent Plugins** in the sidebar → paste a location (`/abs/path`, `https://github.com/acme/my-plugin`, `npm:my-plugin@^1.0`) or **Browse…** for a local folder → **Install**. Expand an installed plugin to enable or disable each skill and MCP server independently. Disabled skills are not materialized for the next session; disabled MCP servers are removed from the bridge catalog while their approval is preserved. Supported MCP servers still need **Approve & start**.
 - **CLI:** `bb agent-plugins list --json` · `bb agent-plugins show <id> --json` · `bb agent-plugins tools --json` · `bb agent-plugins call <opaqueId> '{"text":"hello"}'`
 
-Updates keep `pluginData` — reinstall the same location and the plugin swaps atomically.
+This v0 release installs one package instance at a time. Remove an existing
+plugin before installing the same package name again; removal keeps its data
+unless you choose to purge it.
 
 ## Spec
 

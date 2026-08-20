@@ -74,6 +74,10 @@ describe("validateMcpServer", () => {
     const r = validateMcpServer("x", { type: "stdio", command: "echo", env: { PLUGIN_ROOT: "bad" } });
     expect(r.valid).toBe(false);
   });
+  it("rejects reserved env names in any casing", () => {
+    const r = validateMcpServer("x", { type: "stdio", command: "echo", env: { plugin_root: "bad" } });
+    expect(r.valid).toBe(false);
+  });
   it("accepts localhost http", () => {
     const r = validateMcpServer("x", { type: "streamable-http", url: "http://localhost:3000/mcp" });
     expect(r.valid).toBe(true);

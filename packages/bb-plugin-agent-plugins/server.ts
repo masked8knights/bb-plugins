@@ -1,18 +1,16 @@
 // bb-plugin-agent-plugins — backend entry (full activation)
 import * as fsp from "node:fs/promises";
-import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import * as crypto from "node:crypto";
 import * as yaml from "js-yaml";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { AgentPluginsStore } from "./src/store.js";
-import { validateManifest, validateMcpEnvelope, validateMcpServer, validateSkillFrontmatter, expandPlaceholders } from "./src/loader.js";
+import { validateManifest, validateMcpEnvelope, validateMcpServer, validateSkillFrontmatter } from "./src/loader.js";
 import { McpGateway } from "./src/gateway.js";
 import { parseSource, fetchSource } from "./src/source.js";
 import { materializeSkill, unmaterializeSkill } from "./src/skills-impl.js";
-import { ensureDir, hashDirectory, rimraf, safeCopyDir, stagingDir, atomicRename, LIMITS } from "./src/safe-fs.js";
+import { ensureDir, hashDirectory, rimraf, atomicRename, LIMITS } from "./src/safe-fs.js";
 import type { CatalogTool } from "./src/types.js";
 
 const jsonRecordSchema = z.record(z.string(), z.unknown());
@@ -45,6 +43,8 @@ export const rpcContract = defineRpcContract({
   remove: { input: z.object({ id: z.string().min(1), purgeData: z.boolean().optional() }).strict(), output: z.object({ deleted: z.boolean() }).strict() },
   refresh: { input: z.object({ id: z.string().min(1) }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
   approve: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ approved: z.boolean() }).strict() },
+  setSkillEnabled: { input: z.object({ id: z.string().min(1), skillName: z.string().min(1), enabled: z.boolean() }).strict(), output: z.object({ enabled: z.boolean(), status: z.string(), lastError: z.string().nullable() }).strict() },
+  setMcpEnabled: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1), enabled: z.boolean() }).strict(), output: z.object({ enabled: z.boolean(), status: z.string(), lastError: z.string().nullable() }).strict() },
   pickFolder: { input: z.null(), output: z.object({ path: z.string().nullable() }).strict() },
 });
 
@@ -89,6 +89,146 @@ export default async function plugin(bb: BbPluginApi) {
   const gateway = new McpGateway(store, bb.log);
   const installLocks = new Set<string>();
 
+  async function publishChanged(payload: Record<string, unknown>): Promise<void> {
+    try {
+      await bb.realtime.publish("agent-plugins-changed", payload);
+    } catch (e) {
+      // Realtime is an observation channel; it must not turn a committed
+      // install or approval into a failed operation.
+      bb.log.warn(`[agent-plugins] realtime publish failed: ${errorText(e)}`);
+    }
+  }
+
+  async function approveServer(id: string, serverId: string): Promise<void> {
+    const p = store.getPlugin(id) ?? store.getPluginByName(id);
+    if (!p) throw new Error(`not found: ${id}`);
+    const srv = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
+    if (!srv) throw new Error(`server not found: ${serverId}`);
+    if (srv.enabled !== 1) throw new Error(`Enable MCP server ${serverId} before approving it`);
+    if (srv.status === "error") throw new Error(`Cannot approve invalid server ${serverId}: ${srv.lastError}`);
+
+    let cfg: Record<string, unknown>;
+    try {
+      cfg = JSON.parse(srv.configJson) as Record<string, unknown>;
+    } catch (e) {
+      throw new Error(`Cannot approve invalid server ${serverId}: ${errorText(e)}`);
+    }
+    const validation = validateMcpServer(serverId, cfg);
+    if (!validation.valid) throw new Error(`Cannot approve invalid server ${serverId}: ${validation.errors.join("; ")}`);
+    if (validation.type === "sse") throw new Error(`Cannot approve unsupported server ${serverId}: sse transport not supported in v0`);
+
+    store.transaction(() => {
+      store.upsertMcpServer({ ...srv, approved: 1, status: "idle", lastError: null });
+      if (p.approval === "pending" || p.status === "needs-approval") {
+        store.upsertPlugin({ ...p, status: "active", approval: "approved", updatedAt: Date.now() } as import("./src/types.js").PluginRecord);
+      }
+    });
+
+    // Approval is durable even when the first connection attempt fails. The
+    // gateway records that failure and can retry on a later tools request.
+    try {
+      await gateway.startServer(p.id, serverId);
+    } catch (e) {
+      const message = errorText(e);
+      const failed = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
+      if (failed) store.upsertMcpServer({ ...failed, status: "error", lastError: message });
+      bb.log.warn(`[agent-plugins] approve start failed for ${serverId}: ${message}`);
+    }
+    await publishChanged({ kind: "approve", id: p.id, serverId });
+  }
+
+  async function pathExists(filePath: string): Promise<boolean> {
+    try {
+      await fsp.stat(filePath);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  }
+
+  async function setSkillEnabled(id: string, skillName: string, enabled: boolean) {
+    const p = store.getPlugin(id) ?? store.getPluginByName(id);
+    if (!p) throw new Error(`not found: ${id}`);
+    const skill = store.listSkills(p.id).find((s) => s.skillName === skillName);
+    if (!skill) throw new Error(`skill not found: ${skillName}`);
+
+    if (!enabled) {
+      if (skill.materializedPath) {
+        const removed = await unmaterializeSkill({ installId: p.id, skillName, dataDir: await getDataDir() });
+        if (!removed && await pathExists(skill.materializedPath)) {
+          throw new Error(`Cannot disable skill ${skillName}: it was modified outside Agent Plugins. Resolve the conflict before disabling it.`);
+        }
+      }
+      store.upsertSkill({
+        ...skill,
+        enabled: 0,
+        materializedPath: null,
+        status: "skipped",
+        lastError: skill.status === "active" ? null : skill.lastError,
+      });
+    } else {
+      const result = await materializeSkill({
+        installId: p.id,
+        pluginName: p.name,
+        skillName,
+        srcDir: path.join(p.pluginRoot, skill.skillDir),
+        dataDir: await getDataDir(),
+        specVersion: p.specVersion,
+      });
+      store.upsertSkill({
+        ...skill,
+        enabled: 1,
+        materializedPath: result.materializedPath,
+        status: result.status,
+        lastError: result.error,
+      });
+    }
+
+    const updated = store.listSkills(p.id).find((s) => s.skillName === skillName);
+    if (!updated) throw new Error(`skill disappeared while updating: ${skillName}`);
+    await publishChanged({ kind: "skill-toggle", id: p.id, skillName, enabled });
+    return { enabled: updated.enabled === 1, status: updated.status, lastError: updated.lastError };
+  }
+
+  async function setMcpEnabled(id: string, serverId: string, enabled: boolean) {
+    const p = store.getPlugin(id) ?? store.getPluginByName(id);
+    if (!p) throw new Error(`not found: ${id}`);
+    const srv = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
+    if (!srv) throw new Error(`server not found: ${serverId}`);
+
+    if (!enabled) {
+      store.upsertMcpServer({ ...srv, enabled: 0, status: "disabled", lastError: null });
+      await gateway.closeServer(p.id, serverId);
+    } else {
+      let cfg: Record<string, unknown>;
+      try {
+        cfg = JSON.parse(srv.configJson) as Record<string, unknown>;
+      } catch (e) {
+        throw new Error(`Cannot enable invalid server ${serverId}: ${errorText(e)}`);
+      }
+      const validation = validateMcpServer(serverId, cfg);
+      if (!validation.valid) throw new Error(`Cannot enable invalid server ${serverId}: ${validation.errors.join("; ")}`);
+      if (validation.type === "sse") throw new Error(`Cannot enable unsupported server ${serverId}: sse transport not supported in v0`);
+      store.upsertMcpServer({ ...srv, enabled: 1, status: "idle", lastError: null });
+      if (srv.approved === 1) {
+        try {
+          await gateway.startServer(p.id, serverId);
+        } catch (e) {
+          const message = errorText(e);
+          const failed = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
+          if (failed) store.upsertMcpServer({ ...failed, status: "error", lastError: message });
+          bb.log.warn(`[agent-plugins] enable start failed for ${serverId}: ${message}`);
+        }
+      }
+    }
+
+    const updated = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
+    if (!updated) throw new Error(`server disappeared while updating: ${serverId}`);
+    await publishChanged({ kind: "mcp-toggle", id: p.id, serverId, enabled });
+    return { enabled: updated.enabled === 1, status: updated.status, lastError: updated.lastError };
+  }
+
   function redactMcpConfigJson(raw: string): string {
     try {
       const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -112,8 +252,9 @@ export default async function plugin(bb: BbPluginApi) {
     let dd: string | null = null;
     try { dd = await getDataDir(); } catch {}
     // Redact sensitive config for snapshot (headers/env values)
-    const redactedMcp = s.mcpServers.map(m => ({ ...m, configJson: redactMcpConfigJson(m.configJson) }));
-    return { plugins: s.plugins as unknown as Record<string, unknown>[], skills: s.skills as unknown as Record<string, unknown>[], mcpServers: redactedMcp as unknown as Record<string, unknown>[], dataDir: dd };
+    const skills = s.skills.map((skill) => ({ ...skill, enabled: skill.enabled === 1 }));
+    const redactedMcp = s.mcpServers.map(m => ({ ...m, enabled: m.enabled === 1, configJson: redactMcpConfigJson(m.configJson) }));
+    return { plugins: s.plugins as unknown as Record<string, unknown>[], skills: skills as unknown as Record<string, unknown>[], mcpServers: redactedMcp as unknown as Record<string, unknown>[], dataDir: dd };
   };
 
   // Static bridge
@@ -156,8 +297,10 @@ export default async function plugin(bb: BbPluginApi) {
     let fetchRes: { stagingPath: string; resolved: string; contentHash: string } | null = null;
     let pluginRoot: string | null = null;
     let installId: string | null = null;
+    let pluginDataPath: string | null = null;
     let cleanupStaging = true;
     let stagingPath: string | null = null;
+    const materializedSkillNames: string[] = [];
     try {
       const stagingBase = path.join(dd, "plugins", "agent-plugins", "staging");
       await ensureDir(stagingBase);
@@ -184,6 +327,7 @@ export default async function plugin(bb: BbPluginApi) {
       const dataBase = path.join(dd, "plugins", "agent-plugins", "data");
       pluginRoot = path.join(pluginsRootBase, installId, `v1`);
       const pluginData = path.join(dataBase, installId);
+      pluginDataPath = pluginData;
       await ensureDir(path.dirname(pluginRoot));
       await ensureDir(pluginData);
 
@@ -233,29 +377,29 @@ export default async function plugin(bb: BbPluginApi) {
       // Validate MCP envelope + per-server
       const mcpJsonPath = path.join(stagingPath!, "mcp.json");
       let mcpServers: { id: string; raw: unknown; valid: boolean; errors: string[]; type: string | null }[] = [];
-      let mcpDisabled = false;
-      let mcpEnvelopeValid = true;
-      let mcpWarnings: string[] = [];
       try {
         const hasMcp = await fsp.stat(mcpJsonPath).then(() => true).catch(() => false);
         if (hasMcp) {
           const mcpRaw = await readJsonLimited(mcpJsonPath);
           const envelope = validateMcpEnvelope(mcpRaw, specVersion);
-          mcpEnvelopeValid = envelope.valid;
-          mcpWarnings = envelope.warnings;
           if (!envelope.valid) {
-            mcpDisabled = true;
             bb.log.warn(`[agent-plugins] mcp disabled for ${name}: ${envelope.envelopeErrors.join("; ")}`);
           } else {
             if (Object.keys(envelope.servers).length > LIMITS.maxMcpServerCount) throw new Error(`too many mcp servers`);
             for (const [sid, raw] of Object.entries(envelope.servers)) {
               const r = validateMcpServer(sid, raw);
-              mcpServers.push({ id: sid, raw, valid: r.valid, errors: r.errors, type: r.type });
+              const unsupported = r.valid && r.type === "sse";
+              mcpServers.push({
+                id: sid,
+                raw,
+                valid: r.valid && !unsupported,
+                errors: unsupported ? ["sse transport not supported in v0"] : r.errors,
+                type: r.type,
+              });
             }
           }
         }
       } catch (err) {
-        mcpDisabled = true;
         bb.log.warn(`[agent-plugins] mcp disabled for ${name}: ${errorText(err)}`);
       }
 
@@ -274,8 +418,9 @@ export default async function plugin(bb: BbPluginApi) {
             skillResults.push({ name: s.dirName, status: "skipped", error: s.errors.join("; "), materializedPath: null });
             continue;
           }
-          const res = await materializeSkill({ installId: installId!, pluginName: name, skillName: s.dirName, srcDir: path.join(pluginRoot!, "skills", s.dirName), dataDir: dd, specVersion, bodyHash: s.bodyHash });
+          const res = await materializeSkill({ installId: installId!, pluginName: name, skillName: s.dirName, srcDir: path.join(pluginRoot!, "skills", s.dirName), dataDir: dd, specVersion });
           skillResults.push({ name: s.dirName, status: res.status, error: res.error, materializedPath: res.materializedPath });
+          if (res.materializedPath) materializedSkillNames.push(s.dirName);
         }
       }
 
@@ -283,6 +428,9 @@ export default async function plugin(bb: BbPluginApi) {
       const now = Date.now();
       const pluginVersion = (mRes.manifest as { version?: string } | null)?.version ?? null;
       const pluginDescription = mRes.description ?? null;
+      const hasValidMcp = mcpServers.some((s) => s.valid);
+      const pluginStatus: "active" | "needs-approval" = hasValidMcp ? "needs-approval" : "active";
+      const pluginApproval: "pending" | "approved" = hasValidMcp ? "pending" : "approved";
       const pluginRecord = {
         id: installId!,
         name,
@@ -297,8 +445,8 @@ export default async function plugin(bb: BbPluginApi) {
         pluginRoot: pluginRoot!,
         pluginData,
         activeGen: 1,
-        status: "needs-approval" as const,
-        approval: "pending" as const,
+        status: pluginStatus,
+        approval: pluginApproval,
         lastError: null,
         contentHash,
         installedAt: now,
@@ -318,6 +466,7 @@ export default async function plugin(bb: BbPluginApi) {
             materializedPath: mr?.materializedPath ?? null,
             status: (mr?.status as unknown as "active" | "conflicted" | "skipped" | "error") ?? (s.valid ? "active" : "skipped"),
             lastError: mr?.error ?? (s.valid ? null : s.errors.join("; ")),
+            enabled: 1,
           });
         }
         for (const srv of mcpServers) {
@@ -329,21 +478,22 @@ export default async function plugin(bb: BbPluginApi) {
             status: srv.valid ? "idle" : "error",
             lastError: srv.valid ? null : srv.errors.join("; "),
             approved: 0,
+            enabled: 1,
           });
         }
       });
 
-      await bb.realtime.publish("agent-plugins-changed", { kind: "install", id: installId! });
+      await publishChanged({ kind: "install", id: installId! });
       return { id: installId!, name };
     } catch (e) {
       // Transactional cleanup: remove promoted pluginRoot and any materialized skills if DB failed
       try { if (pluginRoot) { await rimraf(pluginRoot).catch(() => {}); await rimraf(path.dirname(pluginRoot)).catch(() => {}); } } catch {}
-      try {
-        if (installId) {
-          const partialSkills = store.listSkills(installId);
-          for (const s of partialSkills) if (s.materializedPath) await unmaterializeSkill({ installId: installId!, skillName: s.skillName, dataDir: dd }).catch(() => {});
+      if (installId) {
+        for (const skillName of materializedSkillNames) {
+          await unmaterializeSkill({ installId, skillName, dataDir: dd }).catch(() => {});
         }
-      } catch {}
+      }
+      if (pluginDataPath) await rimraf(pluginDataPath).catch(() => {});
       throw e;
     } finally {
       installLocks.delete(lockKey);
@@ -361,47 +511,40 @@ export default async function plugin(bb: BbPluginApi) {
       const p = store.getPlugin(id) ?? store.getPluginByName(id);
       if (!p) return { deleted: false };
       // Unmaterialize owned skills
-      let dd: string | null = null;
-      try { dd = await getDataDir(); } catch {}
-      if (dd) {
-        const skills = store.listSkills(p.id);
-        for (const s of skills) {
-          if (s.materializedPath) {
-            try { await unmaterializeSkill({ installId: p.id, skillName: s.skillName, dataDir: dd }); } catch (e) { bb.log.warn(`[agent-plugins] unmaterialize ${s.skillName}: ${errorText(e)}`); }
-          }
+      const dd = await getDataDir();
+      const skills = store.listSkills(p.id);
+      for (const s of skills) {
+        if (s.materializedPath) {
+          try { await unmaterializeSkill({ installId: p.id, skillName: s.skillName, dataDir: dd }); } catch (e) { bb.log.warn(`[agent-plugins] unmaterialize ${s.skillName}: ${errorText(e)}`); }
         }
-        // Close MCP servers
-        for (const srv of store.listMcpServers(p.id)) {
-          try { await gateway.closeServer(p.id, srv.serverId); } catch {}
-        }
-        if (purgeData) await rimraf(p.pluginData).catch(() => {});
-        else bb.log.info(`[agent-plugins] preserve pluginData ${p.pluginData} (use --purge-data to delete)`);
-        // Remove pluginRoot generation dir's parent (the installId dir)
-        await rimraf(path.dirname(p.pluginRoot)).catch(() => {});
       }
+      // Close MCP servers
+      for (const srv of store.listMcpServers(p.id)) {
+        try { await gateway.closeServer(p.id, srv.serverId); } catch {}
+      }
+      if (purgeData) await rimraf(p.pluginData).catch(() => {});
+      else bb.log.info(`[agent-plugins] preserve pluginData ${p.pluginData} (use --purge-data to delete)`);
+      // Remove pluginRoot generation dir's parent (the installId dir)
+      await rimraf(path.dirname(p.pluginRoot)).catch(() => {});
       const deleted = store.deletePlugin(p.id);
-      await bb.realtime.publish("agent-plugins-changed", { kind: "remove", id: p.id });
+      await publishChanged({ kind: "remove", id: p.id });
       return { deleted };
     },
     async refresh({ id }) {
       const p = store.getPlugin(id) ?? store.getPluginByName(id);
       if (!p) throw new Error(`not found: ${id}`);
-      // For v0 refresh just returns; future will re-validate staged tree
+      // Compatibility endpoint retained for older Agent Plugins clients.
       return { id: p.id, name: p.name };
     },
     async approve({ id, serverId }) {
-      const p = store.getPlugin(id) ?? store.getPluginByName(id);
-      if (!p) throw new Error(`not found: ${id}`);
-      const srv = store.listMcpServers(p.id).find(s => s.serverId === serverId);
-      if (!srv) throw new Error(`server not found: ${serverId}`);
-      store.transaction(() => {
-        store.upsertMcpServer({ ...srv, approved: 1, status: "idle", lastError: null });
-        // If plugin was pending, move to active after first approval
-        if (p.approval === "pending" || p.status === "needs-approval") {
-          store.upsertPlugin({ ...p, status: "active", approval: "approved", updatedAt: Date.now() } as import("./src/types.js").PluginRecord);
-        }
-      });
+      await approveServer(id, serverId);
       return { approved: true };
+    },
+    async setSkillEnabled({ id, skillName, enabled }) {
+      return setSkillEnabled(id, skillName, enabled);
+    },
+    async setMcpEnabled({ id, serverId, enabled }) {
+      return setMcpEnabled(id, serverId, enabled);
     },
     async pickFolder() {
       try {
@@ -478,15 +621,17 @@ export default async function plugin(bb: BbPluginApi) {
         const purge = rest.includes("--purge-data");
         const p = store.getPlugin(id) ?? store.getPluginByName(id);
         if (!p) return { exitCode: 1, stderr: `not found: ${id}\n` };
-        let dd: string | null = null; try { dd = await getDataDir(); } catch {}
-        if (dd) {
+        try {
+          const dd = await getDataDir();
           for (const s of store.listSkills(p.id)) if (s.materializedPath) await unmaterializeSkill({ installId: p.id, skillName: s.skillName, dataDir: dd }).catch(() => {});
           for (const srv of store.listMcpServers(p.id)) await gateway.closeServer(p.id, srv.serverId).catch(() => {});
           if (purge) await rimraf(p.pluginData).catch(() => {});
           await rimraf(path.dirname(p.pluginRoot)).catch(() => {});
+        } catch (e) {
+          return { exitCode: 1, stderr: `${errorText(e)}\n` };
         }
         const deleted = store.deletePlugin(p.id);
-        await bb.realtime.publish("agent-plugins-changed", { kind: "remove", id: p.id });
+        await publishChanged({ kind: "remove", id: p.id });
         return { exitCode: deleted ? 0 : 1, stdout: (asJson ? JSON.stringify({ deleted }) : deleted ? `Removed ${id}\n` : `Not found: ${id}\n`) };
       }
       if (cmd === "tools") {
@@ -508,17 +653,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (cmd === "approve") {
         const id = rest[0]; const serverId = rest[1];
         if (!id || !serverId || serverId === "--json") return { exitCode: 2, stderr: "Usage: bb agent-plugins approve <id> <serverId> [--json]\n" };
-        const p = store.getPlugin(id) ?? store.getPluginByName(id);
-        if (!p) return { exitCode: 1, stderr: `not found: ${id}\n` };
-        const srv = store.listMcpServers(p.id).find(s => s.serverId === serverId);
-        if (!srv) return { exitCode: 1, stderr: `server not found: ${serverId}\n` };
-        store.transaction(() => {
-          store.upsertMcpServer({ ...srv, approved: 1, status: "idle", lastError: null });
-          if (p.approval === "pending" || p.status === "needs-approval") {
-            store.upsertPlugin({ ...p, status: "active", approval: "approved", updatedAt: Date.now() } as import("./src/types.js").PluginRecord);
-          }
-        });
-        return { exitCode: 0, stdout: (asJson ? JSON.stringify({ approved: true }) : `Approved ${serverId}\n`) };
+        try {
+          await approveServer(id, serverId);
+          return { exitCode: 0, stdout: (asJson ? JSON.stringify({ approved: true }) : `Approved ${serverId}\n`) };
+        } catch (e) {
+          return { exitCode: 1, stderr: `${errorText(e)}\n` };
+        }
       }
       return { exitCode: 2, stderr: "Usage: bb agent-plugins <list|show|install|remove|tools|call|skills|approve> …\n" };
     },

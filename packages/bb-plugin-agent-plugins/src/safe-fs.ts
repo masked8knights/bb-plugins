@@ -1,7 +1,5 @@
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import * as os from "node:os";
 import * as crypto from "node:crypto";
 
 export const LIMITS = {
@@ -17,33 +15,6 @@ export const LIMITS = {
 export function isWithinRoot(resolvedPath: string, root: string): boolean {
   const rel = path.relative(root, resolvedPath);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-export async function realpathContained(targetPath: string, root: string): Promise<string> {
-  const resolvedRoot = await fsp.realpath(root);
-  let resolved: string;
-  try {
-    resolved = await fsp.realpath(targetPath);
-  } catch {
-    // If target doesn't exist, resolve normally and check parent containment
-    resolved = path.resolve(targetPath);
-  }
-  if (!isWithinRoot(resolved, resolvedRoot)) {
-    throw new Error(`path escapes plugin root: ${targetPath} -> ${resolved} not in ${resolvedRoot}`);
-  }
-  return resolved;
-}
-
-export function isSafeRelativePath(p: string): boolean {
-  // For plugin-relative paths that must begin with ./
-  return p.startsWith("./") && !p.includes("\0") && p.length <= LIMITS.maxPathLength;
-}
-
-export async function hashFile(filePath: string): Promise<string> {
-  const hash = crypto.createHash("sha256");
-  const data = await fsp.readFile(filePath);
-  hash.update(data);
-  return hash.digest("hex").slice(0, 16);
 }
 
 export async function hashDirectory(dir: string): Promise<string> {
@@ -144,6 +115,7 @@ export async function auditTree(root: string): Promise<void> {
   // Post-acquisition audit for git/npm/path staging trees: reject symlinks, hardlinks, special files, absolute/.. members, and enforce limits
   let files = 0;
   let bytes = 0;
+  const resolvedRoot = await fsp.realpath(root).catch(() => path.resolve(root));
   const walk = async (dir: string) => {
     const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const e of entries) {
@@ -170,7 +142,7 @@ export async function auditTree(root: string): Promise<void> {
         // Also ensure realpath containment (for any symlink that was not lstat-caught via intermediate)
         try {
           const real = await fsp.realpath(full);
-          if (!isWithinRoot(real, root)) throw new Error(`path escapes root via symlink: ${full} -> ${real}`);
+          if (!isWithinRoot(real, resolvedRoot)) throw new Error(`path escapes root via symlink: ${full} -> ${real}`);
         } catch (err) {
           if ((err as Error).message.includes("escapes")) throw err;
           // realpath may fail if file not yet? ignore
@@ -192,8 +164,4 @@ export async function ensureDir(p: string): Promise<void> {
 
 export async function rimraf(p: string): Promise<void> {
   await fsp.rm(p, { recursive: true, force: true });
-}
-
-export function tmpBase(): string {
-  return os.tmpdir();
 }

@@ -3,8 +3,6 @@
  * Implements spec-correct validation per 1.0.0 + 1.1.0 (preview).
  * No fs side-effects here; callers pass already-read JSON/text.
  */
-import { z } from "zod";
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -326,8 +324,11 @@ export function validateMcpServer(serverId: string, raw: unknown): McpServerResu
       else {
         for (const [k, v] of Object.entries(rec.env)) {
           if (typeof v !== "string") errors.push(`env.${k} must be string`);
-          // Spec §9.2: env MUST NOT contain PLUGIN_ROOT or PLUGIN_DATA (exact). We enforce exact on posix; windows would be case-insensitive but we keep strict.
-          if (k === "PLUGIN_ROOT" || k === "PLUGIN_DATA") errors.push(`env must not contain ${k}`);
+          // Reserved environment names are case-insensitive on Windows. Reject
+          // every casing so the same package cannot override client-owned
+          // values on one platform while being accepted on another.
+          const reserved = k.toUpperCase();
+          if (reserved === "PLUGIN_ROOT" || reserved === "PLUGIN_DATA") errors.push(`env must not contain ${k}`);
         }
       }
     }

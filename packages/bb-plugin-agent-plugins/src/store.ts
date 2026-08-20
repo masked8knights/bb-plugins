@@ -62,6 +62,11 @@ export class AgentPluginsStore {
         FOREIGN KEY (pluginId) REFERENCES plugins(id) ON DELETE CASCADE
       )`,
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_plugins_name ON plugins(name)`,
+      // Keep migrations append-only. These columns were added after the
+      // initial marketplace schema shipped, so existing installs default to
+      // enabled without rewriting their rows.
+      `ALTER TABLE plugin_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
+      `ALTER TABLE mcp_servers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
     ]);
   }
 
@@ -106,13 +111,23 @@ export class AgentPluginsStore {
   upsertSkill(record: PluginSkillRecord): void {
     this.db
       .prepare(
-        `INSERT INTO plugin_skills (pluginId, skillName, skillDir, frontmatterJson, bodyHash, materializedPath, status, lastError)
-         VALUES (@pluginId, @skillName, @skillDir, @frontmatterJson, @bodyHash, @materializedPath, @status, @lastError)
+        `INSERT INTO plugin_skills (pluginId, skillName, skillDir, frontmatterJson, bodyHash, materializedPath, status, lastError, enabled)
+         VALUES (@pluginId, @skillName, @skillDir, @frontmatterJson, @bodyHash, @materializedPath, @status, @lastError, @enabled)
          ON CONFLICT(pluginId, skillName) DO UPDATE SET
            skillDir=excluded.skillDir, frontmatterJson=excluded.frontmatterJson, bodyHash=excluded.bodyHash,
-           materializedPath=excluded.materializedPath, status=excluded.status, lastError=excluded.lastError`,
+           materializedPath=excluded.materializedPath, status=excluded.status, lastError=excluded.lastError,
+           enabled=excluded.enabled`,
       )
       .run(record as unknown as Record<string, unknown>);
+  }
+
+  setSkillEnabled(pluginId: string, skillName: string, enabled: boolean): PluginSkillRecord | undefined {
+    this.db
+      .prepare(`UPDATE plugin_skills SET enabled = ? WHERE pluginId = ? AND skillName = ?`)
+      .run(enabled ? 1 : 0, pluginId, skillName);
+    return this.db
+      .prepare(`SELECT * FROM plugin_skills WHERE pluginId = ? AND skillName = ?`)
+      .get(pluginId, skillName) as PluginSkillRecord | undefined;
   }
 
   listMcpServers(pluginId?: string): McpServerRecord[] {
@@ -125,12 +140,22 @@ export class AgentPluginsStore {
   upsertMcpServer(record: McpServerRecord): void {
     this.db
       .prepare(
-        `INSERT INTO mcp_servers (pluginId, serverId, type, configJson, status, lastError, approved)
-         VALUES (@pluginId, @serverId, @type, @configJson, @status, @lastError, @approved)
+        `INSERT INTO mcp_servers (pluginId, serverId, type, configJson, status, lastError, approved, enabled)
+         VALUES (@pluginId, @serverId, @type, @configJson, @status, @lastError, @approved, @enabled)
          ON CONFLICT(pluginId, serverId) DO UPDATE SET
-           type=excluded.type, configJson=excluded.configJson, status=excluded.status, lastError=excluded.lastError, approved=excluded.approved`,
+           type=excluded.type, configJson=excluded.configJson, status=excluded.status, lastError=excluded.lastError,
+           approved=excluded.approved, enabled=excluded.enabled`,
       )
       .run(record as unknown as Record<string, unknown>);
+  }
+
+  setMcpEnabled(pluginId: string, serverId: string, enabled: boolean): McpServerRecord | undefined {
+    this.db
+      .prepare(`UPDATE mcp_servers SET enabled = ? WHERE pluginId = ? AND serverId = ?`)
+      .run(enabled ? 1 : 0, pluginId, serverId);
+    return this.db
+      .prepare(`SELECT * FROM mcp_servers WHERE pluginId = ? AND serverId = ?`)
+      .get(pluginId, serverId) as McpServerRecord | undefined;
   }
 
   snapshot() {
