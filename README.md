@@ -7,6 +7,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-agent-checklists`](packages/bb-plugin-agent-checklists/) — attach
   persisted structured checklists to threads, update them with agent tools,
   and continue incomplete work automatically.
+- [`bb-plugin-agent-plugins`](packages/bb-plugin-agent-plugins/) — install Agent
+  Plugins once in BB and flow their skills and approved MCP tools to providers.
 - [`bb-plugin-plannotator`](packages/bb-plugin-plannotator/) — embed the upstream
   Plannotator plan-review app in BB's right panel and bridge its decisions back
   to agents.
@@ -49,5 +51,5 @@ This runs `bb plugin install <path> --yes` for every `packages/bb-plugin-*`
 and prints the resulting installed list. To install just one, use its path:
 
 ```sh
-bb plugin install ./packages/bb-plugin-agent-checklists
+bb plugin install ./packages/bb-plugin-agent-plugins
 ```
