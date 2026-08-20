@@ -2,7 +2,7 @@
  * MCP static bridge — server-host only v0, internal McpRuntime interface.
  * Real implementation for stdio + streamable-http, isolated failures,
  * placeholder expansion, containment, and approval gating.
- * Adapted from Toolbox gateway patterns.
+ * Uses isolated MCP gateway patterns.
  */
 import * as crypto from "node:crypto";
 import * as fsp from "node:fs/promises";

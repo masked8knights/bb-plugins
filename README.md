@@ -16,9 +16,6 @@ Plugins for [bb](https://github.com/patleeman/bb).
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
   attach Excalidraw drawings in conversations.
-- [`bb-plugin-toolbox`](packages/bb-plugin-toolbox/) — manage MCP servers and
-  raw CLI sources through one provider-neutral agent bridge and
-  aggregated MCP endpoint.
 - [`bb-plugin-comprehension`](packages/bb-plugin-comprehension/) — turn messages,
   selections, and threads into clear HTML, audio, and podcast explainers.
 - [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
@@ -52,5 +49,5 @@ This runs `bb plugin install <path> --yes` for every `packages/bb-plugin-*`
 and prints the resulting installed list. To install just one, use its path:
 
 ```sh
-bb plugin install ./packages/bb-plugin-toolbox
+bb plugin install ./packages/bb-plugin-agent-checklists
 ```
