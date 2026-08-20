@@ -59,7 +59,21 @@ function InstallBar({ onDone }: { onDone: () => void }) {
   const [value, setValue] = useState("");
   const [state, setState] = useState<"idle" | "installing" | "success" | "error">("idle");
   const [msg, setMsg] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
   const timerRef = useRef<number | null>(null);
+
+  const handleBrowse = async () => {
+    try {
+      setPicking(true);
+      const res = await rpc.call("pickFolder", null);
+      if (res.path) setValue(res.path);
+    } catch (e) {
+      setState("error");
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPicking(false);
+    }
+  };
 
   const submit = async () => {
     const v = value.trim();
@@ -93,6 +107,16 @@ function InstallBar({ onDone }: { onDone: () => void }) {
           aria-label="Plugin location"
           disabled={state === "installing"}
         />
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 shrink-0"
+          onClick={() => void handleBrowse()}
+          disabled={state === "installing" || picking}
+          aria-label="Browse for folder"
+        >
+          {picking ? "…" : "Browse…"}
+        </Button>
         <Button
           size="sm"
           className="h-9 min-w-[84px] shrink-0"

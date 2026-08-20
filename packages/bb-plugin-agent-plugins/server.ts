@@ -45,6 +45,7 @@ export const rpcContract = defineRpcContract({
   remove: { input: z.object({ id: z.string().min(1), purgeData: z.boolean().optional() }).strict(), output: z.object({ deleted: z.boolean() }).strict() },
   refresh: { input: z.object({ id: z.string().min(1) }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
   approve: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ approved: z.boolean() }).strict() },
+  pickFolder: { input: z.null(), output: z.object({ path: z.string().nullable() }).strict() },
 });
 
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e); }
@@ -401,6 +402,29 @@ export default async function plugin(bb: BbPluginApi) {
         }
       });
       return { approved: true };
+    },
+    async pickFolder() {
+      try {
+        const cfg = (await bb.sdk.system.config()) as unknown as { primaryHostId?: string | null };
+        let hostId: string | null = cfg.primaryHostId ?? null;
+        if (!hostId) {
+          try {
+            const hosts = (await bb.sdk.hosts.list()) as unknown as { hosts: { id: string }[] };
+            hostId = hosts.hosts[0]?.id ?? null;
+          } catch {}
+        }
+        if (!hostId) throw new Error("No host available for folder picker");
+        const res = (await (bb.sdk.hosts as unknown as { pickFolder: (args: { hostId: string }) => Promise<{ path: string | null }> }).pickFolder({ hostId })) as unknown as { path?: string | null };
+        const picked = (res as { path?: string | null }).path ?? null;
+        return { path: typeof picked === "string" ? picked : null };
+      } catch (e) {
+        try {
+          const res = await (bb.sdk.hosts as unknown as { pickFolder: (args: Record<string, unknown>) => Promise<{ path: string | null }> }).pickFolder({});
+          return { path: res.path ?? null };
+        } catch {
+          throw new Error(`Folder picker failed: ${errorText(e)}`);
+        }
+      }
     },
   });
 
