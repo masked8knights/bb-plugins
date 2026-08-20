@@ -52,6 +52,7 @@ export async function hashDirectory(dir: string): Promise<string> {
     const entries = await fsp.readdir(d, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const e of entries) {
+      if (e.name === ".git" || e.name === "node_modules" || e.name === ".pytest_cache" || e.name === "__pycache__") continue;
       const full = path.join(d, e.name);
       hash.update(e.name);
       hash.update(e.isDirectory() ? "d" : e.isFile() ? "f" : "o");
@@ -82,6 +83,7 @@ export async function safeCopyDir(
   const walk = async (s: string, d: string) => {
     const entries = await fsp.readdir(s, { withFileTypes: true });
     for (const e of entries) {
+      if (e.name === ".git" || e.name === "node_modules" || e.name === ".pytest_cache" || e.name === "__pycache__") continue;
       if (totalFiles >= maxFiles) throw new Error(`file count limit exceeded (${maxFiles})`);
       const srcPath = path.join(s, e.name);
       const dstPath = path.join(d, e.name);
@@ -89,7 +91,11 @@ export async function safeCopyDir(
       // Reject special files, symlinks, hardlinks in v0 — or prove contained. Simplest: reject any symlink.
       const stat = await fsp.lstat(srcPath);
       if (stat.isSymbolicLink()) throw new Error(`symlink not allowed: ${srcPath}`);
-      if (!stat.isDirectory() && !stat.isFile()) throw new Error(`special file not allowed: ${srcPath}`);
+      if (!stat.isDirectory() && !stat.isFile()) {
+        // Allow known git sockets inside .git to be skipped, otherwise reject
+        if (srcPath.includes("/.git/")) continue;
+        throw new Error(`special file not allowed: ${srcPath}`);
+      }
 
       if (e.isDirectory()) {
         await fsp.mkdir(dstPath, { recursive: true });
@@ -141,6 +147,7 @@ export async function auditTree(root: string): Promise<void> {
   const walk = async (dir: string) => {
     const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const e of entries) {
+      if (e.name === ".git" || e.name === "node_modules" || e.name === ".pytest_cache" || e.name === "__pycache__") continue;
       const full = path.join(dir, e.name);
       // Check path length
       if (full.length > LIMITS.maxPathLength) throw new Error(`path too long: ${full}`);
@@ -150,7 +157,10 @@ export async function auditTree(root: string): Promise<void> {
       // Hardlink detection: nlink > 1 for regular files means hardlink (directories have nlink>1 normally)
       if (lstat.isFile() && lstat.nlink > 1) throw new Error(`hardlink not allowed: ${full}`);
       if (lstat.isSymbolicLink()) throw new Error(`symlink not allowed: ${full}`);
-      if (!lstat.isDirectory() && !lstat.isFile()) throw new Error(`special file not allowed: ${full}`);
+      if (!lstat.isDirectory() && !lstat.isFile()) {
+        if (full.includes("/.git/")) continue;
+        throw new Error(`special file not allowed: ${full}`);
+      }
       if (lstat.isDirectory()) await walk(full);
       else if (lstat.isFile()) {
         files++;
