@@ -19,4 +19,4 @@ done
 
 echo
 echo "Installed $ok plugin(s). Installed plugins from this repo:"
-bb plugin list 2>/dev/null | grep -E "^(agent-checklists|cobalt2|ds4|emoji-react|excalidraw|plannotator|traces)@" || true
+bb plugin list 2>/dev/null | grep -E "^(agent-checklists|cobalt2|ds4|emoji-react|excalidraw|plannotator|prime-agent|traces)@" || true

@@ -18,6 +18,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
   attach Excalidraw drawings in conversations.
+- [`bb-plugin-prime-agent`](packages/bb-plugin-prime-agent/) — register Prime
+  Agent as an ACP-based bb provider (`acp-prime-agent`).
 - [`bb-plugin-comprehension`](packages/bb-plugin-comprehension/) — turn messages,
   selections, and threads into clear HTML, audio, and podcast explainers.
 - [`bb-plugin-emoji-react`](packages/bb-plugin-emoji-react/) — emoji reactions
