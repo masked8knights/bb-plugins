@@ -94,8 +94,10 @@ describe("Checklists app", () => {
   it("registers the library, inspector, composer picker, and summary", () => {
     expect(app.navPanels.map((panel) => panel.id)).toEqual(["templates"]);
     expect(app.navPanels[0]?.title).toBe("Checklists");
+    expect(app.navPanels[0]?.icon).toBe("ListTodo");
     expect(app.threadPanelActions.map((action) => action.id)).toEqual(["agent-checklist"]);
     expect(app.threadPanelActions[0]?.title).toBe("Checklist");
+    expect(app.threadPanelActions[0]?.icon).toBe("ListTodo");
     expect(app.pendingInteractions.map((interaction) => interaction.id)).toEqual(["agent-checklist-picker"]);
     expect(app.composerCustomizations).toHaveLength(1);
     const customization = app.composerCustomizations[0]!;
@@ -104,6 +106,7 @@ describe("Checklists app", () => {
       "Checklist",
     ]);
     const item = customization.plusMenu![0]!;
+    expect(item.icon).toBe("ListTodo");
     expect(typeof item.disabled).toBe("function");
     if (typeof item.disabled === "function") {
       const baseView = {

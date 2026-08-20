@@ -1424,7 +1424,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "templates",
     title: "Checklists",
-    icon: "ClipboardCheck",
+    icon: "ListTodo",
     path: "checklists",
     component: TemplateCatalog,
   });
@@ -1432,7 +1432,7 @@ export default definePluginApp((app) => {
   app.slots.threadPanelAction({
     id: "agent-checklist",
     title: "Checklist",
-    icon: "ClipboardCheck",
+    icon: "ListTodo",
     component: ThreadChecklistPanel,
   });
 
@@ -1448,7 +1448,7 @@ export default definePluginApp((app) => {
       {
         id: "agent-checklist",
         label: "Checklist",
-        icon: "ClipboardCheck",
+        icon: "ListTodo",
         description: "Attach a checklist to this conversation",
         disabled: (view) => view.scope.kind !== "thread",
         run: ({ view }) => {

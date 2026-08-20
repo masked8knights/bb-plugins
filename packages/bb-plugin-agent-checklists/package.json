@@ -11,7 +11,7 @@
     "name": "Checklists",
     "description": "Persisted checklists with workbench progress and automatic continuation.",
     "branding": {
-      "icon": "ClipboardCheck"
+      "icon": "ListTodo"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
