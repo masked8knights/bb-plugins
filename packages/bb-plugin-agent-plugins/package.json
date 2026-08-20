@@ -10,7 +10,7 @@
     "name": "Agent Plugins",
     "description": "Install Agent Plugins (skills + MCP) once; flow to every provider.",
     "branding": {
-      "icon": "Blocks"
+      "icon": "Puzzle"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
