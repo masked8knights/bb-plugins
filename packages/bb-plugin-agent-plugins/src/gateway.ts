@@ -73,7 +73,7 @@ export interface McpGatewayOptions {
   onRoots?: (pluginId: string, serverId: string) => Promise<unknown>;
 }
 
-const MCP_CLIENT_INFO = { name: "bb-agent-plugins", version: "0.2.0" };
+const MCP_CLIENT_INFO = { name: "bb-agent-plugins", version: "0.2.1" };
 const CONNECT_TIMEOUT_MS = 15_000;
 const OAUTH_TIMEOUT_MS = 15_000;
 const FETCH_TIMEOUT_GRACE_MS = 1_000;
@@ -81,6 +81,11 @@ const CLOSE_TIMEOUT_MS = 2_000;
 const RETRY_AFTER_MS = 5_000;
 
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e); }
+function authorizationFailure(params: URLSearchParams): string {
+  const code = params.get("error") ?? "unknown_error";
+  const description = params.get("error_description");
+  return `MCP authorization failed: ${code}${description ? ` — ${description}` : ""}`;
+}
 function slug(v: string): string { return v.toLowerCase().replace(/[^a-z0-9_-]+/gu, "_").replace(/^_+|_+$/gu, "") || "item"; }
 function shortHash(v: string): string { return crypto.createHash("sha256").update(v).digest("hex").slice(0, 10); }
 function keyOf(pluginId: string, serverId: string): string { return `${pluginId}:${serverId}`; }
@@ -368,10 +373,17 @@ export class McpGateway implements McpRuntime {
       const cfg = this.validatedConfig(record);
       if (cfg.type === "stdio") throw new Error("MCP OAuth is only available for HTTP transports");
       const provider = await this.providerFor(pluginId, serverId, new URL(cfg.url!));
-      await provider.validateState(params.get("state"));
+      try {
+        await provider.validateState(params.get("state"));
+      } catch (error) {
+        const message = errorText(error);
+        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        throw error;
+      }
       if (params.get("error")) {
-        await this.cancelAuthentication(pluginId, serverId, provider, undefined);
-        throw new Error(`MCP authorization failed: ${params.get("error")}`);
+        const message = authorizationFailure(params);
+        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        throw new Error(message);
       }
       const transport = this.createHttpTransport(cfg, provider);
       try {
@@ -380,20 +392,38 @@ export class McpGateway implements McpRuntime {
           this.options.oauthTimeoutMs ?? OAUTH_TIMEOUT_MS,
           `OAuth token exchange ${serverId}`,
         );
+      } catch (error) {
+        const message = errorText(error);
+        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        throw error;
       } finally {
         try { await withTimeout(transport.close(), CLOSE_TIMEOUT_MS, `close OAuth transport ${serverId}`); } catch {}
       }
-      await provider.clearPending();
-      await withTimeout(this.ensureServer(pluginId, serverId), CONNECT_TIMEOUT_MS, `reconnect ${serverId}`);
-      this.persistStatus(pluginId, serverId, "ready", null);
-      this.failures.delete(key);
-      await this.notifyChanged();
+      try {
+        await provider.clearPending();
+        await withTimeout(this.ensureServer(pluginId, serverId), CONNECT_TIMEOUT_MS, `reconnect ${serverId}`);
+        this.persistStatus(pluginId, serverId, "ready", null);
+        this.failures.delete(key);
+        await this.notifyChanged();
+      } catch (error) {
+        const message = errorText(error);
+        this.persistStatus(pluginId, serverId, "error", message);
+        await this.notifyChanged();
+        throw new Error(message);
+      }
       return;
     }
-    await pending.provider.validateState(params.get("state"));
+    try {
+      await pending.provider.validateState(params.get("state"));
+    } catch (error) {
+      const message = errorText(error);
+      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
+      throw error;
+    }
     if (params.get("error")) {
-      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending);
-      throw new Error(`MCP authorization failed: ${params.get("error")}`);
+      const message = authorizationFailure(params);
+      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
+      throw new Error(message);
     }
     try {
       await withTimeout(
@@ -402,10 +432,18 @@ export class McpGateway implements McpRuntime {
         `OAuth token exchange ${serverId}`,
       );
     } catch (error) {
-      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending);
+      const message = errorText(error);
+      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
       throw error;
     }
-    await pending.provider.clearPending();
+    try {
+      await pending.provider.clearPending();
+    } catch (error) {
+      const message = errorText(error);
+      this.persistStatus(pluginId, serverId, "error", message);
+      await this.notifyChanged();
+      throw error;
+    }
     // `finishAuth` exchanges the code on the transport that observed the
     // challenge. The SDK transport is already started at this point and must
     // not be passed to Client.connect() again; rebuild the connection with the
@@ -421,6 +459,7 @@ export class McpGateway implements McpRuntime {
       this.persistStatus(pluginId, serverId, "error", message);
       this.oauthPending.delete(key);
       try { await withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth client ${key}`); } catch {}
+      await this.notifyChanged();
       throw new Error(message);
     }
   }
@@ -848,7 +887,13 @@ export class McpGateway implements McpRuntime {
     }
   }
 
-  private async cancelAuthentication(pluginId: string, serverId: string, provider: McpOAuthProvider, pending: PendingAuth | undefined): Promise<void> {
+  private async cancelAuthentication(
+    pluginId: string,
+    serverId: string,
+    provider: McpOAuthProvider,
+    pending: PendingAuth | undefined,
+    message = "Authentication was not completed",
+  ): Promise<void> {
     const key = keyOf(pluginId, serverId);
     if (pending) this.oauthPending.delete(key);
     await provider.clearPending().catch((error) => this.log.warn(`clear MCP OAuth state ${key}: ${errorText(error)}`));
@@ -869,7 +914,7 @@ export class McpGateway implements McpRuntime {
     }
     const record = this.serverRecord(pluginId, serverId);
     const status = record.enabled === 1 ? "needs-auth" : "disabled";
-    this.persistStatus(pluginId, serverId, status, "Authentication was not completed");
+    this.persistStatus(pluginId, serverId, status, message);
     await this.notifyChanged();
   }
 

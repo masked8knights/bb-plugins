@@ -267,8 +267,10 @@ describe("MCP SDK OAuth integration", () => {
       enabled: 1,
     });
     const secrets = new MemorySecrets();
+    let changed = 0;
     const gateway = new McpGateway(store, { info() {}, warn() {}, error() {} }, {
       oauthTimeoutMs: 30,
+      onChanged: async () => { changed += 1; },
       oauth: {
         async getProvider(pluginId, serverId, serverUrl) {
           return new McpOAuthProvider(`${pluginId}:${serverId}`, serverUrl, new URL("http://127.0.0.1/callback"), secrets);
@@ -281,6 +283,8 @@ describe("MCP SDK OAuth integration", () => {
     const state = new URL(url!).searchParams.get("state");
     await expect(gateway.finishAuth(plugin.id, "hanging-oauth", new URLSearchParams({ code: "hang", state: state! }))).rejects.toThrow("OAuth token exchange hanging-oauth timed out");
     expect(store.listMcpServers(plugin.id)[0]?.status).toBe("needs-auth");
+    expect(store.listMcpServers(plugin.id)[0]?.lastError).toContain("OAuth token exchange hanging-oauth timed out");
+    expect(changed).toBeGreaterThan(0);
     expect(await gateway.authStatus(plugin.id, "hanging-oauth")).toBe("unauthenticated");
     await gateway.close();
   }, 5_000);

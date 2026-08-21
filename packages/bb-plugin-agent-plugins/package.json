@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-agent-plugins",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "files": [
     "dist",
@@ -48,6 +48,7 @@
     "jsdom": "29.0.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "sonner": "^2.0.7",
     "typescript": "^5.7.0",
     "vitest": "4.1.1"
   }

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 
@@ -177,6 +178,80 @@ describe("Agent Plugins settings", () => {
     await waitFor(() => expect(calls).toEqual([{ id: "plugin-1", serverId: "fastmail" }]));
     expect(opened).toHaveBeenNthCalledWith(1, "about:blank", "_blank");
     expect(authWindow.location.href).toBe("https://example.com/authorize?state=test");
+  });
+
+  it("shows a toast when an OAuth action fails", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    const authWindow = {
+      opener: window,
+      location: { href: "about:blank" },
+      close: vi.fn(),
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(authWindow);
+    const snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "OAuth Plugin", version: "1.0.0", specVersion: "1.0.0",
+        sourceType: "path", sourceIntent: "path:/tmp/oauth-plugin", sourceResolved: null,
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [{
+        pluginId: "plugin-1", serverId: "fastmail", type: "streamable-http", status: "needs-auth",
+        authStatus: "unauthenticated", lastError: "Authentication required", approved: 1, enabled: true,
+        configJson: JSON.stringify({ type: "streamable-http", url: "https://example.com/mcp" }),
+      }],
+      dataDir: "/tmp/bb",
+    };
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => snapshot,
+        authenticate: () => { throw new Error("OAuth token exchange timed out"); },
+      } as never,
+    });
+
+    fireEvent.click(await slot.findByRole("button", { name: /OAuth Plugin/ }));
+    fireEvent.click(await slot.findByRole("button", { name: "Authenticate fastmail" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalledWith(
+      "OAuth token exchange timed out",
+      expect.objectContaining({ id: "agent-plugins:mcp-auth:plugin-1:fastmail:error" }),
+    ));
+  });
+
+  it("notifies when a delayed OAuth callback changes server state to failed", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    let snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "OAuth Plugin", version: "1.0.0", specVersion: "1.0.0",
+        sourceType: "path", sourceIntent: "path:/tmp/oauth-plugin", sourceResolved: null,
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [{
+        pluginId: "plugin-1", serverId: "fastmail", type: "streamable-http", status: "needs-auth",
+        authStatus: "authorizing", lastError: null as string | null, approved: 1, enabled: true,
+        configJson: JSON.stringify({ type: "streamable-http", url: "https://example.com/mcp" }),
+      }],
+      dataDir: "/tmp/bb",
+    };
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: { snapshot: () => snapshot } as never,
+    });
+
+    await slot.findByRole("button", { name: /OAuth Plugin/ });
+    expect(errorToast).not.toHaveBeenCalled();
+    snapshot = {
+      ...snapshot,
+      mcpServers: [{
+        ...snapshot.mcpServers[0]!,
+        authStatus: "unauthenticated",
+        lastError: "OAuth token exchange timed out",
+      }],
+    };
+    await slot.emitRealtime("agent-plugins-changed", { kind: "oauth-failed" });
+    await waitFor(() => expect(errorToast).toHaveBeenCalledWith(
+      "fastmail: OAuth token exchange timed out",
+      expect.objectContaining({ id: "mcp:plugin-1:fastmail:error" }),
+    ));
   });
 
   it("supports reconnect, forced reauthorization, and local disconnect", async () => {

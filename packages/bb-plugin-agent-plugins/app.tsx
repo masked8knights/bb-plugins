@@ -5,6 +5,7 @@ import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
 
 type Snapshot = {
   plugins: {
@@ -23,6 +24,14 @@ type Snapshot = {
   mcpServers: { pluginId: string; serverId: string; type: string; status: string; authStatus?: string; lastError: string | null; approved: number; enabled: boolean; configJson: string }[];
   dataDir: string | null;
 };
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function notifyError(message: string, id: string): void {
+  toast.error(message, { id, duration: 8000 });
+}
 
 function Dot({ status }: { status: string }) {
   const c =
@@ -80,7 +89,10 @@ function navigateAuthorizationWindow(authWindow: Window | null, url: string | nu
       // unavailable (for example, a test or embedded browser surface).
     }
   }
-  window.open(url, "_blank", "noopener,noreferrer");
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    throw new Error("BB could not open the authorization window. Allow pop-ups and try again.");
+  }
 }
 
 function useSnapshot() {
@@ -119,8 +131,10 @@ function InstallBar({ onDone }: { onDone: () => void }) {
       const res = await rpc.call("pickFolder", null);
       if (res.path) setValue(res.path);
     } catch (e) {
+      const message = errorText(e);
       setState("error");
-      setMsg(e instanceof Error ? e.message : String(e));
+      setMsg(message);
+      notifyError(message, "agent-plugins:pick-folder:error");
     } finally {
       setPicking(false);
     }
@@ -128,19 +142,31 @@ function InstallBar({ onDone }: { onDone: () => void }) {
 
   const submit = async () => {
     const v = value.trim();
-    if (!v) { setState("error"); setMsg("Enter a path, git URL, or npm spec."); return; }
+    if (!v) {
+      const message = "Enter a path, git URL, or npm spec.";
+      setState("error");
+      setMsg(message);
+      notifyError(message, "agent-plugins:install:error");
+      return;
+    }
     try {
       setState("installing"); setMsg(null);
       const res = await rpc.call("install", { source: v });
       setState("success");
       setMsg(`Installed ${res.name ?? v} — skills will appear next session.`);
+      toast.success("Plugin installed", {
+        description: `${res.name ?? v} is ready for the next session.`,
+        duration: 5000,
+      });
       setValue("");
       onDone();
       if (timerRef.current) window.clearTimeout(timerRef.current);
       timerRef.current = window.setTimeout(() => { setState("idle"); setMsg(null); }, 3000) as unknown as number;
     } catch (e) {
+      const message = errorText(e);
       setState("error");
-      setMsg(e instanceof Error ? e.message : String(e));
+      setMsg(message);
+      notifyError(message, "agent-plugins:install:error");
     }
   };
 
@@ -240,7 +266,7 @@ function PluginRow({
 }) {
   const [open, setOpen] = useState(false);
   const hasIssues = skills.some((s) => s.enabled && (s.status === "error" || s.status === "conflicted")) || servers.some((s) => s.enabled && (s.status === "error" || s.status === "needs-auth"));
-  const issueMessage = skills.find((s) => s.enabled && s.lastError)?.lastError ?? servers.find((s) => s.enabled && s.lastError)?.lastError;
+  const issueMessage = skills.find((s) => s.enabled && s.lastError)?.lastError ?? servers.find((s) => s.enabled && s.lastError)?.lastError ?? "One or more capabilities need attention.";
   const enabledSkillCount = skills.filter((s) => s.enabled).length;
   const enabledServerCount = servers.filter((s) => s.enabled).length;
 
@@ -302,7 +328,7 @@ function PluginRow({
                             {s.enabled ? "Available to agents in the next session." : "Disabled; it will not be materialized for agents."}
                           </p>
                           {s.lastError && (
-                            <p className="mt-1 text-[11px] leading-snug text-destructive">{s.lastError}</p>
+                            <p className="mt-1 text-[11px] leading-snug text-destructive" role="alert">{s.lastError}</p>
                           )}
                         </div>
                         <Toggle
@@ -320,7 +346,7 @@ function PluginRow({
           )}
 
           {hasIssues && (
-            <p className="mt-3 text-xs leading-snug text-destructive">{issueMessage}</p>
+            <p className="mt-3 text-xs leading-snug text-destructive" role="alert">{issueMessage}</p>
           )}
 
           {servers.length > 0 && (
@@ -374,7 +400,7 @@ function PluginRow({
                                 </>
                               )}
                             </div>
-                            {srv.lastError && <p className="mt-1.5 text-[11px] leading-snug text-destructive">{srv.lastError}</p>}
+                            {srv.lastError && <p className="mt-1.5 text-[11px] leading-snug text-destructive" role="alert">{srv.lastError}</p>}
                             {canManageAuth && srv.enabled && srv.status !== "ready" && (
                               <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" disabled={isAuthBusy} onClick={() => onAuthenticate(plugin.id, srv.serverId)}>
                                 {authStatus === "authorizing" ? "Continue authentication" : "Authenticate"} {srv.serverId}
@@ -447,14 +473,93 @@ function AgentPluginsView() {
   const rpc = useRpc<typeof rpcContract>();
   const [localErr, setLocalErr] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const previousPluginsRef = useRef<Map<string, { status: string; lastError: string | null }> | null>(null);
+  const previousSkillsRef = useRef<Map<string, { status: string; lastError: string | null }> | null>(null);
+  const previousServersRef = useRef<Map<string, { status: string; authStatus?: string; lastError: string | null }> | null>(null);
+  const previousLoadErrorRef = useRef<string | null>(null);
 
-  const runAction = async (key: string, action: () => Promise<unknown>) => {
+  useEffect(() => {
+    if (err && err !== previousLoadErrorRef.current) {
+      notifyError(err, "agent-plugins:snapshot:error");
+    }
+    previousLoadErrorRef.current = err;
+  }, [err]);
+
+  useEffect(() => {
+    if (!snap) return;
+    const previous = previousServersRef.current;
+    if (previous) {
+      for (const server of snap.mcpServers) {
+        const key = `mcp:${server.pluginId}:${server.serverId}`;
+        const before = previous.get(key);
+        if (!before) continue;
+        if (server.lastError && server.lastError !== before.lastError) {
+          notifyError(`${server.serverId}: ${server.lastError}`, `${key}:error`);
+        } else if (before.authStatus === "authorizing" && server.authStatus === "unauthenticated") {
+          notifyError(
+            `${server.serverId} authentication failed`,
+            `${key}:error`,
+          );
+        } else if (before.authStatus === "authorizing" && server.authStatus === "authenticated") {
+          toast.success(`${server.serverId} connected`, { id: `${key}:connected`, duration: 4000 });
+        } else if (before.status !== "ready" && server.status === "ready") {
+          toast.success(`${server.serverId} connected`, { id: `${key}:connected`, duration: 4000 });
+        }
+      }
+    }
+    const previousPlugins = previousPluginsRef.current;
+    if (previousPlugins) {
+      for (const plugin of snap.plugins) {
+        const key = `plugin:${plugin.id}`;
+        const before = previousPlugins.get(key);
+        if (!before) continue;
+        if (plugin.lastError && plugin.lastError !== before.lastError) {
+          notifyError(`${plugin.name}: ${plugin.lastError}`, `${key}:error`);
+        } else if (before.status !== "error" && plugin.status === "error") {
+          notifyError(`${plugin.name} failed to load`, `${key}:error`);
+        }
+      }
+    }
+    const previousSkills = previousSkillsRef.current;
+    if (previousSkills) {
+      for (const skill of snap.skills) {
+        const key = `skill:${skill.pluginId}:${skill.skillName}`;
+        const before = previousSkills.get(key);
+        if (!before || !skill.enabled) continue;
+        if (skill.lastError && skill.lastError !== before.lastError) {
+          notifyError(`/${skill.skillName}: ${skill.lastError}`, `${key}:error`);
+        } else if (before.status !== "error" && skill.status === "error") {
+          notifyError(`/${skill.skillName} failed`, `${key}:error`);
+        }
+      }
+    }
+    previousPluginsRef.current = new Map(
+      snap.plugins.map((plugin) => [`plugin:${plugin.id}`, { status: plugin.status, lastError: plugin.lastError }]),
+    );
+    previousSkillsRef.current = new Map(
+      snap.skills.map((skill) => [
+        `skill:${skill.pluginId}:${skill.skillName}`,
+        { status: skill.status, lastError: skill.lastError },
+      ]),
+    );
+    previousServersRef.current = new Map(
+      snap.mcpServers.map((server) => [
+        `mcp:${server.pluginId}:${server.serverId}`,
+        { status: server.status, authStatus: server.authStatus, lastError: server.lastError },
+      ]),
+    );
+  }, [snap]);
+
+  const runAction = async (key: string, action: () => Promise<unknown>, successMessage?: string) => {
     setPendingAction(key);
     setLocalErr(null);
     try {
       await action();
+      if (successMessage) toast.success(successMessage, { duration: 4000 });
     } catch (e) {
-      setLocalErr(e instanceof Error ? e.message : String(e));
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, `agent-plugins:${key}:error`);
     } finally {
       setPendingAction(null);
       await load();
@@ -466,32 +571,50 @@ function AgentPluginsView() {
     const purge = window.confirm("Also delete its stored data? OK = delete, Cancel = keep.");
     try {
       await rpc.call("remove", { id, purgeData: purge });
+      toast.success("Plugin removed", { duration: 4000 });
       await load();
     } catch (e) {
-      setLocalErr(e instanceof Error ? e.message : String(e));
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, `agent-plugins:remove:${id}:error`);
     }
   };
 
   const approve = async (p: string, s: string) => {
     try {
       await rpc.call("approve", { id: p, serverId: s });
+      toast.success(`${s} approved`, { duration: 4000 });
       await load();
     } catch (e) {
-      setLocalErr(e instanceof Error ? e.message : String(e));
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, `agent-plugins:approve:${p}:${s}:error`);
     }
   };
 
   const runAuthAction = async (method: "authenticate" | "reconnect" | "reauthorize", p: string, s: string) => {
-    const authWindow = window.open("about:blank", "_blank");
     const key = `mcp-auth:${p}:${s}`;
+    let authWindow: Window | null = null;
     setPendingAction(key);
     setLocalErr(null);
     try {
+      authWindow = window.open("about:blank", "_blank");
       const result = await rpc.call(method, { id: p, serverId: s });
       navigateAuthorizationWindow(authWindow, result.url);
+      if (result.url) {
+        toast.info("Authorization window opened", {
+          description: "Finish the consent flow, then return to BB.",
+          id: `${key}:started`,
+          duration: 7000,
+        });
+      } else {
+        toast.success(`${s} connected`, { id: `${key}:connected`, duration: 4000 });
+      }
     } catch (e) {
       authWindow?.close();
-      setLocalErr(e instanceof Error ? e.message : String(e));
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, `agent-plugins:${key}:error`);
     } finally {
       setPendingAction(null);
       await load();
@@ -502,7 +625,11 @@ function AgentPluginsView() {
   const reconnect = (p: string, s: string) => { void runAuthAction("reconnect", p, s); };
   const reauthorize = (p: string, s: string) => { void runAuthAction("reauthorize", p, s); };
   const disconnect = (p: string, s: string) => {
-    void runAction(`mcp-auth:${p}:${s}`, () => rpc.call("clearAuthentication", { id: p, serverId: s }));
+    void runAction(
+      `mcp-auth:${p}:${s}`,
+      () => rpc.call("clearAuthentication", { id: p, serverId: s }),
+      `${s} disconnected`,
+    );
   };
 
   const setSkillEnabled = (pluginId: string, skillName: string, enabled: boolean) => {
