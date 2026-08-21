@@ -106,6 +106,7 @@ export type ScanResult = {
   changed: boolean;
   complete: boolean;
   processedPaths: string[];
+  failedPaths: string[];
 };
 
 type SqliteStatement = {
@@ -127,10 +128,9 @@ type StatsSnapshot = {
   bytes: number;
 };
 
-// The source files remain the authoritative payload store. The index keeps a
-// small fallback preview and reloads the selected line from the source file
+// The source files remain the authoritative payload store. The index stores
+// normalized fields only and reloads the selected line from the source file
 // when the inspector asks for the full payload.
-const MAX_RAW_JSON = 512;
 const MAX_EVENT_TEXT = 1_024;
 const MAX_SESSION_FILES = 50_000;
 const MAX_SESSION_DEPTH = 32;
@@ -210,16 +210,6 @@ function clip(value: string, max: number): string {
   return value.slice(0, max) + "\n…";
 }
 
-function ftsQuery(value: string): string {
-  return value
-    .trim()
-    .split(/\s+/)
-    .map((term) => term.replaceAll('"', '""'))
-    .filter(Boolean)
-    .map((term) => `"${term}"`)
-    .join(" AND ");
-}
-
 const EVENT_ERROR_SQL = "(LOWER(type) LIKE '%error%' OR LOWER(type) LIKE '%fail%' OR (role = 'tool_result' AND (LOWER(summary) LIKE '%error%' OR LOWER(summary) LIKE '%fail%' OR LOWER(summary) LIKE '%denied%' OR LOWER(summary) LIKE '%exception%' OR LOWER(summary) LIKE '%timeout%')))";
 const EVENT_CATEGORY_SQL: Record<TraceEventCategory, string> = {
   user: "role = 'user'",
@@ -248,20 +238,14 @@ function isErrorEvent(event: Pick<NormalizedEvent, "type" | "role" | "summary">)
   return /error|fail/i.test(event.type) || event.role === "tool_result" && /error|fail|denied|exception|timeout/i.test(event.summary);
 }
 
-function eventFilterWhere(sessionId: string, input: TraceEventFilters, ftsEnabled: boolean): { where: string; params: unknown[] } {
+function eventFilterWhere(sessionId: string, input: TraceEventFilters): { where: string; params: unknown[] } {
   const clauses = ["session_id = ?"];
   const params: unknown[] = [sessionId];
   const query = input.query?.trim() ?? "";
   if (query) {
     const like = "%" + query + "%";
-    const eventSearch = ftsQuery(query);
-    if (ftsEnabled && eventSearch) {
-      clauses.push("(type LIKE ? OR role LIKE ? OR title LIKE ? OR summary LIKE ? OR id IN (SELECT event_id FROM trace_event_fts WHERE trace_event_fts MATCH ?))");
-      params.push(like, like, like, like, eventSearch);
-    } else {
-      clauses.push("(type LIKE ? OR role LIKE ? OR title LIKE ? OR summary LIKE ?)");
-      params.push(like, like, like, like);
-    }
+    clauses.push("(type LIKE ? OR role LIKE ? OR title LIKE ? OR summary LIKE ?)");
+    params.push(like, like, like, like);
   }
   const categories = [...new Set(input.categories ?? [])].map((category) => EVENT_CATEGORY_SQL[category]).filter(Boolean);
   if (categories.length) clauses.push("(" + categories.join(" OR ") + ")");
@@ -796,6 +780,7 @@ export function ensureSchema(db: SqliteDb): boolean {
       "usage_is_total INTEGER NOT NULL DEFAULT 0, turn INTEGER, step INTEGER, depth INTEGER NOT NULL DEFAULT 0, model TEXT, cwd TEXT, " +
       "raw_json TEXT NOT NULL, raw_truncated INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(session_id) REFERENCES trace_sessions(id) ON DELETE CASCADE" +
       ");" +
+      "CREATE TABLE IF NOT EXISTS trace_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_updated ON trace_sessions(updated_at DESC);" +
       "CREATE INDEX IF NOT EXISTS trace_sessions_source ON trace_sessions(source_id, updated_at DESC);" +
       "CREATE INDEX IF NOT EXISTS trace_events_session ON trace_events(session_id, line_number);" +
@@ -810,17 +795,58 @@ export function ensureSchema(db: SqliteDb): boolean {
   if (!traceFileColumns.has("content_hash")) {
     db.exec("ALTER TABLE trace_files ADD COLUMN content_hash TEXT;");
   }
+  // Full-text search duplicated the type/title/summary data for every event
+  // and made indexing much more expensive. Search now uses the normalized
+  // columns directly; the host compaction pass drops the legacy table.
+  return false;
+}
+
+const STORAGE_COMPACTION_VERSION = "2";
+
+export function compactStorage(db: SqliteDb): { changed: boolean; vacuumed: boolean } {
+  const versionRow = db.prepare("SELECT value FROM trace_meta WHERE key = 'storage_compaction'").get() as DbRow | undefined;
+  const alreadyCompacted = String(versionRow?.value ?? "") === STORAGE_COMPACTION_VERSION;
+  let changed = false;
+  if (!alreadyCompacted) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec("DROP TABLE IF EXISTS trace_event_fts;");
+      // The source line is still available through rawEvent. Keeping a 512
+      // byte preview for every event needlessly multiplies large archives.
+      db.exec("UPDATE trace_events SET raw_json = '', raw_truncated = 1 WHERE raw_json <> '' OR raw_truncated = 0;");
+      db.prepare(
+        "INSERT INTO trace_meta (key, value) VALUES ('storage_compaction', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ).run(STORAGE_COMPACTION_VERSION);
+      db.exec("COMMIT");
+      changed = true;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original cleanup error.
+      }
+      throw error;
+    }
+  }
+
+  const vacuumRow = db.prepare("SELECT value FROM trace_meta WHERE key = 'storage_vacuum'").get() as DbRow | undefined;
+  if (String(vacuumRow?.value ?? "") === STORAGE_COMPACTION_VERSION) return { changed, vacuumed: true };
   try {
-    db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS trace_event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content);");
-    return true;
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    db.exec("VACUUM;");
+    db.prepare(
+      "INSERT INTO trace_meta (key, value) VALUES ('storage_vacuum', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(STORAGE_COMPACTION_VERSION);
+    return { changed, vacuumed: true };
   } catch {
-    return false;
+    // VACUUM can lose a race with a server read. The logical cleanup is still
+    // durable, and the next host call will retry the physical compaction.
+    return { changed, vacuumed: false };
   }
 }
 
 export class TraceIndexer {
   private readonly db: SqliteDb;
-  private readonly ftsEnabled: boolean;
   private readonly log: (message: string) => void;
   private readonly sessionScanQueues = new Map<string, SessionScanQueue>();
   private readonly sessionScanPassSeen = new Set<string>();
@@ -828,9 +854,8 @@ export class TraceIndexer {
   private statsSnapshot: StatsSnapshot | null = null;
   private statsSnapshotAt = 0;
 
-  constructor(db: SqliteDb, ftsEnabled: boolean, log: (message: string) => void = () => undefined) {
+  constructor(db: SqliteDb, _legacyFtsEnabled = false, log: (message: string) => void = () => undefined) {
     this.db = db;
-    this.ftsEnabled = ftsEnabled;
     this.log = log;
   }
 
@@ -846,16 +871,22 @@ export class TraceIndexer {
   ): Promise<ScanResult> {
     let changed = false;
     const processedPaths: string[] = [];
+    const result = (complete: boolean): ScanResult => ({
+      changed,
+      complete,
+      processedPaths,
+      failedPaths: [...(options.failedSessionPaths ?? [])],
+    });
     let complete = true;
     for (const root of roots) this.ensureRoot(root);
     this.pruneInactiveRoots(roots);
 
     for (const root of roots) {
-      if (signal?.aborted) return { changed, complete: false, processedPaths };
+      if (signal?.aborted) return result(false);
       let queue = this.sessionScanQueues.get(root.id);
       if (!queue) {
         const discovery = await discoverSessionFilesWithStatus(root, signal);
-        if (signal?.aborted) return { changed, complete: false, processedPaths };
+        if (signal?.aborted) return result(false);
         queue = {
           files: discovery.files,
           index: 0,
@@ -878,7 +909,7 @@ export class TraceIndexer {
           complete = false;
           break;
         }
-        if (signal?.aborted) return { changed, complete: false, processedPaths };
+        if (signal?.aborted) return result(false);
         if (queue.index % 8 === 0) await yieldToEventLoop();
         const filePath = queue.files[queue.index]!;
         try {
@@ -886,13 +917,13 @@ export class TraceIndexer {
           const forceFingerprintFromPath = options.forceFingerprintPaths?.has(filePath) === true;
           const forceFingerprint = options.forceFingerprintAll === true || forceFingerprintFromPath;
           changed = (await this.indexSessionFile(root, filePath, signal, forceFingerprint)) || changed;
-          if (signal?.aborted) return { changed, complete: false, processedPaths };
+          if (signal?.aborted) return result(false);
           queue.index += 1;
           this.sessionScanPassSeen.add(filePath);
           processedPaths.push(filePath);
           remainingFiles -= 1;
         } catch (error) {
-          if (signal?.aborted) return { changed, complete: false, processedPaths };
+          if (signal?.aborted) return result(false);
           queue.index += 1;
           this.sessionScanPassSeen.add(filePath);
           options.failedSessionPaths?.add(filePath);
@@ -927,7 +958,7 @@ export class TraceIndexer {
       this.sessionScanPassSeen.clear();
       this.sessionScanPassInvalid = false;
     }
-    return { changed, complete, processedPaths };
+    return result(complete);
   }
 
   listSessions(input: { query?: string; source?: string; errorFilter?: TraceErrorFilter; status?: TraceSessionStatus; hasTools?: boolean; sort?: "updated" | "started" | "events" | "duration" | "errors"; limit: number; offset: number }): { sessions: SessionSummary[]; total: number } {
@@ -947,14 +978,8 @@ export class TraceIndexer {
     if (input.hasTools) clauses.push("COALESCE(tool_count, 0) > 0");
     if (query) {
       const like = "%" + query + "%";
-      const eventSearch = ftsQuery(query);
-      if (this.ftsEnabled && eventSearch) {
-        clauses.push("(id LIKE ? OR source_id LIKE ? OR title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR model LIKE ? OR id IN (SELECT session_id FROM trace_event_fts WHERE trace_event_fts MATCH ?))");
-        params.push(like, like, like, like, like, like, eventSearch);
-      } else {
-        clauses.push("(id LIKE ? OR source_id LIKE ? OR title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR model LIKE ? OR id IN (SELECT session_id FROM trace_events WHERE summary LIKE ? OR type LIKE ? OR title LIKE ?))");
-        params.push(like, like, like, like, like, like, like, like, like);
-      }
+      clauses.push("(id LIKE ? OR source_id LIKE ? OR title LIKE ? OR file_path LIKE ? OR cwd LIKE ? OR model LIKE ? OR id IN (SELECT session_id FROM trace_events WHERE summary LIKE ? OR type LIKE ? OR title LIKE ?))");
+      params.push(like, like, like, like, like, like, like, like, like);
     }
     const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
     const totalRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_sessions" + where).get(...params) as DbRow;
@@ -980,7 +1005,7 @@ export class TraceIndexer {
       .get(sessionId, decodedSessionId, decodedSessionId) as DbRow | undefined;
     if (!sessionRow) return { session: null, events: [], totalEvents: 0 };
     const resolvedSessionId = String(sessionRow.id);
-    const filter = eventFilterWhere(resolvedSessionId, filters, this.ftsEnabled);
+    const filter = eventFilterWhere(resolvedSessionId, filters);
     const countRow = this.db.prepare("SELECT COUNT(*) AS count FROM trace_events" + filter.where).get(...filter.params) as DbRow;
     const eventRows = this.db
       .prepare("SELECT * FROM trace_events" + filter.where + " ORDER BY line_number ASC LIMIT ? OFFSET ?")
@@ -1188,7 +1213,6 @@ export class TraceIndexer {
       if (reset) {
         // Keep the old rows inside this transaction. A failed or cancelled
         // replacement must leave the last complete session readable.
-        if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
         aggregate = emptySession(sessionId, root.source as TraceSourceId, filePath, fileStat.size);
       }
       this.db.prepare(
@@ -1202,11 +1226,7 @@ export class TraceIndexer {
           "timestamp = excluded.timestamp, duration_ms = excluded.duration_ms, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens, usage_is_total = excluded.usage_is_total, " +
           "turn = excluded.turn, step = excluded.step, depth = excluded.depth, model = excluded.model, cwd = excluded.cwd, raw_json = excluded.raw_json, raw_truncated = excluded.raw_truncated",
       );
-      const insertFts = this.ftsEnabled ? this.db.prepare("INSERT INTO trace_event_fts (event_id, session_id, content) VALUES (?, ?, ?)") : null;
-      const deleteFtsEvent = this.ftsEnabled && !reset
-        ? this.db.prepare("DELETE FROM trace_event_fts WHERE event_id = ? AND session_id = ?")
-        : null;
-      for await (const line of fileLines(filePath, format, startByte, startLine, fileStat.size, signal)) {
+      for await (const line of fileLines(filePath, format, startByte, startLine, undefined, signal)) {
         if (signal?.aborted) break;
         const relativeLine = line.line - startLine;
         if (relativeLine === 0 || relativeLine % 8 === 0) {
@@ -1230,7 +1250,7 @@ export class TraceIndexer {
         }
         const event = normalizeRecord(parsed);
         const eventId = sessionId + ":" + line.line;
-        const storedRaw = clip(line.text, MAX_RAW_JSON);
+        const storedRaw = "";
         upsertEvent.run(
           eventId,
           sessionId,
@@ -1253,10 +1273,6 @@ export class TraceIndexer {
           storedRaw,
           storedRaw.length < line.text.length ? 1 : 0,
         );
-        if (this.ftsEnabled) {
-          deleteFtsEvent?.run(eventId, sessionId);
-          insertFts?.run(eventId, sessionId, event.type + " " + event.title + " " + event.summary);
-        }
         aggregate.eventCount += 1;
         if (event.role === "user") aggregate.userCount += 1;
         if (event.role === "assistant") aggregate.assistantCount += 1;
@@ -1382,7 +1398,6 @@ export class TraceIndexer {
       const sessionId = String(row.session_id);
       this.db.prepare("DELETE FROM trace_files WHERE path = ?").run(String(row.path));
       this.db.prepare("DELETE FROM trace_events WHERE session_id = ?").run(sessionId);
-      if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
       this.db.prepare("DELETE FROM trace_sessions WHERE id = ?").run(sessionId);
     }
     return changed;
@@ -1404,7 +1419,6 @@ export class TraceIndexer {
           const sessionId = String(file.session_id);
           this.db.prepare("DELETE FROM trace_files WHERE path = ?").run(path);
           this.db.prepare("DELETE FROM trace_events WHERE session_id = ?").run(sessionId);
-          if (this.ftsEnabled) this.db.prepare("DELETE FROM trace_event_fts WHERE session_id = ?").run(sessionId);
           this.db.prepare("DELETE FROM trace_sessions WHERE id = ?").run(sessionId);
         }
       }

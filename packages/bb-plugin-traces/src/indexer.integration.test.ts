@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureSchema, TraceIndexer, type RootSpec } from "./indexer";
+import { compactStorage, ensureSchema, TraceIndexer, type RootSpec } from "./indexer";
 
 const databases: Database.Database[] = [];
 const temporaryDirectories: string[] = [];
@@ -68,7 +68,7 @@ describe("TraceIndexer", () => {
     expect(facets.toolTypes).toContainEqual({ value: "exec", count: 2 });
   });
 
-  it("indexes local sessions, preserves payloads, and rescans appends", async () => {
+  it("indexes local sessions, reloads source payloads, and rescans appends", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-traces-"));
     temporaryDirectories.push(directory);
 
@@ -200,11 +200,34 @@ describe("TraceIndexer", () => {
 
     const session = indexer.listSessions({ limit: 1, offset: 0 }).sessions[0]!;
     const event = indexer.getSession(session.id, 1, 0).events[0]!;
-    expect(event.rawJson.length).toBeLessThanOrEqual(514);
+    expect(event.rawJson).toBe("");
+    expect(event.rawTruncated).toBe(true);
     const raw = await indexer.rawEvent(event.id);
     expect(raw.raw).toContain(payload);
     expect(raw.raw?.length).toBeGreaterThan(512);
     expect(raw.truncated).toBe(false);
+  });
+
+  it("removes legacy derived payload and full-text storage during compaction", () => {
+    const database = new Database(":memory:");
+    databases.push(database);
+    ensureSchema(database);
+    database.exec("CREATE VIRTUAL TABLE trace_event_fts USING fts5(event_id UNINDEXED, session_id UNINDEXED, content);");
+    database.prepare(
+      "INSERT INTO trace_sessions (id, source_id, title, file_path, status) VALUES ('compact', 'custom', 'Compact', '/tmp/compact.jsonl', 'completed')",
+    ).run();
+    database.prepare(
+      "INSERT INTO trace_events (id, session_id, line_number, type, kind, title, summary, raw_json) VALUES ('compact:0', 'compact', 0, 'user/message', 'message', 'User', 'hello', ?)",
+    ).run('{"type":"user/message","data":{"content":"hello"}}');
+
+    const first = compactStorage(database);
+    expect(first.changed).toBe(true);
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE name = 'trace_event_fts'").get()).toBeUndefined();
+    expect((database.prepare("SELECT raw_json, raw_truncated FROM trace_events WHERE id = 'compact:0'").get() as { raw_json: string; raw_truncated: number })).toEqual({
+      raw_json: "",
+      raw_truncated: 1,
+    });
+    expect(compactStorage(database).changed).toBe(false);
   });
 
   it("advances a bounded scan batch without restarting discovery", async () => {
