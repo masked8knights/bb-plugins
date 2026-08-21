@@ -134,6 +134,28 @@ function sessionSummary(session: SessionRow, roster: RosterRow[]) {
   };
 }
 
+function conversationPrompt(proposal: string, context?: string): string {
+  const contextBlock = context
+    ? `\nSupporting context:\n\n<context>\n${context}\n</context>\n`
+    : "";
+  return [
+    "Please present this proposal to the Council using its council_deliberate tool.",
+    "",
+    "<proposal>",
+    proposal,
+    "</proposal>",
+    contextBlock,
+    `Call council_deliberate exactly once with the full proposal text${
+      context ? " and the supporting context" : ""
+    }. The tool blocks for one or more minutes while the members deliberate — let it run rather than retrying.`,
+    "",
+    "When the report comes back, give me:",
+    "- The tally and overall verdict in a sentence",
+    "- Each member's position in a line or two",
+    "- Any dissent worth knowing about",
+  ].join("\n");
+}
+
 async function resolveProjectId(
   bb: BbPluginApi,
   projectId?: string | null,
@@ -194,51 +216,6 @@ export default async function plugin(bb: BbPluginApi) {
   };
 
   const engine = new CouncilEngine(bb, store, getConfig);
-
-  // UI-launched sessions run detached; track them so dispose can abort and
-  // drain every in-flight deliberation instead of leaking member threads.
-  const detached = new Map<
-    string,
-    { controller: AbortController; promise: Promise<void> }
-  >();
-
-  const conveneDetached = (input: {
-    sessionId: string;
-    members: MemberRow[];
-    session: SessionRow;
-    projectId: string;
-  }): void => {
-    const controller = new AbortController();
-    const { sessionId } = input;
-    const promise = engine
-      .runSession({
-        session: input.session,
-        members: input.members,
-        projectId: input.projectId,
-        signal: controller.signal,
-      })
-      .then(() => undefined)
-      .catch((error) => {
-        bb.log.error(
-          `council: session ${sessionId} failed: ${String(error)}`,
-        );
-        // runSession persists failures itself; this is a safety net for
-        // errors thrown before/outside its try block. Guarded so a closed
-        // DB handle during dispose cannot become an unhandled rejection.
-        try {
-          const current = store.getSession(sessionId);
-          if (current?.status === "running") {
-            store.setSessionError(sessionId, String(error));
-          }
-        } catch {
-          bb.log.warn(`council: could not record failure for ${sessionId}`);
-        }
-      })
-      .finally(() => {
-        detached.delete(sessionId);
-      });
-    detached.set(sessionId, { controller, promise });
-  };
 
   const enabledMembers = () =>
     store
@@ -435,19 +412,20 @@ export default async function plugin(bb: BbPluginApi) {
         })),
       };
     },
-    convene: async (input) => {
-      const sessionId = await startSession({
-        proposal: input.proposal,
-        context: input.context,
-        projectId: input.projectId ?? null,
-        originThreadId: null,
+    startConversation: async (input) => {
+      if (enabledMembers().length === 0) {
+        throw new Error(
+          "The council has no enabled members. Add members in the Council panel first.",
+        );
+      }
+      const projectId = await resolveProjectId(bb, input.projectId ?? null);
+      const thread = await bb.sdk.threads.spawn({
+        projectId,
+        environment: { type: "project-default" },
+        prompt: conversationPrompt(input.proposal, input.context),
+        title: `Council: ${excerpt(input.proposal, 60)}`,
       });
-      const session = store.getSession(sessionId);
-      if (!session) throw new Error("Council session disappeared.");
-      const members = enabledMembers();
-      const projectId = await resolveProjectId(bb, session.projectId);
-      conveneDetached({ sessionId, members, session, projectId });
-      return { sessionId };
+      return { threadId: thread.id };
     },
     listProviders: async () => {
       const providers = await bb.sdk.providers.list();
@@ -548,13 +526,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.onDispose(async () => {
-    for (const entry of detached.values()) {
-      entry.controller.abort(new Error("council plugin disposed"));
-    }
-    await Promise.allSettled(
-      [...detached.values()].map((entry) => entry.promise),
-    );
+  bb.onDispose(() => {
     bb.log.info("council disposed");
   });
 

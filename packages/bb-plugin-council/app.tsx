@@ -423,9 +423,11 @@ function MembersTab() {
   );
 }
 
-function NewSessionForm(props: { onCreated: (sessionId: string) => void }) {
+function StartConversationButton(props: { onStarted: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
   const bbContext = useBbContext();
+  const [open, setOpen] = useState(false);
   const [proposal, setProposal] = useState("");
   const [context, setContext] = useState("");
   const [busy, setBusy] = useState(false);
@@ -439,14 +441,16 @@ function NewSessionForm(props: { onCreated: (sessionId: string) => void }) {
     setBusy(true);
     setError(null);
     try {
-      const result = await rpc.call("convene", {
+      const result = await rpc.call("startConversation", {
         proposal: proposal.trim(),
         context: context.trim() || undefined,
         projectId: bbContext.projectId ?? undefined,
       });
+      setOpen(false);
       setProposal("");
       setContext("");
-      props.onCreated(result.sessionId);
+      props.onStarted();
+      navigate.toThread(result.threadId);
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -455,24 +459,53 @@ function NewSessionForm(props: { onCreated: (sessionId: string) => void }) {
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-border p-3">
-      <textarea
-        className={`${inputClass} min-h-20`}
-        value={proposal}
-        onChange={(event) => setProposal(event.target.value)}
-        placeholder="Proposal for the council…"
-      />
-      <textarea
-        className={`${inputClass} min-h-14`}
-        value={context}
-        onChange={(event) => setContext(event.target.value)}
-        placeholder="Optional context…"
-      />
-      {error ? <p className="text-sm text-red-600 dark:text-red-400">{error}</p> : null}
-      <Button size="sm" onClick={() => void submit()} disabled={busy}>
-        {busy ? "Convening…" : "Convene council"}
+    <>
+      <Button size="sm" onClick={() => setOpen(true)}>
+        Start a council conversation
       </Button>
-    </div>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Ask the council</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              Starts a new thread whose agent presents your proposal to the
+              council and reports back the verdict.
+            </p>
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={proposal}
+              onChange={(event) => setProposal(event.target.value)}
+              placeholder="Proposal for the council…"
+              autoFocus
+            />
+            <textarea
+              className={`${inputClass} min-h-14`}
+              value={context}
+              onChange={(event) => setContext(event.target.value)}
+              placeholder="Optional context…"
+            />
+            {error ? (
+              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setOpen(false)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => void submit()} disabled={busy}>
+                {busy ? "Starting…" : "Start conversation"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -492,16 +525,12 @@ function SessionsList(props: { refreshKey: number }) {
 
   return (
     <div className="space-y-3">
-      <NewSessionForm
-        onCreated={(sessionId) =>
-          navigate.toPluginPanel("council", { subPath: `session/${sessionId}` })
-        }
-      />
+      <StartConversationButton onStarted={() => void refresh()} />
       {sessions.length === 0 ? (
         <Card>
           <CardContent className="pt-6 text-sm text-muted-foreground">
-            No sessions yet. Convene the council above, or ask any agent to call
-            council_deliberate.
+            No sessions yet. Start a council conversation above, or ask any
+            agent to call council_deliberate.
           </CardContent>
         </Card>
       ) : (

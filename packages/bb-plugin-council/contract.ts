@@ -117,13 +117,13 @@ export const rpcContract = defineRpcContract({
     input: z.object({ id: z.string() }),
     output: sessionDetailDto,
   },
-  convene: {
+  startConversation: {
     input: z.object({
       proposal: z.string().min(1),
       context: z.string().optional(),
       projectId: z.string().optional(),
     }),
-    output: z.object({ sessionId: z.string() }),
+    output: z.object({ threadId: z.string() }),
   },
   listProviders: {
     input: z.null(),

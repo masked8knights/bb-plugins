@@ -41,6 +41,8 @@ council_deliberate({ proposal: "...", context: "optional diffs/constraints" })
 
 `context` is passed to every member as supplementary material. The call blocks for one or more minutes; do not retry it while waiting.
 
+From the panel, use **Start a council conversation**. It does not deliberate inline — it seeds a new thread whose first message instructs the agent to present your proposal to the council via `council_deliberate` and report back the verdict. You watch the work happen, can steer it mid-flight, and keep a conversation going afterward ("what would change if we…?").
+
 From a terminal or thread shell:
 
 ```
@@ -49,7 +51,7 @@ bb council session <id>
 bb council convene "<proposal>"
 ```
 
-Panel-launched sessions run detached — the panel navigates to the session and you can watch turns arrive via realtime updates. Cancel a blocking CLI convene and the session is recorded as cancelled; member threads are stopped either way.
+`bb council convene` blocks and prints its session id with the report. Cancel it and the session is recorded as cancelled; member threads are stopped either way.
 
 ## Settings
 
@@ -62,6 +64,6 @@ Panel-launched sessions run detached — the panel navigates to the session and 
 
 ## Behavior notes
 
-- Member threads are hidden, stopped, and archived on every exit path, including failures, cancellation, and plugin dispose. In-flight detached sessions are aborted when the plugin reloads.
+- Member threads are hidden, stopped, and archived on every exit path, including failures, cancellation, and plugin dispose.
 - Failed/cancelled sessions keep their transcript and an error message; nothing stays stuck in `running`.
 - Sessions, turns, rosters, and tallies persist in the plugin SQLite store and survive reloads.
