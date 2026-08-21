@@ -1,14 +1,26 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 
 const app = await loadPluginApp(() => import("../app"));
 const panel = app.navPanels[0]!;
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Agent Plugins settings", () => {
+  it("provides a full-height scroll container for long plugin lists", async () => {
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => ({ plugins: [], skills: [], mcpServers: [], dataDir: "/tmp/bb" }),
+      } as never,
+    });
+
+    const main = await slot.findByRole("main", { name: "Agent Plugins" });
+    expect(main.className).toContain("h-full");
+    expect(main.className).toContain("overflow-y-auto");
+  });
+
   it("renders per-skill and per-MCP switches and persists their changes", async () => {
     let snapshot = {
       plugins: [{
@@ -126,5 +138,116 @@ describe("Agent Plugins settings", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(slot.getByRole("switch", { name: "Enable skill research" })).toBeTruthy();
     expect(slot.queryByRole("switch", { name: "Disable skill research" })).toBeNull();
+  });
+
+  it("opens the SDK-managed OAuth flow for an authenticated HTTP server", async () => {
+    const snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "OAuth Plugin", version: "1.0.0", specVersion: "1.0.0",
+        sourceType: "path", sourceIntent: "path:/tmp/oauth-plugin", sourceResolved: null,
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [{
+        pluginId: "plugin-1", serverId: "fastmail", type: "streamable-http", status: "needs-auth",
+        lastError: "Authentication required", approved: 1, enabled: true,
+        configJson: JSON.stringify({ type: "streamable-http", url: "https://example.com/mcp" }),
+      }],
+      dataDir: "/tmp/bb",
+    };
+    const calls: unknown[] = [];
+    const authWindow = {
+      opener: window,
+      location: { href: "about:blank" },
+      close: vi.fn(),
+    } as unknown as Window;
+    const opened = vi.spyOn(window, "open").mockReturnValue(authWindow);
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => snapshot,
+        authenticate: (input: unknown) => {
+          calls.push(input);
+          return { url: "https://example.com/authorize?state=test", status: "authorizing" };
+        },
+      } as never,
+    });
+
+    fireEvent.click(await slot.findByRole("button", { name: /OAuth Plugin/ }));
+    fireEvent.click(await slot.findByRole("button", { name: "Authenticate fastmail" }));
+    await waitFor(() => expect(calls).toEqual([{ id: "plugin-1", serverId: "fastmail" }]));
+    expect(opened).toHaveBeenNthCalledWith(1, "about:blank", "_blank");
+    expect(authWindow.location.href).toBe("https://example.com/authorize?state=test");
+  });
+
+  it("supports reconnect, forced reauthorization, and local disconnect", async () => {
+    let snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "OAuth Plugin", version: "1.0.0", specVersion: "1.0.0",
+        sourceType: "path", sourceIntent: "path:/tmp/oauth-plugin", sourceResolved: null,
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [{
+        pluginId: "plugin-1", serverId: "fastmail", type: "streamable-http", status: "ready",
+        authStatus: "authenticated", lastError: null, approved: 1, enabled: true,
+        configJson: JSON.stringify({ type: "streamable-http", url: "https://example.com/mcp" }),
+      }],
+      dataDir: "/tmp/bb",
+    };
+    const calls: Array<{ method: string; input: unknown }> = [];
+    const authWindow = {
+      opener: window,
+      location: { href: "about:blank" },
+      close: vi.fn(),
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(authWindow);
+
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => snapshot,
+        reconnect: (input: unknown) => {
+          calls.push({ method: "reconnect", input });
+          return { url: null, status: "authenticated" };
+        },
+        reauthorize: (input: unknown) => {
+          calls.push({ method: "reauthorize", input });
+          snapshot = {
+            ...snapshot,
+            mcpServers: [{ ...snapshot.mcpServers[0]!, status: "needs-auth", authStatus: "authorizing" }],
+          };
+          return { url: "https://example.com/authorize?state=fresh", status: "authorizing" };
+        },
+        clearAuthentication: (input: unknown) => {
+          calls.push({ method: "clearAuthentication", input });
+          snapshot = {
+            ...snapshot,
+            mcpServers: [{ ...snapshot.mcpServers[0]!, status: "idle", authStatus: "unauthenticated" }],
+          };
+          return { cleared: true };
+        },
+      } as never,
+    });
+
+    fireEvent.click(await slot.findByRole("button", { name: /OAuth Plugin/ }));
+    fireEvent.click(await slot.findByRole("button", { name: "Reconnect fastmail" }));
+    await waitFor(() => expect(calls).toContainEqual({
+      method: "reconnect",
+      input: { id: "plugin-1", serverId: "fastmail" },
+    }));
+    expect(authWindow.close).toHaveBeenCalled();
+
+    fireEvent.click(await slot.findByRole("button", { name: "Reauthorize" }));
+    await waitFor(() => expect(calls).toContainEqual({
+      method: "reauthorize",
+      input: { id: "plugin-1", serverId: "fastmail" },
+    }));
+    expect(authWindow.location.href).toBe("https://example.com/authorize?state=fresh");
+
+    fireEvent.click(await slot.findByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(calls).toContainEqual({
+      method: "clearAuthentication",
+      input: { id: "plugin-1", serverId: "fastmail" },
+    }));
+    await slot.findByRole("button", { name: "Authenticate fastmail" });
   });
 });

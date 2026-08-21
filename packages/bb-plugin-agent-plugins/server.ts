@@ -8,10 +8,11 @@ import { z } from "zod";
 import { AgentPluginsStore } from "./src/store.js";
 import { validateManifest, validateMcpEnvelope, validateMcpServer, validateSkillFrontmatter } from "./src/loader.js";
 import { McpGateway } from "./src/gateway.js";
+import { DeferredOAuthCredentialStore, McpOAuthProvider, type OAuthCredentialRecord } from "./src/oauth.js";
 import { parseSource, fetchSource } from "./src/source.js";
 import { materializeSkill, unmaterializeSkill } from "./src/skills-impl.js";
 import { ensureDir, hashDirectory, rimraf, atomicRename, LIMITS } from "./src/safe-fs.js";
-import type { CatalogTool } from "./src/types.js";
+import type { CatalogPrompt, CatalogResource, CatalogResourceTemplate, CatalogTool } from "./src/types.js";
 
 const jsonRecordSchema = z.record(z.string(), z.unknown());
 
@@ -31,20 +32,60 @@ const toolSchema = z.object({
   name: z.string(),
   description: z.string(),
   inputSchema: jsonRecordSchema,
+  outputSchema: jsonRecordSchema.optional(),
+  annotations: jsonRecordSchema.optional(),
+  execution: jsonRecordSchema.optional(),
+  icons: z.array(jsonRecordSchema).optional(),
+  _meta: jsonRecordSchema.optional(),
   status: z.enum(["ready", "error"]),
   error: z.string().optional(),
 }).strict();
 
+const promptSchema = z.object({
+  opaqueId: z.string(), pluginId: z.string(), pluginName: z.string(), serverId: z.string(), serverType: z.string(),
+  name: z.string(), title: z.string().optional(), description: z.string().optional(), arguments: z.array(jsonRecordSchema).optional(),
+  icons: z.array(jsonRecordSchema).optional(), _meta: jsonRecordSchema.optional(), status: z.enum(["ready", "error"]), error: z.string().optional(),
+}).strict();
+
+const resourceSchema = z.object({
+  opaqueId: z.string(), pluginId: z.string(), pluginName: z.string(), serverId: z.string(), serverType: z.string(),
+  uri: z.string(), name: z.string(), title: z.string().optional(), description: z.string().optional(), mimeType: z.string().optional(),
+  icons: z.array(jsonRecordSchema).optional(), _meta: jsonRecordSchema.optional(), status: z.enum(["ready", "error"]), error: z.string().optional(),
+}).strict();
+
+const resourceTemplateSchema = z.object({
+  opaqueId: z.string(), pluginId: z.string(), pluginName: z.string(), serverId: z.string(), serverType: z.string(),
+  uriTemplate: z.string(), name: z.string(), title: z.string().optional(), description: z.string().optional(), mimeType: z.string().optional(),
+  icons: z.array(jsonRecordSchema).optional(), _meta: jsonRecordSchema.optional(), status: z.enum(["ready", "error"]), error: z.string().optional(),
+}).strict();
+
+const authActionOutput = z.object({ url: z.string().nullable(), status: z.string() }).strict();
+
 export const rpcContract = defineRpcContract({
   snapshot: { input: z.null(), output: snapshotSchema },
   listTools: { input: z.null(), output: z.object({ tools: z.array(toolSchema) }).strict() },
-  callTool: { input: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(), output: z.object({ content: z.array(jsonRecordSchema), isError: z.boolean().optional() }).strict() },
+  callTool: { input: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(), output: z.object({ content: z.array(jsonRecordSchema), isError: z.boolean().optional(), structuredContent: z.unknown().optional(), _meta: jsonRecordSchema.optional() }).strict() },
+  listPrompts: { input: z.null(), output: z.object({ prompts: z.array(promptSchema) }).strict() },
+  getPrompt: { input: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(), output: jsonRecordSchema },
+  listResources: { input: z.null(), output: z.object({ resources: z.array(resourceSchema) }).strict() },
+  listResourceTemplates: { input: z.null(), output: z.object({ resourceTemplates: z.array(resourceTemplateSchema) }).strict() },
+  readResource: { input: z.object({ opaqueId: z.string().min(1) }).strict(), output: jsonRecordSchema },
+  complete: { input: z.object({ ref: jsonRecordSchema, argument: jsonRecordSchema }).strict(), output: jsonRecordSchema },
+  subscribeResource: { input: z.object({ opaqueId: z.string().min(1) }).strict(), output: z.object({ subscribed: z.boolean() }).strict() },
+  unsubscribeResource: { input: z.object({ opaqueId: z.string().min(1) }).strict(), output: z.object({ unsubscribed: z.boolean() }).strict() },
+  setLoggingLevel: { input: z.object({ level: z.string().min(1) }).strict(), output: z.object({ updated: z.boolean() }).strict() },
   install: { input: z.object({ source: z.string().min(1), tagPrefix: z.string().optional() }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
   remove: { input: z.object({ id: z.string().min(1), purgeData: z.boolean().optional() }).strict(), output: z.object({ deleted: z.boolean() }).strict() },
   refresh: { input: z.object({ id: z.string().min(1) }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
   approve: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ approved: z.boolean() }).strict() },
   setSkillEnabled: { input: z.object({ id: z.string().min(1), skillName: z.string().min(1), enabled: z.boolean() }).strict(), output: z.object({ enabled: z.boolean(), status: z.string(), lastError: z.string().nullable() }).strict() },
   setMcpEnabled: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1), enabled: z.boolean() }).strict(), output: z.object({ enabled: z.boolean(), status: z.string(), lastError: z.string().nullable() }).strict() },
+  authenticate: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ url: z.string().nullable(), status: z.string() }).strict() },
+  reconnect: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: authActionOutput },
+  reauthorize: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: authActionOutput },
+  authStatus: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ status: z.string() }).strict() },
+  finishAuthentication: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1), callbackUrl: z.string().url() }).strict(), output: z.object({ authenticated: z.boolean() }).strict() },
+  clearAuthentication: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ cleared: z.boolean() }).strict() },
   pickFolder: { input: z.null(), output: z.object({ path: z.string().nullable() }).strict() },
 });
 
@@ -85,10 +126,6 @@ export default async function plugin(bb: BbPluginApi) {
     throw new Error("dataDir unavailable");
   };
 
-  const store = new AgentPluginsStore(bb.storage.database(), (db, s) => bb.storage.migrate(db, s));
-  const gateway = new McpGateway(store, bb.log);
-  const installLocks = new Set<string>();
-
   async function publishChanged(payload: Record<string, unknown>): Promise<void> {
     try {
       await bb.realtime.publish("agent-plugins-changed", payload);
@@ -99,13 +136,76 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const store = new AgentPluginsStore(bb.storage.database(), (db, s) => bb.storage.migrate(db, s));
+  const oauthSettings = bb.settings.define({
+    oauthCredentials: {
+      type: "string",
+      label: "MCP OAuth credentials",
+      description: "Managed automatically by Agent Plugins; stored as a BB secret.",
+      secret: true,
+      default: "",
+    },
+  });
+  const oauthCredentialStore = new DeferredOAuthCredentialStore({
+    async load(): Promise<Record<string, OAuthCredentialRecord>> {
+      const settings = await oauthSettings.get();
+      const raw = settings.oauthCredentials;
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, OAuthCredentialRecord>;
+      } catch (e) { bb.log.warn(`[agent-plugins] OAuth secret store is invalid: ${errorText(e)}`); }
+      return {};
+    },
+    async save(next: Record<string, OAuthCredentialRecord>): Promise<void> {
+      await bb.sdk.plugins.updateSettings({ pluginId: bb.pluginId, values: { oauthCredentials: JSON.stringify(next) } });
+    },
+  }, (error) => bb.log.warn(`[agent-plugins] OAuth secret persistence failed: ${errorText(error)}`));
+  async function withDeferredOAuthPersistence<T>(operation: () => Promise<T>): Promise<T> {
+    const release = oauthCredentialStore.deferPersistence();
+    try { return await operation(); }
+    finally { release(); }
+  }
+  async function deleteOAuthCredentials(pluginId: string, serverId: string): Promise<void> {
+    try {
+      await oauthCredentialStore.delete(`${pluginId}:${serverId}`);
+    } catch (e) {
+      throw new Error(`Could not delete OAuth credentials for ${pluginId}:${serverId}: ${errorText(e)}`, { cause: e });
+    }
+  }
+  const gateway = new McpGateway(store, bb.log, {
+    onChanged: () => publishChanged({ kind: "mcp-runtime" }),
+    oauth: {
+      async getProvider(pluginId, serverId, serverUrl) {
+        const redirect = new URL(`/api/v1/plugins/${encodeURIComponent(bb.pluginId)}/http/oauth/callback`, bb.server.loopbackBaseUrl);
+        redirect.search = new URLSearchParams({ pluginId, serverId }).toString();
+        return new McpOAuthProvider(`${pluginId}:${serverId}`, serverUrl, redirect, oauthCredentialStore);
+      },
+    },
+  });
+  const installLocks = new Set<string>();
+
+  bb.http.route("GET", "/oauth/callback", async (context) => {
+    const url = new URL(context.req.url);
+    const pluginId = url.searchParams.get("pluginId");
+    const serverId = url.searchParams.get("serverId");
+    if (!pluginId || !serverId) return new Response("Missing Agent Plugins OAuth callback context", { status: 400 });
+    try {
+      await withDeferredOAuthPersistence(() => gateway.finishAuth(pluginId, serverId, url.searchParams));
+      await publishChanged({ kind: "oauth", id: pluginId, serverId });
+      return new Response("<p>Authentication completed. You can close this window.</p>", { headers: { "content-type": "text/html; charset=utf-8" } });
+    } catch (e) {
+      bb.log.warn(`[agent-plugins] OAuth callback failed for ${serverId}: ${errorText(e)}`);
+      return new Response("<p>Authentication failed. Return to BB and try again.</p>", { status: 400, headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+  });
+
   async function approveServer(id: string, serverId: string): Promise<void> {
     const p = store.getPlugin(id) ?? store.getPluginByName(id);
     if (!p) throw new Error(`not found: ${id}`);
     const srv = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
     if (!srv) throw new Error(`server not found: ${serverId}`);
     if (srv.enabled !== 1) throw new Error(`Enable MCP server ${serverId} before approving it`);
-    if (srv.status === "error") throw new Error(`Cannot approve invalid server ${serverId}: ${srv.lastError}`);
 
     let cfg: Record<string, unknown>;
     try {
@@ -115,8 +215,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const validation = validateMcpServer(serverId, cfg);
     if (!validation.valid) throw new Error(`Cannot approve invalid server ${serverId}: ${validation.errors.join("; ")}`);
-    if (validation.type === "sse") throw new Error(`Cannot approve unsupported server ${serverId}: sse transport not supported in v0`);
-
     store.transaction(() => {
       store.upsertMcpServer({ ...srv, approved: 1, status: "idle", lastError: null });
       if (p.approval === "pending" || p.status === "needs-approval") {
@@ -126,12 +224,17 @@ export default async function plugin(bb: BbPluginApi) {
 
     // Approval is durable even when the first connection attempt fails. The
     // gateway records that failure and can retry on a later tools request.
+    await gateway.closeServer(p.id, serverId);
     try {
       await gateway.startServer(p.id, serverId);
     } catch (e) {
       const message = errorText(e);
       const failed = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
-      if (failed) store.upsertMcpServer({ ...failed, status: "error", lastError: message });
+      // The gateway has already persisted `needs-auth` when the official SDK
+      // starts an OAuth flow. Preserve that state so the UI can offer
+      // Authenticate instead of turning a normal consent step into a retry
+      // error.
+      if (failed && failed.status !== "needs-auth") store.upsertMcpServer({ ...failed, status: "error", lastError: message });
       bb.log.warn(`[agent-plugins] approve start failed for ${serverId}: ${message}`);
     }
     await publishChanged({ kind: "approve", id: p.id, serverId });
@@ -209,7 +312,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const validation = validateMcpServer(serverId, cfg);
       if (!validation.valid) throw new Error(`Cannot enable invalid server ${serverId}: ${validation.errors.join("; ")}`);
-      if (validation.type === "sse") throw new Error(`Cannot enable unsupported server ${serverId}: sse transport not supported in v0`);
       store.upsertMcpServer({ ...srv, enabled: 1, status: "idle", lastError: null });
       if (srv.approved === 1) {
         try {
@@ -217,7 +319,7 @@ export default async function plugin(bb: BbPluginApi) {
         } catch (e) {
           const message = errorText(e);
           const failed = store.listMcpServers(p.id).find((s) => s.serverId === serverId);
-          if (failed) store.upsertMcpServer({ ...failed, status: "error", lastError: message });
+          if (failed && failed.status !== "needs-auth") store.upsertMcpServer({ ...failed, status: "error", lastError: message });
           bb.log.warn(`[agent-plugins] enable start failed for ${serverId}: ${message}`);
         }
       }
@@ -253,7 +355,14 @@ export default async function plugin(bb: BbPluginApi) {
     try { dd = await getDataDir(); } catch {}
     // Redact sensitive config for snapshot (headers/env values)
     const skills = s.skills.map((skill) => ({ ...skill, enabled: skill.enabled === 1 }));
-    const redactedMcp = s.mcpServers.map(m => ({ ...m, enabled: m.enabled === 1, configJson: redactMcpConfigJson(m.configJson) }));
+    const redactedMcp = await Promise.all(s.mcpServers.map(async (m) => {
+      let authStatus = "not-applicable";
+      if (m.type !== "stdio") {
+        try { authStatus = await gateway.authStatus(m.pluginId, m.serverId); }
+        catch { authStatus = "unknown"; }
+      }
+      return { ...m, enabled: m.enabled === 1, authStatus, configJson: redactMcpConfigJson(m.configJson) };
+    }));
     return { plugins: s.plugins as unknown as Record<string, unknown>[], skills: skills as unknown as Record<string, unknown>[], mcpServers: redactedMcp as unknown as Record<string, unknown>[], dataDir: dd };
   };
 
@@ -277,12 +386,42 @@ export default async function plugin(bb: BbPluginApi) {
       catch (e) { return JSON.stringify({ isError: true, error: errorText(e) }); }
     },
   });
-  let catalogSize = 0;
-  gateway.listTools().then(t => catalogSize = t.length).catch(() => {});
+  bb.agents.registerTool({
+    name: "agent_plugins_list_prompts",
+    description: "List MCP prompts exposed by installed Agent Plugins.",
+    instructions: "Call agent_plugins_list_prompts first to discover opaque prompt IDs before calling agent_plugins_get_prompt.",
+    experimental_statusLabels: { pending: "Listing Agent Plugins prompts", completed: "Prompts listed" },
+    parameters: z.object({}).strict(),
+    async execute() { return JSON.stringify({ prompts: await gateway.listPrompts() }, null, 2); },
+  });
+  bb.agents.registerTool({
+    name: "agent_plugins_get_prompt",
+    description: "Get one Agent Plugin MCP prompt by opaque ID.",
+    instructions: "Use opaqueId exactly as returned by agent_plugins_list_prompts; do not invent prompt names.",
+    experimental_statusLabels: { pending: "Getting Agent Plugins prompt", completed: "Prompt returned" },
+    parameters: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(),
+    async execute(input, ctx) { return JSON.stringify(await gateway.getPrompt(input.opaqueId, input.args as Record<string, unknown>, ctx.signal), null, 2); },
+  });
+  bb.agents.registerTool({
+    name: "agent_plugins_list_resources",
+    description: "List MCP resources and resource templates exposed by installed Agent Plugins.",
+    instructions: "Call agent_plugins_list_resources first to discover opaque resource IDs before calling agent_plugins_read_resource.",
+    experimental_statusLabels: { pending: "Listing Agent Plugins resources", completed: "Resources listed" },
+    parameters: z.object({}).strict(),
+    async execute() { return JSON.stringify({ resources: await gateway.listResources(), resourceTemplates: await gateway.listResourceTemplates() }, null, 2); },
+  });
+  bb.agents.registerTool({
+    name: "agent_plugins_read_resource",
+    description: "Read one Agent Plugin MCP resource by opaque ID.",
+    instructions: "Use opaqueId exactly as returned by agent_plugins_list_resources; do not invent resource URIs.",
+    experimental_statusLabels: { pending: "Reading Agent Plugins resource", completed: "Resource returned" },
+    parameters: z.object({ opaqueId: z.string().min(1) }).strict(),
+    async execute(input, ctx) { return JSON.stringify(await gateway.readResource(input.opaqueId, ctx.signal), null, 2); },
+  });
   bb.agents.configure(() => ({
-    tools: ["agent_plugins_list_tools", "agent_plugins_call"],
+    tools: ["agent_plugins_list_tools", "agent_plugins_call", "agent_plugins_list_prompts", "agent_plugins_get_prompt", "agent_plugins_list_resources", "agent_plugins_read_resource"],
     skills: [],
-    instructions: catalogSize > 0 ? `Agent Plugins bridge: ${catalogSize} MCP tool(s) available via agent_plugins_list_tools → agent_plugins_call.` : "Agent Plugins bridge ready — use agent_plugins_list_tools to discover MCP tools after plugins are installed.",
+    instructions: "Agent Plugins bridge ready — use agent_plugins_list_tools to discover MCP tools after plugins are installed.",
   }));
 
   // -------------------------------------------------------------------------
@@ -388,12 +527,11 @@ export default async function plugin(bb: BbPluginApi) {
             if (Object.keys(envelope.servers).length > LIMITS.maxMcpServerCount) throw new Error(`too many mcp servers`);
             for (const [sid, raw] of Object.entries(envelope.servers)) {
               const r = validateMcpServer(sid, raw);
-              const unsupported = r.valid && r.type === "sse";
               mcpServers.push({
                 id: sid,
                 raw,
-                valid: r.valid && !unsupported,
-                errors: unsupported ? ["sse transport not supported in v0"] : r.errors,
+                valid: r.valid,
+                errors: r.errors,
                 type: r.type,
               });
             }
@@ -506,6 +644,15 @@ export default async function plugin(bb: BbPluginApi) {
     async snapshot() { return await buildSnapshot() as unknown as { plugins: Record<string, unknown>[]; skills: Record<string, unknown>[]; mcpServers: Record<string, unknown>[]; dataDir: string | null }; },
     async listTools() { return { tools: await gateway.listTools() }; },
     async callTool({ opaqueId, args }) { return gateway.call(opaqueId, args as Record<string, unknown>); },
+    async listPrompts() { return { prompts: await gateway.listPrompts() }; },
+    async getPrompt({ opaqueId, args }) { return gateway.getPrompt(opaqueId, args as Record<string, unknown>); },
+    async listResources() { return { resources: await gateway.listResources() }; },
+    async listResourceTemplates() { return { resourceTemplates: await gateway.listResourceTemplates() }; },
+    async readResource({ opaqueId }) { return gateway.readResource(opaqueId); },
+    async complete({ ref, argument }) { return gateway.complete(ref as Record<string, unknown>, argument as Record<string, unknown>); },
+    async subscribeResource({ opaqueId }) { await gateway.subscribeResource(opaqueId); return { subscribed: true }; },
+    async unsubscribeResource({ opaqueId }) { await gateway.unsubscribeResource(opaqueId); return { unsubscribed: true }; },
+    async setLoggingLevel({ level }) { await gateway.setLoggingLevel(level); return { updated: true }; },
     async install({ source, tagPrefix }) { return doInstall(source, tagPrefix); },
     async remove({ id, purgeData }) {
       const p = store.getPlugin(id) ?? store.getPluginByName(id);
@@ -521,6 +668,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Close MCP servers
       for (const srv of store.listMcpServers(p.id)) {
         try { await gateway.closeServer(p.id, srv.serverId); } catch {}
+        await deleteOAuthCredentials(p.id, srv.serverId);
       }
       if (purgeData) await rimraf(p.pluginData).catch(() => {});
       else bb.log.info(`[agent-plugins] preserve pluginData ${p.pluginData} (use --purge-data to delete)`);
@@ -546,27 +694,66 @@ export default async function plugin(bb: BbPluginApi) {
     async setMcpEnabled({ id, serverId, enabled }) {
       return setMcpEnabled(id, serverId, enabled);
     },
+    async authenticate({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      const url = await gateway.authUrl(p.id, serverId);
+      return { url, status: await gateway.authStatus(p.id, serverId) };
+    },
+    async reconnect({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      const url = await gateway.reconnectServer(p.id, serverId);
+      const status = await gateway.authStatus(p.id, serverId);
+      await publishChanged({ kind: "mcp-reconnect", id: p.id, serverId });
+      return { url, status };
+    },
+    async reauthorize({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      const result = await withDeferredOAuthPersistence(async () => {
+        await gateway.clearAuthentication(p.id, serverId);
+        const url = await gateway.authUrl(p.id, serverId);
+        return { url, status: await gateway.authStatus(p.id, serverId) };
+      });
+      await publishChanged({ kind: "mcp-reauthorize", id: p.id, serverId });
+      return result;
+    },
+    async authStatus({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      return { status: await gateway.authStatus(p.id, serverId) };
+    },
+    async finishAuthentication({ id, serverId, callbackUrl }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      const callback = new URL(callbackUrl);
+      await withDeferredOAuthPersistence(() => gateway.finishAuth(p.id, serverId, callback.searchParams));
+      await publishChanged({ kind: "oauth", id: p.id, serverId });
+      return { authenticated: true };
+    },
+    async clearAuthentication({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      await withDeferredOAuthPersistence(() => gateway.clearAuthentication(p.id, serverId));
+      return { cleared: true };
+    },
     async pickFolder() {
       try {
         const cfg = (await bb.sdk.system.config()) as unknown as { primaryHostId?: string | null };
         let hostId: string | null = cfg.primaryHostId ?? null;
         if (!hostId) {
           try {
-            const hosts = (await bb.sdk.hosts.list()) as unknown as { hosts: { id: string }[] };
-            hostId = hosts.hosts[0]?.id ?? null;
+            const hosts = await bb.sdk.hosts.list();
+            hostId = hosts[0]?.id ?? null;
           } catch {}
         }
         if (!hostId) throw new Error("No host available for folder picker");
-        const res = (await (bb.sdk.hosts as unknown as { pickFolder: (args: { hostId: string; clientHostId: string }) => Promise<{ path: string | null }> }).pickFolder({ hostId, clientHostId: hostId })) as unknown as { path?: string | null };
-        const picked = (res as { path?: string | null }).path ?? null;
+        const res = await bb.sdk.hosts.pickFolder({ hostId, clientHostId: hostId });
+        const picked = res.path ?? null;
         return { path: typeof picked === "string" ? picked : null };
       } catch (e) {
-        try {
-          const res = await (bb.sdk.hosts as unknown as { pickFolder: (args: Record<string, unknown>) => Promise<{ path: string | null }> }).pickFolder({});
-          return { path: res.path ?? null };
-        } catch {
-          throw new Error(`Folder picker failed: ${errorText(e)}`);
-        }
+        throw new Error(`Folder picker failed: ${errorText(e)}`);
       }
     },
   });
@@ -582,8 +769,11 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "remove", summary: "Remove a plugin", usage: "bb agent-plugins remove <id> [--purge-data] [--json]" },
       { name: "tools", summary: "List MCP tools via bridge", usage: "bb agent-plugins tools [--json]" },
       { name: "call", summary: "Call an MCP tool by opaqueId", usage: "bb agent-plugins call <opaqueId> <json> [--json]" },
+      { name: "prompts", summary: "List MCP prompts via bridge", usage: "bb agent-plugins prompts [--json]" },
+      { name: "resources", summary: "List MCP resources via bridge", usage: "bb agent-plugins resources [--json]" },
       { name: "skills", summary: "List materialized skills", usage: "bb agent-plugins skills [--json]" },
       { name: "approve", summary: "Approve an MCP server", usage: "bb agent-plugins approve <id> <serverId> [--json]" },
+      { name: "auth", summary: "Start or inspect MCP OAuth", usage: "bb agent-plugins auth <id> <serverId> [--json]" },
     ],
     async run(argv, _ctx) {
       const [cmd = "list", ...rest] = argv;
@@ -624,7 +814,10 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const dd = await getDataDir();
           for (const s of store.listSkills(p.id)) if (s.materializedPath) await unmaterializeSkill({ installId: p.id, skillName: s.skillName, dataDir: dd }).catch(() => {});
-          for (const srv of store.listMcpServers(p.id)) await gateway.closeServer(p.id, srv.serverId).catch(() => {});
+          for (const srv of store.listMcpServers(p.id)) {
+            await gateway.closeServer(p.id, srv.serverId).catch(() => {});
+            await deleteOAuthCredentials(p.id, srv.serverId);
+          }
           if (purge) await rimraf(p.pluginData).catch(() => {});
           await rimraf(path.dirname(p.pluginRoot)).catch(() => {});
         } catch (e) {
@@ -647,6 +840,15 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: result.isError ? 1 : 0, stdout: JSON.stringify(result, null, 2) + "\n" };
         } catch (e) { return { exitCode: 2, stderr: `Invalid JSON args: ${errorText(e)}\n` }; }
       }
+      if (cmd === "prompts") {
+        const prompts = await gateway.listPrompts();
+        return { exitCode: 0, stdout: (asJson ? JSON.stringify({ prompts }, null, 2) : prompts.map((p: CatalogPrompt) => `${p.opaqueId} — ${p.description ?? p.name} [${p.serverType}]`).join("\n")) + "\n" };
+      }
+      if (cmd === "resources") {
+        const resources = await gateway.listResources();
+        const resourceTemplates = await gateway.listResourceTemplates();
+        return { exitCode: 0, stdout: (asJson ? JSON.stringify({ resources, resourceTemplates }, null, 2) : [...resources.map((r: CatalogResource) => `${r.opaqueId} — ${r.uri}`), ...resourceTemplates.map((r: CatalogResourceTemplate) => `${r.opaqueId} — ${r.uriTemplate}`)].join("\n")) + "\n" };
+      }
       if (cmd === "skills") {
         return { exitCode: 0, stdout: (asJson ? JSON.stringify(snap.skills, null, 2) : snap.skills.map(s => `${s.skillName} [${s.status}] ${s.pluginId}`).join("\n")) + "\n" };
       }
@@ -660,7 +862,18 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: 1, stderr: `${errorText(e)}\n` };
         }
       }
-      return { exitCode: 2, stderr: "Usage: bb agent-plugins <list|show|install|remove|tools|call|skills|approve> …\n" };
+      if (cmd === "auth") {
+        const id = rest[0]; const serverId = rest[1];
+        if (!id || !serverId || serverId === "--json") return { exitCode: 2, stderr: "Usage: bb agent-plugins auth <id> <serverId> [--json]\n" };
+        try {
+          const p = store.getPlugin(id) ?? store.getPluginByName(id);
+          if (!p) throw new Error(`not found: ${id}`);
+          const url = await gateway.authUrl(p.id, serverId);
+          const status = await gateway.authStatus(p.id, serverId);
+          return { exitCode: 0, stdout: asJson ? JSON.stringify({ url, status }, null, 2) + "\n" : `${status}${url ? ` — authorize at ${url}` : ""}\n` };
+        } catch (e) { return { exitCode: 1, stderr: `${errorText(e)}\n` }; }
+      }
+      return { exitCode: 2, stderr: "Usage: bb agent-plugins <list|show|install|remove|tools|call|prompts|resources|skills|approve|auth> …\n" };
     },
   });
 

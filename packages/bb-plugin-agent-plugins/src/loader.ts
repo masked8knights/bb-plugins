@@ -10,7 +10,7 @@
 export const SUPPORTED_SPEC_VERSIONS = ["1.0.0", "1.1.0"] as const;
 export type SupportedSpecVersion = (typeof SUPPORTED_SPEC_VERSIONS)[number];
 
-const PLUGIN_NAME_RE = /^(?!.*(?:--|\\.\\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
+const PLUGIN_NAME_RE = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -355,7 +355,7 @@ export function validateMcpServer(serverId: string, raw: unknown): McpServerResu
         if (u.protocol === "http:") {
           const host = u.hostname.toLowerCase();
           const isLocalhost = host === "localhost";
-          const isLoopback = host === "127.0.0.1" || host === "::1" || host.startsWith("127.") || host === "[::1]";
+          const isLoopback = host === "127.0.0.1" || host === "::1" || host === "[::1]";
           if (!isLocalhost && !isLoopback) errors.push("non-loopback url must be https");
         }
         // also reject CRLF in url

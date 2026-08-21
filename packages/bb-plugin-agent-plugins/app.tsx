@@ -20,7 +20,7 @@ type Snapshot = {
     lastError: string | null;
   }[];
   skills: { pluginId: string; skillName: string; status: string; lastError: string | null; enabled: boolean }[];
-  mcpServers: { pluginId: string; serverId: string; type: string; status: string; lastError: string | null; approved: number; enabled: boolean; configJson: string }[];
+  mcpServers: { pluginId: string; serverId: string; type: string; status: string; authStatus?: string; lastError: string | null; approved: number; enabled: boolean; configJson: string }[];
   dataDir: string | null;
 };
 
@@ -28,7 +28,7 @@ function Dot({ status }: { status: string }) {
   const c =
     status === "active" || status === "ready"
       ? "bg-success"
-      : status === "needs-approval" || status === "pending"
+      : status === "needs-approval" || status === "needs-auth" || status === "pending"
         ? "bg-warning"
         : status === "error" || status === "conflicted"
           ? "bg-destructive"
@@ -63,6 +63,24 @@ function Toggle({
       />
     </button>
   );
+}
+
+function navigateAuthorizationWindow(authWindow: Window | null, url: string | null): void {
+  if (!url) {
+    authWindow?.close();
+    return;
+  }
+  if (authWindow) {
+    try {
+      authWindow.opener = null;
+      authWindow.location.href = url;
+      return;
+    } catch {
+      // Fall through to a normal new-tab attempt if the pre-opened window is
+      // unavailable (for example, a test or embedded browser surface).
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 function useSnapshot() {
@@ -199,21 +217,29 @@ function PluginRow({
   servers,
   onRemove,
   onApprove,
+  onAuthenticate,
+  onReconnect,
+  onReauthorize,
+  onDisconnect,
   onSkillEnabledChange,
   onMcpEnabledChange,
-  pendingToggle,
+  pendingAction,
 }: {
   plugin: Snapshot["plugins"][number];
   skills: Snapshot["skills"];
   servers: Snapshot["mcpServers"];
   onRemove: (id: string) => void;
   onApprove: (p: string, s: string) => void;
+  onAuthenticate: (p: string, s: string) => void;
+  onReconnect: (p: string, s: string) => void;
+  onReauthorize: (p: string, s: string) => void;
+  onDisconnect: (p: string, s: string) => void;
   onSkillEnabledChange: (pluginId: string, skillName: string, enabled: boolean) => void;
   onMcpEnabledChange: (pluginId: string, serverId: string, enabled: boolean) => void;
-  pendingToggle: string | null;
+  pendingAction: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  const hasIssues = skills.some((s) => s.enabled && (s.status === "error" || s.status === "conflicted")) || servers.some((s) => s.enabled && s.status === "error");
+  const hasIssues = skills.some((s) => s.enabled && (s.status === "error" || s.status === "conflicted")) || servers.some((s) => s.enabled && (s.status === "error" || s.status === "needs-auth"));
   const issueMessage = skills.find((s) => s.enabled && s.lastError)?.lastError ?? servers.find((s) => s.enabled && s.lastError)?.lastError;
   const enabledSkillCount = skills.filter((s) => s.enabled).length;
   const enabledServerCount = servers.filter((s) => s.enabled).length;
@@ -281,7 +307,7 @@ function PluginRow({
                         </div>
                         <Toggle
                           checked={s.enabled}
-                          disabled={pendingToggle === toggleKey}
+                          disabled={pendingAction === toggleKey}
                           label={`${s.enabled ? "Disable" : "Enable"} skill ${s.skillName}`}
                           onCheckedChange={(enabled) => onSkillEnabledChange(plugin.id, s.skillName, enabled)}
                         />
@@ -315,7 +341,11 @@ function PluginRow({
                     try { cfg = JSON.parse(srv.configJson) as Record<string, unknown>; } catch {}
                     const isStdio = srv.type === "stdio";
                     const toggleKey = `mcp:${plugin.id}:${srv.serverId}`;
+                    const authKey = `mcp-auth:${plugin.id}:${srv.serverId}`;
                     const displayStatus = srv.enabled ? srv.status : "disabled";
+                    const authStatus = srv.authStatus ?? "unknown";
+                    const canManageAuth = !isStdio && srv.approved === 1;
+                    const isAuthBusy = pendingAction === authKey;
                     return (
                       <div key={srv.serverId} className="px-3 py-3">
                         <div className="flex items-start gap-3">
@@ -327,6 +357,7 @@ function PluginRow({
                               <span className={srv.approved ? "text-[11px] text-success" : "text-[11px] text-warning"}>
                                 {srv.approved ? "approved" : "needs approval"}
                               </span>
+                              {!isStdio && <span className="text-[11px] text-muted-foreground">auth: {authStatus}</span>}
                             </div>
                             <div className="mt-1.5 space-y-1 font-mono text-[11px] leading-snug text-muted-foreground">
                               {isStdio ? (
@@ -344,9 +375,36 @@ function PluginRow({
                               )}
                             </div>
                             {srv.lastError && <p className="mt-1.5 text-[11px] leading-snug text-destructive">{srv.lastError}</p>}
+                            {canManageAuth && srv.enabled && srv.status !== "ready" && (
+                              <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" disabled={isAuthBusy} onClick={() => onAuthenticate(plugin.id, srv.serverId)}>
+                                {authStatus === "authorizing" ? "Continue authentication" : "Authenticate"} {srv.serverId}
+                              </Button>
+                            )}
+                            {canManageAuth && srv.enabled && (srv.status === "ready" || srv.status === "error") && (
+                              <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" disabled={isAuthBusy} onClick={() => onReconnect(plugin.id, srv.serverId)}>
+                                Reconnect {srv.serverId}
+                              </Button>
+                            )}
+                            {canManageAuth && (authStatus === "authenticated" || authStatus === "authorizing") && (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {srv.enabled && (
+                                  <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={isAuthBusy} onClick={() => onReauthorize(plugin.id, srv.serverId)}>
+                                    Reauthorize
+                                  </Button>
+                                )}
+                                <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive" disabled={isAuthBusy} onClick={() => onDisconnect(plugin.id, srv.serverId)}>
+                                  Disconnect
+                                </Button>
+                              </div>
+                            )}
                             {srv.enabled && srv.approved !== 1 && srv.status !== "error" && (
                               <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => onApprove(plugin.id, srv.serverId)}>
                                 Approve &amp; start {srv.serverId}
+                              </Button>
+                            )}
+                            {srv.enabled && srv.approved === 1 && srv.status === "error" && (
+                              <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => onApprove(plugin.id, srv.serverId)}>
+                                Retry {srv.serverId}
                               </Button>
                             )}
                             {!srv.enabled && srv.approved !== 1 && (
@@ -355,7 +413,7 @@ function PluginRow({
                           </div>
                           <Toggle
                             checked={srv.enabled}
-                            disabled={pendingToggle === toggleKey}
+                            disabled={pendingAction === toggleKey}
                             label={`${srv.enabled ? "Disable" : "Enable"} MCP server ${srv.serverId}`}
                             onCheckedChange={(enabled) => onMcpEnabledChange(plugin.id, srv.serverId, enabled)}
                           />
@@ -388,17 +446,17 @@ function AgentPluginsView() {
   const { snap, err, load } = useSnapshot();
   const rpc = useRpc<typeof rpcContract>();
   const [localErr, setLocalErr] = useState<string | null>(null);
-  const [pendingToggle, setPendingToggle] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
 
-  const runToggle = async (key: string, action: () => Promise<unknown>) => {
-    setPendingToggle(key);
+  const runAction = async (key: string, action: () => Promise<unknown>) => {
+    setPendingAction(key);
     setLocalErr(null);
     try {
       await action();
     } catch (e) {
       setLocalErr(e instanceof Error ? e.message : String(e));
     } finally {
-      setPendingToggle(null);
+      setPendingAction(null);
       await load();
     }
   };
@@ -423,25 +481,49 @@ function AgentPluginsView() {
     }
   };
 
+  const runAuthAction = async (method: "authenticate" | "reconnect" | "reauthorize", p: string, s: string) => {
+    const authWindow = window.open("about:blank", "_blank");
+    const key = `mcp-auth:${p}:${s}`;
+    setPendingAction(key);
+    setLocalErr(null);
+    try {
+      const result = await rpc.call(method, { id: p, serverId: s });
+      navigateAuthorizationWindow(authWindow, result.url);
+    } catch (e) {
+      authWindow?.close();
+      setLocalErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPendingAction(null);
+      await load();
+    }
+  };
+
+  const authenticate = (p: string, s: string) => { void runAuthAction("authenticate", p, s); };
+  const reconnect = (p: string, s: string) => { void runAuthAction("reconnect", p, s); };
+  const reauthorize = (p: string, s: string) => { void runAuthAction("reauthorize", p, s); };
+  const disconnect = (p: string, s: string) => {
+    void runAction(`mcp-auth:${p}:${s}`, () => rpc.call("clearAuthentication", { id: p, serverId: s }));
+  };
+
   const setSkillEnabled = (pluginId: string, skillName: string, enabled: boolean) => {
-    void runToggle(`skill:${pluginId}:${skillName}`, () =>
+    void runAction(`skill:${pluginId}:${skillName}`, () =>
       rpc.call("setSkillEnabled", { id: pluginId, skillName, enabled }),
     );
   };
 
   const setMcpEnabled = (pluginId: string, serverId: string, enabled: boolean) => {
-    void runToggle(`mcp:${pluginId}:${serverId}`, () =>
+    void runAction(`mcp:${pluginId}:${serverId}`, () =>
       rpc.call("setMcpEnabled", { id: pluginId, serverId, enabled }),
     );
   };
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <main aria-label="Agent Plugins" className="mx-auto h-full min-h-0 w-full max-w-3xl overflow-y-auto">
       <div className="space-y-4 p-4 md:p-6">
         <div className="space-y-1">
           <h1 className="text-base font-semibold tracking-tight">Agent Plugins</h1>
           <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-            Install once from a path, Git, or npm. Skills become <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">/skill</code> and MCP tools flow to every provider.
+            Install once from a path, Git, or npm. Skills become <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">/skill</code> and MCP capabilities flow to Codex and other BB providers.
           </p>
         </div>
 
@@ -481,9 +563,13 @@ function AgentPluginsView() {
                   servers={snap.mcpServers.filter((s) => s.pluginId === p.id)}
                   onRemove={remove}
                   onApprove={approve}
+                  onAuthenticate={authenticate}
+                  onReconnect={reconnect}
+                  onReauthorize={reauthorize}
+                  onDisconnect={disconnect}
                   onSkillEnabledChange={setSkillEnabled}
                   onMcpEnabledChange={setMcpEnabled}
-                  pendingToggle={pendingToggle}
+                  pendingAction={pendingAction}
                 />
               ))}
             </div>
@@ -491,10 +577,10 @@ function AgentPluginsView() {
         </div>
 
         <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
-          Server-host only v0 · Skills appear next session · Updates: reinstall the same location and we swap atomically.
+          BB spec-plugin bridge · Skills appear next session · Updates: reinstall the same location and we swap atomically.
         </p>
       </div>
-    </div>
+    </main>
   );
 }
 

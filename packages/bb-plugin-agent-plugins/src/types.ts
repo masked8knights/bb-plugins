@@ -42,7 +42,7 @@ export interface McpServerRecord {
   serverId: string;
   type: "stdio" | "streamable-http" | "sse";
   configJson: string;
-  status: "idle" | "ready" | "error" | "disabled" | "needs-approval";
+  status: "idle" | "ready" | "error" | "disabled" | "needs-approval" | "needs-auth";
   lastError: string | null;
   approved: number; // 0/1
   enabled: number; // 0/1
@@ -63,6 +63,68 @@ export interface CatalogTool {
   name: string;
   description: string;
   inputSchema: JsonRecord;
+  outputSchema?: JsonRecord;
+  annotations?: JsonRecord;
+  execution?: JsonRecord;
+  icons?: JsonRecord[];
+  _meta?: JsonRecord;
   status: "ready" | "error";
   error?: string;
+}
+
+export interface CatalogPrompt {
+  opaqueId: string;
+  pluginId: string;
+  pluginName: string;
+  serverId: string;
+  serverType: string;
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: JsonRecord[];
+  icons?: JsonRecord[];
+  _meta?: JsonRecord;
+  status: "ready" | "error";
+  error?: string;
+}
+
+export interface CatalogResource {
+  opaqueId: string;
+  pluginId: string;
+  pluginName: string;
+  serverId: string;
+  serverType: string;
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  icons?: JsonRecord[];
+  _meta?: JsonRecord;
+  status: "ready" | "error";
+  error?: string;
+}
+
+export interface CatalogResourceTemplate {
+  opaqueId: string;
+  pluginId: string;
+  pluginName: string;
+  serverId: string;
+  serverType: string;
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  icons?: JsonRecord[];
+  _meta?: JsonRecord;
+  status: "ready" | "error";
+  error?: string;
+}
+
+export interface McpCallResult {
+  content: JsonRecord[];
+  isError?: boolean;
+  structuredContent?: unknown;
+  _meta?: JsonRecord;
 }

@@ -18,6 +18,11 @@ describe("validateManifest", () => {
     const r = validateManifest({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name: "Bad_Plugin" });
     expect(r.fatal).toBe(true);
   });
+  it("rejects ambiguous consecutive separators", () => {
+    for (const name of ["bad--plugin", "bad..plugin"]) {
+      expect(validateManifest({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name }).fatal).toBe(true);
+    }
+  });
   it("unsupported $schema is fatal", () => {
     const r = validateManifest({ $schema: "https://example.com/bad.json", name: "ok" });
     expect(r.fatal).toBe(true);
@@ -84,6 +89,14 @@ describe("validateMcpServer", () => {
   });
   it("rejects non-loopback http", () => {
     const r = validateMcpServer("x", { type: "streamable-http", url: "http://example.com/mcp" });
+    expect(r.valid).toBe(false);
+  });
+  it("accepts legacy SSE and exact loopback hosts", () => {
+    expect(validateMcpServer("sse", { type: "sse", url: "https://example.com/sse" }).valid).toBe(true);
+    expect(validateMcpServer("ipv6", { type: "streamable-http", url: "http://[::1]:3000/mcp" }).valid).toBe(true);
+  });
+  it("does not treat lookalike hosts as loopback", () => {
+    const r = validateMcpServer("x", { type: "streamable-http", url: "http://127.0.0.1.example.com/mcp" });
     expect(r.valid).toBe(false);
   });
   it("rejects duplicate headers case-insensitive", () => {

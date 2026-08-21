@@ -1,10 +1,13 @@
+import * as http from "node:http";
+import { once } from "node:events";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { McpGateway } from "./gateway.js";
+import { McpGateway, redirectGuardFetch } from "./gateway.js";
 import { AgentPluginsStore } from "./store.js";
 import type { PluginRecord } from "./types.js";
 
 const databases: Database.Database[] = [];
+const servers: http.Server[] = [];
 
 function createStore(): AgentPluginsStore {
   const database = new Database(":memory:");
@@ -16,6 +19,7 @@ function createStore(): AgentPluginsStore {
 
 afterEach(() => {
   for (const database of databases.splice(0)) database.close();
+  for (const server of servers.splice(0)) server.close();
 });
 
 describe("McpGateway resource settings", () => {
@@ -108,5 +112,81 @@ describe("McpGateway resource settings", () => {
     expect(record.status).toBe("error");
     expect(record.lastError).toBeTruthy();
     await gateway.close();
+  });
+
+  it("keeps fixed headers on legacy SSE session posts without leaking them to OAuth endpoints", async () => {
+    const seen: Record<string, string | undefined>[] = [];
+    const server = http.createServer((request, response) => {
+      const fixed = request.headers["x-fixed"];
+      seen.push({ path: request.url, fixed: typeof fixed === "string" ? fixed : undefined });
+      response.writeHead(200);
+      response.end("ok");
+    });
+    servers.push(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const port = (server.address() as { port: number }).port;
+    const base = `http://127.0.0.1:${port}`;
+    const guarded = redirectGuardFetch(new URL(`${base}/sse`), { "X-Fixed": "secret" });
+
+    await guarded(`${base}/messages?session=1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" }),
+    });
+    await guarded(`${base}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "BB Agent Plugins" }),
+    });
+    await guarded(`${base}/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "grant_type=authorization_code",
+    });
+    await guarded(`${base}/sse`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    await guarded(`${base}/sse`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "BB Agent Plugins" }),
+    });
+    await guarded(`${base}/sse`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "grant_type=authorization_code",
+    });
+    await guarded(`${base}/sse`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "initialize" }),
+    });
+    await guarded(`${base}/sse`, { method: "DELETE" });
+
+    expect(seen).toEqual([
+      { path: "/messages?session=1", fixed: "secret" },
+      { path: "/register", fixed: undefined },
+      { path: "/token", fixed: undefined },
+      { path: "/sse", fixed: undefined },
+      { path: "/sse", fixed: undefined },
+      { path: "/sse", fixed: undefined },
+      { path: "/sse", fixed: "secret" },
+      { path: "/sse", fixed: "secret" },
+    ]);
+  });
+
+  it("bounds stalled OAuth and MCP HTTP requests", async () => {
+    const server = http.createServer((_request, _response) => {
+      // Leave the response open; the guard must abort the fetch itself.
+    });
+    servers.push(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const port = (server.address() as { port: number }).port;
+    const guarded = redirectGuardFetch(new URL(`http://127.0.0.1:${port}/mcp`), undefined, 30);
+
+    await expect(guarded(`http://127.0.0.1:${port}/mcp`)).rejects.toThrow(/timed out|aborted/i);
   });
 });
