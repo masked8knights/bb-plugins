@@ -158,10 +158,14 @@ function considerationPrompt(
   member: MemberRow,
   proposal: string,
   context: string | null,
+  research: boolean,
 ): string {
   const contextBlock = context
     ? `\nSupplementary context from the requester:\n\n<context>\n${context}\n</context>\n`
     : "";
+  const researchClause = research
+    ? "You may use tools to investigate before judging: read the relevant code, docs, and config in this workspace, and run quick read-only checks to verify claims. Stay focused — a few minutes of targeted checking, not a survey — and do not modify anything."
+    : "Do not use any tools.";
   return [
     `You are ${member.name}, a member of an advisory council.`,
     member.persona
@@ -174,7 +178,7 @@ function considerationPrompt(
     proposal,
     "</proposal>",
     contextBlock,
-    "Review it independently. Identify strengths, risks, and open questions. Be specific and concise (under 250 words). Do not use any tools.",
+    `Review it independently. Identify strengths, risks, and open questions. Be specific and concise (under 250 words). ${researchClause}`,
     "",
     "End your reply with exactly one line:",
     "STANCE: support",
@@ -255,6 +259,7 @@ export type CouncilConfig = {
   maxRounds: number;
   timeoutMs: number;
   consensusMode: "majority" | "unanimous";
+  research: boolean;
 };
 
 export class CouncilEngine {
@@ -327,6 +332,7 @@ export class CouncilEngine {
       const raw = await this.getConfig();
       const maxRounds = Math.max(0, raw.maxRounds);
       const timeoutMs = Math.max(30_000, raw.timeoutMs);
+      const research = raw.research !== false;
       const consensusMode: string =
         raw.consensusMode === "unanimous" ? "unanimous" : "majority";
 
@@ -343,7 +349,7 @@ export class CouncilEngine {
           const thread = await this.bb.sdk.threads.spawn({
             projectId,
             environment: { type: "project-default" },
-            prompt: considerationPrompt(member, session.proposal, session.context),
+            prompt: considerationPrompt(member, session.proposal, session.context, research),
             title: `Council — ${member.name}`,
             visibility: "hidden",
             permissionMode: "auto",

@@ -235,6 +235,12 @@ export default async function plugin(bb: BbPluginApi) {
       options: ["majority", "unanimous"],
       default: "majority",
     },
+    memberResearch: {
+      type: "select",
+      label: "Member research (consideration phase)",
+      options: ["workspace tools", "off"],
+      default: "workspace tools",
+    },
     maxMembers: {
       type: "string",
       label: "Max council members",
@@ -260,6 +266,7 @@ export default async function plugin(bb: BbPluginApi) {
         values.consensusMode === "unanimous"
           ? ("unanimous" as const)
           : ("majority" as const),
+      research: values.memberResearch !== "off",
     };
   };
 

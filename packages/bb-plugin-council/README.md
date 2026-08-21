@@ -72,9 +72,12 @@ Deleting a session removes its transcript, turns, and roster permanently — fro
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Discussion rounds (max) | 2 | Upper bound on discussion rounds |
-| Per-response timeout (seconds) | 240 | Wait per member response before recusing them |
+| Per-response timeout (seconds) | 240 | Wait per member response before recusing them; also bounds research time |
 | Consensus rule | majority | `majority` or `unanimous` early-stop rule |
+| Member research | workspace tools | During consideration, members may read the workspace and run quick read-only checks (`off` restores facts-presented-only judging) |
 | Max council members | 7 | Guard rail on panel-created members |
+
+Research makes deliberations slower (minutes instead of ~half a minute) but grounds verdicts in verified repo facts instead of plausible guesses. Discussion and verdict phases are always tool-free so they stay fast and focused on the collected evidence.
 
 ## Behavior notes
 
