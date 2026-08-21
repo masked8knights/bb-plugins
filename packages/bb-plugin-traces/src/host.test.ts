@@ -86,4 +86,27 @@ describe("trace host worker", () => {
       truncated: false,
     });
   });
+
+  it("starts compaction in the retained host worker instead of blocking the call", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bb-traces-compaction-"));
+    temporaryDirectories.push(directory);
+    const temp = join(directory, "worker-temp");
+    await mkdir(temp);
+    const harness = experimental_createHostEntryHarness(hostEntry, {
+      experimental_paths: { dataDir: join(directory, "host-data"), tempDir: temp },
+    });
+    harnesses.push(harness);
+
+    const startedAt = performance.now();
+    const started = await harness.experimental_call("compact", null);
+    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(started).toMatchObject({ changed: false, running: true, vacuumed: false });
+
+    let finished = started;
+    for (let attempt = 0; attempt < 100 && !finished.vacuumed; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      finished = await harness.experimental_call("compact", null);
+    }
+    expect(finished).toMatchObject({ running: false, vacuumed: true });
+  });
 });

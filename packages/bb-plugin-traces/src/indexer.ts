@@ -830,13 +830,25 @@ export function compactStorage(db: SqliteDb): { changed: boolean; vacuumed: bool
   }
 
   const vacuumRow = db.prepare("SELECT value FROM trace_meta WHERE key = 'storage_vacuum'").get() as DbRow | undefined;
-  if (String(vacuumRow?.value ?? "") === STORAGE_COMPACTION_VERSION) return { changed, vacuumed: true };
+  if (String(vacuumRow?.value ?? "") === STORAGE_COMPACTION_VERSION) {
+    // VACUUM itself writes the compacted database through the WAL. Checkpoint
+    // after it as well as before it so the temporary WAL does not retain a
+    // second copy of the database indefinitely.
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+      return { changed, vacuumed: true };
+    } catch {
+      // A later host call can retry the checkpoint without repeating VACUUM.
+      return { changed, vacuumed: false };
+    }
+  }
   try {
     db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     db.exec("VACUUM;");
     db.prepare(
       "INSERT INTO trace_meta (key, value) VALUES ('storage_vacuum', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     ).run(STORAGE_COMPACTION_VERSION);
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     return { changed, vacuumed: true };
   } catch {
     // VACUUM can lose a race with a server read. The logical cleanup is still

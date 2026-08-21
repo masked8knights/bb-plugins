@@ -15,6 +15,11 @@ type WorkerState = {
   dataDir: string;
   db: DatabaseSync;
   indexer: TraceIndexer;
+  compaction: {
+    running: boolean;
+    lastResult: { changed: boolean; vacuumed: boolean };
+    done: Promise<void> | null;
+  };
 };
 
 let state: WorkerState | null = null;
@@ -31,17 +36,51 @@ function openState(dataDir: string): WorkerState {
     dataDir,
     db,
     indexer: new TraceIndexer(sqlite),
+    compaction: {
+      running: false,
+      lastResult: { changed: false, vacuumed: false },
+      done: null,
+    },
   };
   return state;
 }
 
-function closeState(): void {
+async function closeState(): Promise<void> {
   if (!state) return;
+  const closing = state;
+  state = null;
+  if (closing.compaction.done) await closing.compaction.done;
   try {
-    state.db.close();
-  } finally {
-    state = null;
+    closing.db.close();
+  } catch {
+    // The daemon may already have closed the worker's database during reload.
   }
+}
+
+type RetainedWorkerLease = { dispose(): Promise<void> };
+
+function compactResult(current: WorkerState, running = current.compaction.running) {
+  return { ...current.compaction.lastResult, running };
+}
+
+function startCompaction(current: WorkerState, context: { experimental_retainWorker(): RetainedWorkerLease }): void {
+  if (current.compaction.running || current.compaction.lastResult.vacuumed) return;
+  const lease = context.experimental_retainWorker();
+  current.compaction.running = true;
+  current.compaction.done = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      try {
+        current.compaction.lastResult = compactStorage(current.db as unknown as SqliteDb);
+      } catch (error) {
+        console.warn("[traces] storage compaction deferred", error);
+      } finally {
+        current.compaction.running = false;
+        current.compaction.done = null;
+        void lease.dispose().catch(() => {});
+        resolve();
+      }
+    });
+  });
 }
 
 export default experimental_defineHostEntry({
@@ -49,21 +88,16 @@ export default experimental_defineHostEntry({
   experimental_signals: traceHostSignals,
   handlers: {
     compact(_input, context) {
-      if (context.signal.aborted) return { changed: false, vacuumed: false };
-      return compactStorage(openState(context.experimental_paths.dataDir).db as unknown as SqliteDb);
+      const current = openState(context.experimental_paths.dataDir);
+      if (context.signal.aborted) return compactResult(current);
+      startCompaction(current, context);
+      return compactResult(current);
     },
 
     async scan(input, context) {
       const current = openState(context.experimental_paths.dataDir);
       if (context.signal.aborted) {
         return { changed: false, complete: false, processedPaths: [], failedPaths: [] };
-      }
-      try {
-        compactStorage(current.db as unknown as SqliteDb);
-      } catch (error) {
-        // Logical cleanup is retried on the next worker call. An unavailable
-        // VACUUM must not prevent new session files from being indexed.
-        console.warn("[traces] storage compaction deferred", error);
       }
       const failedSessionPaths = new Set<string>();
       const result = await current.indexer.scan(input.roots as RootSpec[], context.signal, {

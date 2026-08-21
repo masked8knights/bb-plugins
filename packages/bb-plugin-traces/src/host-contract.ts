@@ -72,6 +72,7 @@ export const traceHostContract = defineRpcContract({
     input: z.null(),
     output: z.object({
       changed: z.boolean(),
+      running: z.boolean(),
       vacuumed: z.boolean(),
     }).strict(),
   },

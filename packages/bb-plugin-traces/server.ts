@@ -233,6 +233,7 @@ export default async function plugin(bb: BbPluginApi) {
   let watcherGeneration = 0;
   let selectedHostId: string | null = null;
   let storageCompacted = false;
+  let compactionInProgress = false;
   let nextCompactionAttemptAt = 0;
   let lastHostFallbackWarningAt = 0;
 
@@ -258,7 +259,7 @@ export default async function plugin(bb: BbPluginApi) {
     return host.id;
   }
 
-  async function hostCompact(signal?: AbortSignal): Promise<{ changed: boolean; vacuumed: boolean }> {
+  async function hostCompact(signal?: AbortSignal): Promise<{ changed: boolean; running: boolean; vacuumed: boolean }> {
     const hostId = await resolveHostId();
     try {
       return await traceHost.call("compact", null, { hostId, signal });
@@ -423,7 +424,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function status(): Promise<TraceStatus> {
-    const scanInProgress = indexing || scanRequested || activeScan !== null;
+    const scanInProgress = indexing || scanRequested || activeScan !== null || compactionInProgress;
     const stats = await fallbackHostRead(
       "status counts",
       () => hostStats({ lastScanAt, indexing: scanInProgress, lastError }),
@@ -591,14 +592,17 @@ export default async function plugin(bb: BbPluginApi) {
               try {
                 const result = await hostCompact(signal);
                 storageCompacted = result.vacuumed;
-                nextCompactionAttemptAt = result.vacuumed ? Number.MAX_SAFE_INTEGER : Date.now() + 30_000;
+                compactionInProgress = result.running;
+                nextCompactionAttemptAt = result.vacuumed
+                  ? Number.MAX_SAFE_INTEGER
+                  : Date.now() + (result.running ? 1_000 : 30_000);
                 if (result.changed) publish();
               } catch (error) {
                 nextCompactionAttemptAt = Date.now() + 30_000;
                 bb.log.warn("Trace storage compaction deferred: " + errorText(error));
               }
             }
-            if (scanRequested) {
+            if (scanRequested && !compactionInProgress) {
               scanRequested = false;
               const scanComplete = await scanNow(signal);
               nextSafetyScanAt = scanComplete
