@@ -223,7 +223,17 @@ export class CouncilStore {
   }
 
   deleteMember(id: string): void {
+    const wasChief = this.getMember(id)?.isChief === 1;
     this.db.prepare("DELETE FROM members WHERE id = ?").run(id);
+    if (!wasChief) return;
+    // Keep the invariant that exactly one enabled member is chief; the
+    // earliest remaining enabled member takes the role.
+    const successor = this.listMembers().find((member) => member.enabled === 1);
+    if (successor) {
+      this.db
+        .prepare("UPDATE members SET is_chief = 1 WHERE id = ?")
+        .run(successor.id);
+    }
   }
 
   createSession(input: {

@@ -37,5 +37,18 @@ and `## Dissent and minority views`. Report the verdict faithfully; surface
 dissent instead of hiding it.
 
 Users can inspect full transcripts in the Council panel. From a terminal,
-`bb council sessions` lists sessions and `bb council session <id>` prints one
-transcript.
+`bb council sessions` lists sessions, `bb council session <id>` prints one
+transcript, and `bb council delete <id>` removes one.
+
+## Managing members
+
+You can manage council members yourself through the CLI:
+
+- `bb council members` — list members with ids and execution settings.
+- `bb council member-add <name> --persona "<judgment instructions>" [--provider <id>] [--model <model>] [--reasoning <level>] [--chief] [--disabled]`
+- `bb council member-set <id> ...` — same flags; pass `none` to clear provider/model/reasoning.
+- `bb council member-delete <id>` — deleting the chief promotes the earliest remaining enabled member.
+
+Write personas as judgment instructions (principles, evaluation criteria,
+output expectations), not role-play fluff. Leave provider/model unset unless
+the user asks for a specific model.

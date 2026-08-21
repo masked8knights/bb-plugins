@@ -1,7 +1,7 @@
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CouncilStore, migrations, type MemberRow, type RosterRow, type SessionRow } from "./db";
-import { CouncilEngine } from "./engine";
+import { CouncilEngine, REASONING_LEVELS } from "./engine";
 import { rpcContract } from "./contract";
 
 export type { rpcContract };
@@ -134,8 +134,58 @@ function sessionSummary(session: SessionRow, roster: RosterRow[]) {
   };
 }
 
-function conversationPrompt(proposal: string, context?: string): string {
-  const contextBlock = context
+function parseCliFlags(args: string[]): {
+  positional: string[];
+  flags: Map<string, string | boolean>;
+} {
+  const positional: string[] = [];
+  const flags = new Map<string, string | boolean>();
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    const key = arg.slice(2);
+    const next = args[i + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      flags.set(key, next);
+      i++;
+    } else {
+      flags.set(key, true);
+    }
+  }
+  return { positional, flags };
+}
+
+function optionalString(
+  flags: Map<string, string | boolean>,
+  key: string,
+): string | undefined {
+  const value = flags.get(key);
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+const NULL_SENTINELS = new Set(["none", "clear", "default"]);
+
+/**
+ * Tri-state flag reader for nullable values: not present, set-to-value
+ * (empty/sentinel means clear to null), so `--provider none` clears.
+ */
+function nullableFlag(
+  flags: Map<string, string | boolean>,
+  key: string,
+): { changed: true; value: string | null } | undefined {
+  if (!flags.has(key)) return undefined;
+  const raw = flags.get(key);
+  const value = typeof raw === "string" && raw.length > 0 ? raw : null;
+  if (value !== null && NULL_SENTINELS.has(value)) {
+    return { changed: true, value: null };
+  }
+  return { changed: true, value };
+}
+
+function conversationPrompt(proposal: string, context?: string): string {  const contextBlock = context
     ? `\nSupporting context:\n\n<context>\n${context}\n</context>\n`
     : "";
   return [
@@ -475,6 +525,29 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb council delete <id>",
       },
       {
+        name: "members",
+        summary: "List council members",
+        usage: "bb council members",
+      },
+      {
+        name: "member-add",
+        summary: "Add a council member",
+        usage:
+          'bb council member-add <name> [--persona "<text>"] [--provider <id>] [--model <model>] [--reasoning <level>] [--chief] [--disabled]',
+      },
+      {
+        name: "member-set",
+        summary:
+          "Update a council member (flags mirror member-add; pass none to clear provider/model/reasoning)",
+        usage:
+          'bb council member-set <id> [--name "<name>"] [--persona "<text>"] [--provider <id|none>] [--model <model|none>] [--reasoning <level|none>] [--chief true|false] [--enabled true|false]',
+      },
+      {
+        name: "member-delete",
+        summary: "Delete a council member",
+        usage: "bb council member-delete <id>",
+      },
+      {
         name: "convene",
         summary: "Convene the council on a proposal (blocking)",
         usage: 'bb council convene "<proposal>"',
@@ -513,6 +586,120 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: 1, stderr: "Session not found." };
         }
         return { exitCode: 0, stdout: `Deleted session ${rest[0]}.` };
+      }
+      if (sub === "members") {
+        const members = store.listMembers();
+        if (members.length === 0) return { exitCode: 0, stdout: "No members yet." };
+        const lines = members.map((member) => {
+          const tags = [
+            member.isChief === 1 ? "chief" : null,
+            member.enabled === 1 ? null : "disabled",
+          ]
+            .filter(Boolean)
+            .join(",");
+          const execution =
+            [member.providerId, member.model, member.reasoningLevel]
+              .filter(Boolean)
+              .join("/") || "project default";
+          return `${member.id}  ${member.name.padEnd(16)} ${execution.padEnd(28)} [${tags}]`;
+        });
+        return { exitCode: 0, stdout: lines.join("\n") };
+      }
+      if (sub === "member-add") {
+        const { positional, flags } = parseCliFlags(rest);
+        const name = positional[0];
+        if (!name) {
+          return { exitCode: 1, stderr: 'Usage: bb council member-add <name> [--persona "<text>"]' };
+        }
+        const values = await settings.get();
+        const maxMembers = Math.max(
+          1,
+          Number.parseInt(values.maxMembers, 10) || 7,
+        );
+        if (store.listMembers().length >= maxMembers) {
+          return {
+            exitCode: 1,
+            stderr: `Council is full (max ${maxMembers} members). Raise "Max council members" in plugin settings.`,
+          };
+        }
+        const reasoningLevel = optionalString(flags, "reasoning");
+        if (
+          reasoningLevel !== undefined &&
+          !REASONING_LEVELS.has(reasoningLevel)
+        ) {
+          return {
+            exitCode: 1,
+            stderr: `Unknown reasoning level "${reasoningLevel}". Valid: ${[...REASONING_LEVELS].join(", ")}.`,
+          };
+        }
+        const isChief = flags.get("chief") === true;
+        const id = store.insertMember({
+          name,
+          persona: optionalString(flags, "persona") ?? "",
+          providerId: optionalString(flags, "provider") ?? null,
+          model: optionalString(flags, "model") ?? null,
+          reasoningLevel: reasoningLevel ?? null,
+          isChief,
+          enabled: flags.get("disabled") !== true,
+        });
+        if (isChief) store.clearOtherChiefs(id);
+        return { exitCode: 0, stdout: `Added member ${name} (${id}).` };
+      }
+      if (sub === "member-set" && rest[0]) {
+        const member = store.getMember(rest[0]);
+        if (!member) return { exitCode: 1, stderr: "Member not found." };
+        const { flags } = parseCliFlags(rest.slice(1));
+        const name = optionalString(flags, "name");
+        const persona = optionalString(flags, "persona");
+        const providerChange = nullableFlag(flags, "provider");
+        const modelChange = nullableFlag(flags, "model");
+        const reasoningChange = nullableFlag(flags, "reasoning");
+        if (
+          typeof reasoningChange?.value === "string" &&
+          !REASONING_LEVELS.has(reasoningChange.value)
+        ) {
+          return {
+            exitCode: 1,
+            stderr: `Unknown reasoning level "${reasoningChange.value}". Valid: ${[...REASONING_LEVELS].join(", ")}.`,
+          };
+        }
+        const chiefFlag = flags.get("chief");
+        const enabledFlag = flags.get("enabled");
+        const truthy = (value: string | boolean | undefined) =>
+          value === true || value === "true";
+        const falsy = (value: string | boolean | undefined) =>
+          value === false || value === "false";
+        if (
+          (chiefFlag !== undefined && !truthy(chiefFlag) && !falsy(chiefFlag)) ||
+          (enabledFlag !== undefined &&
+            !truthy(enabledFlag) &&
+            !falsy(enabledFlag))
+        ) {
+          return { exitCode: 1, stderr: "Boolean flags accept true or false." };
+        }
+        store.updateMember(member.id, {
+          name: name ?? member.name,
+          persona: persona ?? member.persona,
+          providerId: providerChange ? providerChange.value : member.providerId,
+          model: modelChange ? modelChange.value : member.model,
+          reasoningLevel: reasoningChange
+            ? reasoningChange.value
+            : member.reasoningLevel,
+          isChief:
+            chiefFlag === undefined ? member.isChief === 1 : truthy(chiefFlag),
+          enabled:
+            enabledFlag === undefined
+              ? member.enabled === 1
+              : truthy(enabledFlag),
+        });
+        if (truthy(chiefFlag)) store.clearOtherChiefs(member.id);
+        return { exitCode: 0, stdout: `Updated member ${member.name}.` };
+      }
+      if (sub === "member-delete" && rest[0]) {
+        const member = store.getMember(rest[0]);
+        if (!member) return { exitCode: 1, stderr: "Member not found." };
+        store.deleteMember(rest[0]);
+        return { exitCode: 0, stdout: `Deleted member ${member.name}.` };
       }
       if (sub === "convene") {
         const proposal = rest.join(" ").trim();

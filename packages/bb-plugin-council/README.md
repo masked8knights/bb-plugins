@@ -31,6 +31,17 @@ Members live in the plugin database and are managed in the panel. Each has:
 
 Default members: **Grug** (chief; grugbrain.dev pragmatism — complexity is the enemy, 80/20 solutions, Chesterton's fence), **Architect** (systems thinking, boundaries, trade-offs), **Designer** (user experience, states nobody designed, accessibility). They are seeded once; deleting them is permanent.
 
+Agents (and you, from any terminal) manage members through the CLI:
+
+```
+bb council members
+bb council member-add "Skeptic" --persona "<judgment instructions>" [--provider <id>] [--model <model>] [--reasoning <level>] [--chief] [--disabled]
+bb council member-set <id> --name ... --persona ... --provider none --chief true|false --enabled true|false
+bb council member-delete <id>
+```
+
+`--provider/--model/--reasoning none` clears back to project defaults. Deleting the chief automatically promotes the earliest remaining enabled member, so the council always has exactly one.
+
 ## Using it
 
 From an agent thread, call the tool:

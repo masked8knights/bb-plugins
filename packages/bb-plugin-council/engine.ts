@@ -19,7 +19,7 @@ export type Tally = {
 const STANCE_RE_ALL = /^\s*STANCE:\s*(support|oppose|abstain)\s*$/gim;
 const PASS_RE = /^\s*PASS:\s?/im;
 const COMMENT_RE = /^\s*COMMENT:\s?/i;
-const REASONING_LEVELS = new Set([
+export const REASONING_LEVELS = new Set([
   "none",
   "low",
   "medium",
