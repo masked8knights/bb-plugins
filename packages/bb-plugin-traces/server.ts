@@ -11,8 +11,10 @@ import {
   TraceIndexer,
   type RootSpec,
   type SessionSummary,
+  type TraceEventFilters,
   type TraceSourceId,
 } from "./src/indexer";
+import { traceHostContract } from "./src/host-contract";
 import { configuredSessionRootEntries, shouldScanAfterSettingsChange } from "./src/settings";
 
 const SCAN_BATCH_FILES = 1;
@@ -213,8 +215,9 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const db = bb.storage.database();
-  const ftsEnabled = ensureSchema(db);
-  const indexer = new TraceIndexer(db, ftsEnabled, (message) => bb.log.warn(message));
+  ensureSchema(db);
+  const indexer = new TraceIndexer(db, false, (message) => bb.log.warn(message));
+  const traceHost = bb.hosts.experimental_client({ contract: traceHostContract });
   let indexing = false;
   let lastScanAt: number | null = null;
   let lastError: string | null = null;
@@ -228,6 +231,123 @@ export default async function plugin(bb: BbPluginApi) {
   let nextSafetyScanAt = 0;
   let dirtySessionPaths = new Set<string>();
   let watcherGeneration = 0;
+  let selectedHostId: string | null = null;
+  let storageCompacted = false;
+  let nextCompactionAttemptAt = 0;
+  let lastHostFallbackWarningAt = 0;
+
+  traceHost.experimental_onWorkerExit(({ hostId }) => {
+    if (selectedHostId === hostId) {
+      storageCompacted = false;
+      nextCompactionAttemptAt = 0;
+    }
+  });
+
+  async function resolveHostId(): Promise<string> {
+    if (selectedHostId) return selectedHostId;
+    const config = await bb.sdk.system.config() as unknown as { primaryHostId?: string | null };
+    const primaryHostId = typeof config.primaryHostId === "string" ? config.primaryHostId : null;
+    if (primaryHostId) {
+      selectedHostId = primaryHostId;
+      return primaryHostId;
+    }
+    const hosts = await bb.sdk.hosts.list();
+    const host = hosts.find((candidate) => candidate.status === "connected") ?? hosts[0];
+    if (!host) throw new Error("No connected host available for trace indexing");
+    selectedHostId = host.id;
+    return host.id;
+  }
+
+  async function hostCompact(signal?: AbortSignal): Promise<{ changed: boolean; vacuumed: boolean }> {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("compact", null, { hostId, signal });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostScan(
+    configured: RootSpec[],
+    dirtyPaths: ReadonlySet<string>,
+    signal?: AbortSignal,
+  ) {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("scan", {
+        roots: configured,
+        forceFingerprintPaths: [...dirtyPaths].slice(0, 20_000),
+        maxFiles: SCAN_BATCH_FILES,
+      }, { hostId, signal });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostStats(input: { lastScanAt: number | null; indexing: boolean; lastError: string | null }) {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("stats", input, { hostId });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostRawEvent(id: string): Promise<{ raw: string | null; truncated: boolean }> {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("rawEvent", { id }, { hostId });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostListSessions(input: Parameters<TraceIndexer["listSessions"]>[0]) {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("listSessions", input, { hostId });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostGetSession(input: { id: string; limit: number; offset: number } & TraceEventFilters) {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("getSession", input, { hostId });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function hostGetSessionFacets(id: string) {
+    const hostId = await resolveHostId();
+    try {
+      return await traceHost.call("getSessionFacets", { id }, { hostId });
+    } catch (error) {
+      if (selectedHostId === hostId) selectedHostId = null;
+      throw error;
+    }
+  }
+
+  async function fallbackHostRead<T>(label: string, operation: () => Promise<T>, fallback: () => T): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      const now = Date.now();
+      if (now - lastHostFallbackWarningAt >= 30_000) {
+        lastHostFallbackWarningAt = now;
+        bb.log.warn("Trace host " + label + " fell back to the server: " + errorText(error));
+      }
+      return fallback();
+    }
+  }
 
   async function roots(): Promise<RootSpec[]> {
     const current = await settings.get();
@@ -304,7 +424,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function status(): Promise<TraceStatus> {
     const scanInProgress = indexing || scanRequested || activeScan !== null;
-    const stats = indexer.stats(lastScanAt, scanInProgress, lastError);
+    const stats = await fallbackHostRead(
+      "status counts",
+      () => hostStats({ lastScanAt, indexing: scanInProgress, lastError }),
+      () => indexer.stats(lastScanAt, scanInProgress, lastError),
+    );
     const current = await settings.get();
     const configuredEntries = configuredSessionRootEntries(current.additionalSessionRoots);
     const configured = dedupeRoots(defaultSessionRoots().concat(customRoots(configuredEntries.join("\n"))));
@@ -355,21 +479,16 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const configured = await roots();
         drainedDirtySessionPaths = dirtySessionPaths;
-        const failedSessionPaths = new Set<string>();
         dirtySessionPaths = new Set();
         scanDrainedWatcherState = true;
-        const result = await indexer.scan(configured, signal, {
-          forceFingerprintPaths: drainedDirtySessionPaths,
-          failedSessionPaths,
-          maxFiles: SCAN_BATCH_FILES,
-        });
+        const result = await hostScan(configured, drainedDirtySessionPaths, signal);
         changed = result.changed;
         const processedPaths = new Set(result.processedPaths);
         for (const path of drainedDirtySessionPaths) {
           if (!processedPaths.has(path)) dirtySessionPaths.add(path);
         }
-        for (const path of failedSessionPaths) dirtySessionPaths.add(path);
-        changed = changed || failedSessionPaths.size > 0;
+        for (const path of result.failedPaths) dirtySessionPaths.add(path);
+        changed = changed || result.failedPaths.length > 0;
         scanComplete = result.complete;
         scanCompleted = !signal?.aborted;
         if (!signal?.aborted && scanComplete) lastScanAt = Date.now();
@@ -393,16 +512,20 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     status,
-    listSessions(input) {
-      return indexer.listSessions(input);
+    async listSessions(input) {
+      return fallbackHostRead("session list", () => hostListSessions(input), () => indexer.listSessions(input));
     },
-    getSession(input) {
-      const detail = indexer.getSession(input.id, input.limit, input.offset, {
-        query: input.query,
-        categories: input.categories,
-        toolTypes: input.toolTypes,
-        errorFilter: input.errorFilter,
-      });
+    async getSession(input) {
+      const detail = await fallbackHostRead(
+        "trajectory read",
+        () => hostGetSession(input),
+        () => indexer.getSession(input.id, input.limit, input.offset, {
+          query: input.query,
+          categories: input.categories,
+          toolTypes: input.toolTypes,
+          errorFilter: input.errorFilter,
+        }),
+      );
       return {
         ...detail,
         events: detail.events.map((event) => ({
@@ -412,11 +535,20 @@ export default async function plugin(bb: BbPluginApi) {
         })),
       };
     },
-    getSessionFacets({ id }) {
-      return indexer.getSessionFacets(id);
+    async getSessionFacets({ id }) {
+      return fallbackHostRead("trajectory facets", () => hostGetSessionFacets(id), () => indexer.getSessionFacets(id));
     },
     async getEventRaw({ id }) {
-      return indexer.rawEvent(id);
+      try {
+        return await hostRawEvent(id);
+      } catch (error) {
+        const now = Date.now();
+        if (now - lastHostFallbackWarningAt >= 30_000) {
+          lastHostFallbackWarningAt = now;
+          bb.log.warn("Trace payload read fell back to the server: " + errorText(error));
+        }
+        return indexer.rawEvent(id);
+      }
     },
     async rescan() {
       scanRequested = true;
@@ -455,6 +587,17 @@ export default async function plugin(bb: BbPluginApi) {
             if (current.autoIndex && Date.now() >= nextSafetyScanAt) {
               scanRequested = true;
             }
+            if (!storageCompacted && Date.now() >= nextCompactionAttemptAt) {
+              try {
+                const result = await hostCompact(signal);
+                storageCompacted = result.vacuumed;
+                nextCompactionAttemptAt = result.vacuumed ? Number.MAX_SAFE_INTEGER : Date.now() + 30_000;
+                if (result.changed) publish();
+              } catch (error) {
+                nextCompactionAttemptAt = Date.now() + 30_000;
+                bb.log.warn("Trace storage compaction deferred: " + errorText(error));
+              }
+            }
             if (scanRequested) {
               scanRequested = false;
               const scanComplete = await scanNow(signal);
@@ -484,5 +627,5 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.log.info("loaded; local trace indexer enabled for " + sourceLabel("codex") + ", Claude, Pi, OMP, and DeepSeek Harness");
+  bb.log.info("loaded; worker-backed local trace indexer enabled for " + sourceLabel("codex") + ", Claude, Pi, OMP, and DeepSeek Harness");
 }

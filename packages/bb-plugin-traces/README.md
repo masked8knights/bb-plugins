@@ -21,19 +21,24 @@ one absolute path per line.
 
 ## Indexing
 
-The indexer keeps complete session files durable and parses only new JSONL
+The host worker owns discovery, parsing, SQLite reads/writes, and compaction.
+The plugin server only coordinates scans, watches roots, and serves settings
+and status. It keeps complete session files durable and parses only new JSONL
 lines when the existing file prefix is unchanged. It stores a SHA-256 content
 fingerprint for completed files, checks filesystem changes with a debounced
-watcher, and runs a slower metadata sweep for changes the watcher cannot report.
-Unstable reads are rejected and retried so a live session cannot leave stale
-events in the index. Discovery is bounded at 50,000 session files and 32
-directory levels as a safety guard for accidental broad custom roots; when a
-root reaches the guard, cached rows are preserved and the root reports the
-limit instead of silently deleting data.
+watcher, and runs a slower metadata sweep for changes the watcher cannot
+report. Unstable reads are rejected and retried so a live session cannot leave
+stale events in the index.
+Discovery is bounded at 50,000 session files and 32 directory levels as a
+safety guard for accidental broad custom roots; when a root reaches the guard,
+cached rows are preserved and the root reports the limit instead of silently
+deleting data.
 
 Original session files are never rewritten, uploaded, or forwarded. The local
-database contains normalized metadata, searchable summaries, and bounded event
-payloads; the source files remain the complete record.
+database contains normalized metadata and bounded searchable summaries. It does
+not keep a full-text mirror or a per-event payload preview; the selected raw
+JSON is read from the source file on demand, so the source files remain the
+complete record while the database stays compact.
 
 ## UI model
 
