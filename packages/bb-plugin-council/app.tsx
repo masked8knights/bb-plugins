@@ -714,7 +714,7 @@ function CouncilPage(props: { subPath: string }) {
   const sessionMatch = props.subPath.match(/^session\/(.+)$/);
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-4 p-4 md:p-5">
+    <div className="mx-auto h-full w-full max-w-3xl space-y-4 overflow-y-auto overscroll-contain p-4 md:p-5">
       {!sessionMatch ? (
         <>
           <div className="flex w-fit rounded-lg border border-border p-1">
