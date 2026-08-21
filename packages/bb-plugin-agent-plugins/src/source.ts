@@ -98,6 +98,12 @@ export function parseSource(input: string, tagPrefix?: string): ParsedSource {
 
 export interface FetchResult { stagingPath: string; resolved: string; contentHash: string; }
 
+export interface SourceProbe {
+  resolved: string;
+  contentHash: string | null;
+  version: string | null;
+}
+
 function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; maxBytes?: number; env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const maxBytes = opts.maxBytes ?? 5 * 1024 * 1024;
   const timeoutMs = opts.timeoutMs ?? 120_000;
@@ -159,6 +165,78 @@ async function resolveReleaseTag(url: string, prefix: string, env: NodeJS.Proces
     .sort(compareReleaseTags);
   if (tags.length === 0) throw new Error(`no release tag matching ${prefix}vX.Y.Z found for ${url}`);
   return tags[0].tag;
+}
+
+async function readManifestVersion(root: string): Promise<string | null> {
+  try {
+    const raw = JSON.parse(await fsp.readFile(path.join(root, "plugin.json"), "utf8")) as { version?: unknown };
+    return typeof raw.version === "string" ? raw.version : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveGitCommit(parsed: ParsedSource, env: NodeJS.ProcessEnv): Promise<{ commit: string; ref: string | null }> {
+  const url = parsed.gitUrl!;
+  const ref = parsed.gitRef ?? (parsed.tagPrefix !== null && parsed.tagPrefix !== undefined
+    ? await resolveReleaseTag(url, parsed.tagPrefix, env)
+    : null);
+  const args = ref
+    ? ["ls-remote", "--refs", url, ref]
+    : ["ls-remote", url, "HEAD"];
+  const result = await run("git", args, { env, timeoutMs: 30_000, maxBytes: 5 * 1024 * 1024 });
+  if (result.exitCode !== 0) throw new Error(`git update check failed: ${result.stderr || result.stdout}`.slice(0, 600));
+  const line = result.stdout.split("\n").find((candidate) => /^[0-9a-f]{40}\s/.test(candidate));
+  const commit = line?.split(/\s+/)[0];
+  if (!commit) throw new Error(`git update check did not resolve a commit for ${url}${ref ? `@${ref}` : ""}`);
+  return { commit, ref };
+}
+
+/**
+ * Check a tracked source without copying it into the installed plugin tree.
+ * This is intentionally metadata-only for git/npm so opening the settings
+ * page never builds, starts, or reloads a user plugin.
+ */
+export async function probeSource(parsed: ParsedSource): Promise<SourceProbe> {
+  if (parsed.type === "path") {
+    const sourcePath = path.resolve(parsed.localPath!);
+    const stat = await fsp.stat(sourcePath).catch((error) => {
+      throw new Error(`path not found: ${sourcePath}: ${(error as Error).message}`);
+    });
+    if (!stat.isDirectory()) throw new Error(`path must be directory: ${sourcePath}`);
+    const contentHash = await hashDirectory(sourcePath);
+    return {
+      resolved: `path:${sourcePath}#${contentHash}`,
+      contentHash,
+      version: await readManifestVersion(sourcePath),
+    };
+  }
+
+  if (parsed.type === "git") {
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" };
+    const { commit } = await resolveGitCommit(parsed, env);
+    return { resolved: `git:${parsed.gitUrl}@${commit}`, contentHash: null, version: null };
+  }
+
+  const pkg = parsed.npmPackage!;
+  const spec = parsed.npmSpec;
+  const specStr = spec ? `${pkg}@${spec}` : pkg;
+  const result = await run("npm", ["view", specStr, "version", "--json", "--ignore-scripts"], {
+    timeoutMs: 30_000,
+    maxBytes: 64 * 1024,
+  });
+  if (result.exitCode !== 0) throw new Error(`npm update check failed for ${specStr}: ${result.stderr || result.stdout}`.slice(0, 600));
+  let version: string | null = null;
+  try {
+    const parsedVersion = JSON.parse(result.stdout) as unknown;
+    if (typeof parsedVersion === "string") version = parsedVersion;
+    else if (Array.isArray(parsedVersion) && typeof parsedVersion.at(-1) === "string") version = parsedVersion.at(-1) as string;
+  } catch {
+    const trimmed = result.stdout.trim();
+    if (trimmed) version = trimmed.replace(/^['"]|['"]$/g, "");
+  }
+  if (!version) throw new Error(`npm update check did not return a version for ${specStr}`);
+  return { resolved: `npm:${pkg}@${version}`, contentHash: null, version };
 }
 
 export async function fetchSource(parsed: ParsedSource, stagingBase: string): Promise<FetchResult> {

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { fetchSource, type ParsedSource } from "./source.js";
+import { fetchSource, probeSource, type ParsedSource } from "./source.js";
 import { rimraf } from "./safe-fs.js";
 
 const execFileAsync = promisify(execFile);
@@ -67,3 +67,61 @@ describe("fetchSource", () => {
     expect((await fsp.readdir(staging)).filter((name) => name.startsWith("src-path-staging-")).length).toBe(0);
   });
 });
+
+describe("probeSource", () => {
+  it("detects a changed local plugin without staging it", async () => {
+    const source = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-plugins-probe-path-"));
+    tempDirs.push(source);
+    await fsp.writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "Example", version: "1.0.0" }));
+    const parsed = parseLocalSource(source);
+
+    const before = await probeSource(parsed);
+    expect(before.version).toBe("1.0.0");
+    await fsp.writeFile(path.join(source, "plugin.json"), JSON.stringify({ name: "Example", version: "1.1.0" }));
+    const after = await probeSource(parsed);
+
+    expect(after.resolved).not.toBe(before.resolved);
+    expect(after.contentHash).not.toBe(before.contentHash);
+    expect(after.version).toBe("1.1.0");
+  });
+
+  it("checks the current commit for a tracked Git source", async () => {
+    const repo = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-plugins-probe-git-"));
+    tempDirs.push(repo);
+    await git(repo, "init", "--quiet");
+    await fsp.writeFile(path.join(repo, "plugin.json"), "v1");
+    await git(repo, "add", "plugin.json");
+    await git(repo, "commit", "--quiet", "-m", "v1");
+    const before = await probeSource({
+      type: "git",
+      intent: `git:${repo}`,
+      normalized: `git:${repo}`,
+      gitUrl: repo,
+      gitRef: null,
+      tagPrefix: null,
+    });
+
+    await fsp.writeFile(path.join(repo, "plugin.json"), "v2");
+    await git(repo, "commit", "--quiet", "-am", "v2");
+    const after = await probeSource({
+      type: "git",
+      intent: `git:${repo}`,
+      normalized: `git:${repo}`,
+      gitUrl: repo,
+      gitRef: null,
+      tagPrefix: null,
+    });
+
+    expect(after.resolved).not.toBe(before.resolved);
+    expect(after.resolved).toMatch(/^git:.*@[0-9a-f]{40}$/);
+  });
+});
+
+function parseLocalSource(source: string): ParsedSource {
+  return {
+    type: "path",
+    intent: `path:${source}`,
+    normalized: `path:${source}`,
+    localPath: source,
+  };
+}

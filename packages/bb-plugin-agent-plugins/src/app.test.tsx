@@ -14,6 +14,7 @@ describe("Agent Plugins settings", () => {
     const slot = renderSlot(panel, { subPath: "" }, {
       rpc: {
         snapshot: () => ({ plugins: [], skills: [], mcpServers: [], dataDir: "/tmp/bb" }),
+        checkUpdates: () => ({ updates: [] }),
       } as never,
     });
 
@@ -60,6 +61,7 @@ describe("Agent Plugins settings", () => {
     const slot = renderSlot(panel, { subPath: "" }, {
       rpc: {
         snapshot: () => snapshot,
+        checkUpdates: () => ({ updates: [] }),
         setSkillEnabled: ({ id, skillName, enabled }: { id: string; skillName: string; enabled: boolean }) => {
           calls.push({ method: "setSkillEnabled", input: { id, skillName, enabled } });
           snapshot = {
@@ -100,6 +102,46 @@ describe("Agent Plugins settings", () => {
     await slot.findByRole("switch", { name: "Enable MCP server docs" });
   });
 
+  it("checks tracked sources and exposes a per-plugin update action", async () => {
+    const snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "Example Plugin", version: "1.0.0", specVersion: "1.0.0",
+        sourceType: "git", sourceIntent: "git:https://example.com/plugin.git", sourceResolved: "git:https://example.com/plugin.git@old",
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [],
+      dataDir: "/tmp/bb",
+    };
+    const calls: Array<{ method: string; input: unknown }> = [];
+    let available = true;
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => snapshot,
+        checkUpdates: (input: unknown) => {
+          calls.push({ method: "checkUpdates", input });
+          return {
+            updates: [{
+              id: "plugin-1", currentVersion: "1.0.0", latestVersion: "1.1.0", available,
+              checkedAt: Date.now(), error: null,
+            }],
+          };
+        },
+        update: (input: unknown) => {
+          calls.push({ method: "update", input });
+          available = false;
+          return { id: "plugin-1", name: "Example Plugin", version: "1.1.0" };
+        },
+      } as never,
+    });
+
+    const updateButton = await slot.findByRole("button", { name: "Update Example Plugin to version 1.1.0" });
+    expect(slot.getByText("Update available · v1.1.0")).toBeTruthy();
+    fireEvent.click(updateButton);
+    await waitFor(() => expect(calls).toContainEqual({ method: "update", input: { id: "plugin-1" } }));
+    await waitFor(() => expect(calls).toContainEqual({ method: "checkUpdates", input: { id: "plugin-1" } }));
+  });
+
   it("ignores an older snapshot response after a newer realtime refresh", async () => {
     const enabledSnapshot = {
       plugins: [{
@@ -123,6 +165,7 @@ describe("Agent Plugins settings", () => {
           snapshotCalls += 1;
           return new Promise<typeof enabledSnapshot>((resolve) => pending.push(resolve));
         },
+        checkUpdates: () => ({ updates: [] }),
       } as never,
     });
 
@@ -166,6 +209,7 @@ describe("Agent Plugins settings", () => {
     const slot = renderSlot(panel, { subPath: "" }, {
       rpc: {
         snapshot: () => snapshot,
+        checkUpdates: () => ({ updates: [] }),
         authenticate: (input: unknown) => {
           calls.push(input);
           return { url: "https://example.com/authorize?state=test", status: "authorizing" };
@@ -178,6 +222,35 @@ describe("Agent Plugins settings", () => {
     await waitFor(() => expect(calls).toEqual([{ id: "plugin-1", serverId: "fastmail" }]));
     expect(opened).toHaveBeenNthCalledWith(1, "about:blank", "_blank");
     expect(authWindow.location.href).toBe("https://example.com/authorize?state=test");
+  });
+
+  it("offers reconnect instead of authenticate after an update leaves an authenticated server idle", async () => {
+    const snapshot = {
+      plugins: [{
+        id: "plugin-1", name: "OAuth Plugin", version: "1.1.0", specVersion: "1.0.0",
+        sourceType: "path", sourceIntent: "path:/tmp/oauth-plugin", sourceResolved: null,
+        status: "active", approval: "approved", lastError: null,
+      }],
+      skills: [],
+      mcpServers: [{
+        pluginId: "plugin-1", serverId: "fastmail", type: "streamable-http", status: "idle",
+        authStatus: "authenticated", lastError: null, approved: 1, enabled: true,
+        configJson: JSON.stringify({ type: "streamable-http", url: "https://example.com/mcp" }),
+      }],
+      dataDir: "/tmp/bb",
+    };
+    const calls: unknown[] = [];
+    const slot = renderSlot(panel, { subPath: "" }, {
+      rpc: {
+        snapshot: () => snapshot,
+        checkUpdates: () => ({ updates: [] }),
+        reconnect: (input: unknown) => { calls.push(input); return { status: "ready", lastError: null }; },
+      } as never,
+    });
+
+    fireEvent.click(await slot.findByRole("button", { name: /OAuth Plugin/ }));
+    fireEvent.click(await slot.findByRole("button", { name: "Reconnect fastmail" }));
+    await waitFor(() => expect(calls).toEqual([{ id: "plugin-1", serverId: "fastmail" }]));
   });
 
   it("shows a toast when an OAuth action fails", async () => {
@@ -205,6 +278,7 @@ describe("Agent Plugins settings", () => {
     const slot = renderSlot(panel, { subPath: "" }, {
       rpc: {
         snapshot: () => snapshot,
+        checkUpdates: () => ({ updates: [] }),
         authenticate: () => { throw new Error("OAuth token exchange timed out"); },
       } as never,
     });
@@ -234,7 +308,7 @@ describe("Agent Plugins settings", () => {
       dataDir: "/tmp/bb",
     };
     const slot = renderSlot(panel, { subPath: "" }, {
-      rpc: { snapshot: () => snapshot } as never,
+      rpc: { snapshot: () => snapshot, checkUpdates: () => ({ updates: [] }) } as never,
     });
 
     await slot.findByRole("button", { name: /OAuth Plugin/ });
@@ -280,6 +354,7 @@ describe("Agent Plugins settings", () => {
     const slot = renderSlot(panel, { subPath: "" }, {
       rpc: {
         snapshot: () => snapshot,
+        checkUpdates: () => ({ updates: [] }),
         reconnect: (input: unknown) => {
           calls.push({ method: "reconnect", input });
           return { url: null, status: "authenticated" };

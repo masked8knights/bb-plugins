@@ -130,6 +130,13 @@ export class AgentPluginsStore {
       .get(pluginId, skillName) as PluginSkillRecord | undefined;
   }
 
+  deleteSkill(pluginId: string, skillName: string): boolean {
+    const result = this.db
+      .prepare(`DELETE FROM plugin_skills WHERE pluginId = ? AND skillName = ?`)
+      .run(pluginId, skillName);
+    return result.changes > 0;
+  }
+
   listMcpServers(pluginId?: string): McpServerRecord[] {
     if (pluginId) {
       return this.db.prepare(`SELECT * FROM mcp_servers WHERE pluginId = ?`).all(pluginId) as McpServerRecord[];
@@ -156,6 +163,13 @@ export class AgentPluginsStore {
     return this.db
       .prepare(`SELECT * FROM mcp_servers WHERE pluginId = ? AND serverId = ?`)
       .get(pluginId, serverId) as McpServerRecord | undefined;
+  }
+
+  deleteMcpServer(pluginId: string, serverId: string): boolean {
+    const result = this.db
+      .prepare(`DELETE FROM mcp_servers WHERE pluginId = ? AND serverId = ?`)
+      .run(pluginId, serverId);
+    return result.changes > 0;
   }
 
   snapshot() {

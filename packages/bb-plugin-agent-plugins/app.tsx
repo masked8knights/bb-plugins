@@ -22,7 +22,17 @@ type Snapshot = {
   }[];
   skills: { pluginId: string; skillName: string; status: string; lastError: string | null; enabled: boolean }[];
   mcpServers: { pluginId: string; serverId: string; type: string; status: string; authStatus?: string; lastError: string | null; approved: number; enabled: boolean; configJson: string }[];
+  updates?: PluginUpdate[];
   dataDir: string | null;
+};
+
+type PluginUpdate = {
+  id: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  available: boolean;
+  checkedAt: number;
+  error: string | null;
 };
 
 function errorText(error: unknown): string {
@@ -239,6 +249,7 @@ function InstallBar({ onDone }: { onDone: () => void }) {
 
 function PluginRow({
   plugin,
+  update,
   skills,
   servers,
   onRemove,
@@ -249,9 +260,11 @@ function PluginRow({
   onDisconnect,
   onSkillEnabledChange,
   onMcpEnabledChange,
+  onUpdate,
   pendingAction,
 }: {
   plugin: Snapshot["plugins"][number];
+  update?: PluginUpdate;
   skills: Snapshot["skills"];
   servers: Snapshot["mcpServers"];
   onRemove: (id: string) => void;
@@ -262,9 +275,11 @@ function PluginRow({
   onDisconnect: (p: string, s: string) => void;
   onSkillEnabledChange: (pluginId: string, skillName: string, enabled: boolean) => void;
   onMcpEnabledChange: (pluginId: string, serverId: string, enabled: boolean) => void;
+  onUpdate: (pluginId: string) => void;
   pendingAction: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  const updateKey = `update:${plugin.id}`;
   const hasIssues = skills.some((s) => s.enabled && (s.status === "error" || s.status === "conflicted")) || servers.some((s) => s.enabled && (s.status === "error" || s.status === "needs-auth"));
   const issueMessage = skills.find((s) => s.enabled && s.lastError)?.lastError ?? servers.find((s) => s.enabled && s.lastError)?.lastError ?? "One or more capabilities need attention.";
   const enabledSkillCount = skills.filter((s) => s.enabled).length;
@@ -272,34 +287,59 @@ function PluginRow({
 
   return (
     <div className="group">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/30 focus-visible:outline-none focus-visible:bg-muted/30"
-        aria-expanded={open}
-      >
-        <Dot status={plugin.status} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-2">
-            <span className="truncate text-sm font-medium leading-none">{plugin.name}</span>
-            {plugin.version && <span className="text-xs text-muted-foreground">v{plugin.version}</span>}
-            <span className="text-xs text-muted-foreground">· {plugin.sourceType}</span>
-            <span className={`text-xs ${plugin.status === "active" ? "text-muted-foreground" : plugin.status === "needs-approval" ? "text-warning" : "text-destructive"}`}>
-              {plugin.status}
-            </span>
+      <div className="flex w-full items-center gap-3 px-4 py-3 hover:bg-muted/30">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          aria-expanded={open}
+        >
+          <Dot status={plugin.status} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="truncate text-sm font-medium leading-none">{plugin.name}</span>
+              {plugin.version && <span className="text-xs text-muted-foreground">v{plugin.version}</span>}
+              <span className="text-xs text-muted-foreground">· {plugin.sourceType}</span>
+              <span className={`text-xs ${plugin.status === "active" ? "text-muted-foreground" : plugin.status === "needs-approval" ? "text-warning" : "text-destructive"}`}>
+                {plugin.status}
+              </span>
+              {update?.available && (
+                <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                  Update available{update.latestVersion ? ` · v${update.latestVersion}` : ""}
+                </span>
+              )}
+              {update?.error && (
+                <span className="text-[10px] text-warning" title={update.error}>
+                  Update check failed
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[11px] leading-none text-muted-foreground">{plugin.sourceIntent}</div>
           </div>
-          <div className="mt-0.5 truncate font-mono text-[11px] leading-none text-muted-foreground">{plugin.sourceIntent}</div>
-        </div>
 
-        <div className="hidden shrink-0 items-center gap-3 sm:flex">
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {skills.length} skill{skills.length === 1 ? "" : "s"}
-            {servers.length ? ` · ${servers.length} MCP` : ""}
-          </span>
-          <span className="text-xs text-muted-foreground">{open ? "▴" : "▾"}</span>
-        </div>
+          <div className="hidden shrink-0 items-center gap-3 sm:flex">
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {skills.length} skill{skills.length === 1 ? "" : "s"}
+              {servers.length ? ` · ${servers.length} MCP` : ""}
+            </span>
+            <span className="text-xs text-muted-foreground">{open ? "▴" : "▾"}</span>
+          </div>
 
-        <span className="shrink-0 text-xs text-muted-foreground sm:hidden">{open ? "▴" : "▾"}</span>
-      </button>
+          <span className="shrink-0 text-xs text-muted-foreground sm:hidden">{open ? "▴" : "▾"}</span>
+        </button>
+
+        {update?.available && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 px-2 text-xs"
+            disabled={pendingAction === updateKey}
+            onClick={() => onUpdate(plugin.id)}
+            aria-label={`Update ${plugin.name}${update.latestVersion ? ` to version ${update.latestVersion}` : ""}`}
+          >
+            {pendingAction === updateKey ? "Updating…" : "Update"}
+          </Button>
+        )}
+      </div>
 
       {open && (
         <div className="border-t border-border bg-muted/[0.03] px-4 py-3">
@@ -401,12 +441,12 @@ function PluginRow({
                               )}
                             </div>
                             {srv.lastError && <p className="mt-1.5 text-[11px] leading-snug text-destructive" role="alert">{srv.lastError}</p>}
-                            {canManageAuth && srv.enabled && srv.status !== "ready" && (
+                            {canManageAuth && srv.enabled && srv.status !== "ready" && authStatus !== "authenticated" && (
                               <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" disabled={isAuthBusy} onClick={() => onAuthenticate(plugin.id, srv.serverId)}>
                                 {authStatus === "authorizing" ? "Continue authentication" : "Authenticate"} {srv.serverId}
                               </Button>
                             )}
-                            {canManageAuth && srv.enabled && (srv.status === "ready" || srv.status === "error") && (
+                            {canManageAuth && srv.enabled && (srv.status === "ready" || srv.status === "error" || (srv.status === "idle" && authStatus === "authenticated")) && (
                               <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" disabled={isAuthBusy} onClick={() => onReconnect(plugin.id, srv.serverId)}>
                                 Reconnect {srv.serverId}
                               </Button>
@@ -473,10 +513,51 @@ function AgentPluginsView() {
   const rpc = useRpc<typeof rpcContract>();
   const [localErr, setLocalErr] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [updates, setUpdates] = useState<Record<string, PluginUpdate>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const checkedUpdatesRef = useRef(false);
   const previousPluginsRef = useRef<Map<string, { status: string; lastError: string | null }> | null>(null);
   const previousSkillsRef = useRef<Map<string, { status: string; lastError: string | null }> | null>(null);
   const previousServersRef = useRef<Map<string, { status: string; authStatus?: string; lastError: string | null }> | null>(null);
   const previousLoadErrorRef = useRef<string | null>(null);
+
+  const checkUpdates = useCallback(async (id?: string, refresh = false) => {
+    setCheckingUpdates(true);
+    try {
+      const result = await rpc.call("checkUpdates", {
+        ...(id ? { id } : {}),
+        ...(refresh ? { refresh: true } : {}),
+      });
+      setUpdates((current) => {
+        const next = { ...current };
+        for (const update of result.updates as unknown as PluginUpdate[]) next[update.id] = update;
+        return next;
+      });
+    } catch (e) {
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, "agent-plugins:updates:error");
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, [rpc]);
+
+  useEffect(() => {
+    if (!snap || checkedUpdatesRef.current) return;
+    checkedUpdatesRef.current = true;
+    void checkUpdates();
+  }, [snap, checkUpdates]);
+
+  useEffect(() => {
+    if (!snap) return;
+    const installedIds = new Set(snap.plugins.map((plugin) => plugin.id));
+    setUpdates((current) => {
+      const next = snap.updates
+        ? Object.fromEntries(snap.updates.map((update) => [update.id, update]))
+        : Object.fromEntries(Object.entries(current).filter(([id]) => installedIds.has(id)));
+      return Object.fromEntries(Object.entries(next).filter(([id]) => installedIds.has(id)));
+    });
+  }, [snap]);
 
   useEffect(() => {
     if (err && err !== previousLoadErrorRef.current) {
@@ -563,6 +644,33 @@ function AgentPluginsView() {
     } finally {
       setPendingAction(null);
       await load();
+    }
+  };
+
+  const refresh = async () => {
+    await load();
+    await checkUpdates(undefined, true);
+  };
+
+  const updatePlugin = async (id: string) => {
+    const plugin = snap?.plugins.find((candidate) => candidate.id === id);
+    const key = `update:${id}`;
+    setPendingAction(key);
+    setLocalErr(null);
+    try {
+      const result = await rpc.call("update", { id });
+      toast.success(`${plugin?.name ?? result.name ?? "Plugin"} updated`, {
+        description: result.version ? `Now running v${result.version}.` : "The latest tracked source is installed.",
+        duration: 5000,
+      });
+      await load();
+      await checkUpdates(id);
+    } catch (e) {
+      const message = errorText(e);
+      setLocalErr(message);
+      notifyError(message, `agent-plugins:update:${id}:error`);
+    } finally {
+      setPendingAction(null);
     }
   };
 
@@ -655,7 +763,7 @@ function AgentPluginsView() {
         </div>
 
         <div className="rounded-lg border border-border bg-card p-4">
-          <InstallBar onDone={() => void load()} />
+          <InstallBar onDone={() => void refresh()} />
           {(err || localErr) && (
             <p className="mt-3 text-xs leading-snug text-destructive" role="alert">
               {localErr ?? err}
@@ -666,9 +774,23 @@ function AgentPluginsView() {
         <div className="rounded-lg border border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <h2 className="text-sm font-medium">Installed</h2>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {snap ? `${snap.plugins.length} plugin${snap.plugins.length === 1 ? "" : "s"}` : "…"}
-            </span>
+            <div className="flex items-center gap-2">
+              {snap && Object.values(updates).some((update) => update.available) && (
+                <span className="text-xs text-primary">Update available</span>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => void checkUpdates(undefined, true)}
+                disabled={checkingUpdates || !snap}
+              >
+                {checkingUpdates ? "Checking…" : "Check for updates"}
+              </Button>
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {snap ? `${snap.plugins.length} plugin${snap.plugins.length === 1 ? "" : "s"}` : "…"}
+              </span>
+            </div>
           </div>
 
           {!snap ? (
@@ -686,6 +808,7 @@ function AgentPluginsView() {
                 <PluginRow
                   key={p.id}
                   plugin={p}
+                  update={updates[p.id]}
                   skills={snap.skills.filter((s) => s.pluginId === p.id)}
                   servers={snap.mcpServers.filter((s) => s.pluginId === p.id)}
                   onRemove={remove}
@@ -696,6 +819,7 @@ function AgentPluginsView() {
                   onDisconnect={disconnect}
                   onSkillEnabledChange={setSkillEnabled}
                   onMcpEnabledChange={setMcpEnabled}
+                  onUpdate={updatePlugin}
                   pendingAction={pendingAction}
                 />
               ))}
@@ -704,7 +828,7 @@ function AgentPluginsView() {
         </div>
 
         <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
-          BB spec-plugin bridge · Skills appear next session · Updates: reinstall the same location and we swap atomically.
+          BB spec-plugin bridge · Skills appear next session · Updates check the tracked path, Git ref, or npm package and keep your data.
         </p>
       </div>
     </main>

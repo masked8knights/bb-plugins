@@ -7,19 +7,31 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { AgentPluginsStore } from "./src/store.js";
 import { validateManifest, validateMcpEnvelope, validateMcpServer, validateSkillFrontmatter } from "./src/loader.js";
-import { McpGateway } from "./src/gateway.js";
+import { McpGateway, type McpStdioCatalog, type McpStdioHost } from "./src/gateway.js";
+import { mcpHostContract, mcpHostSignals } from "./src/host-contract.js";
 import { DeferredOAuthCredentialStore, McpOAuthProvider, type OAuthCredentialRecord } from "./src/oauth.js";
-import { parseSource, fetchSource } from "./src/source.js";
+import { parseSource, fetchSource, probeSource } from "./src/source.js";
 import { materializeSkill, unmaterializeSkill } from "./src/skills-impl.js";
 import { ensureDir, hashDirectory, rimraf, atomicRename, LIMITS } from "./src/safe-fs.js";
-import type { CatalogPrompt, CatalogResource, CatalogResourceTemplate, CatalogTool } from "./src/types.js";
+import type { CatalogPrompt, CatalogResource, CatalogResourceTemplate, CatalogTool, McpServerRecord, PluginRecord, PluginSkillRecord } from "./src/types.js";
 
 const jsonRecordSchema = z.record(z.string(), z.unknown());
+
+const updateResultSchema = z.object({
+  id: z.string(),
+  currentVersion: z.string().nullable(),
+  latestVersion: z.string().nullable(),
+  available: z.boolean(),
+  checkedAt: z.number().int(),
+  error: z.string().nullable(),
+}).strict();
+type UpdateResult = z.infer<typeof updateResultSchema>;
 
 const snapshotSchema = z.object({
   plugins: z.array(z.record(z.string(), z.unknown())),
   skills: z.array(z.record(z.string(), z.unknown())),
   mcpServers: z.array(z.record(z.string(), z.unknown())),
+  updates: z.array(updateResultSchema),
   dataDir: z.string().nullable(),
 }).strict();
 
@@ -60,7 +72,6 @@ const resourceTemplateSchema = z.object({
 }).strict();
 
 const authActionOutput = z.object({ url: z.string().nullable(), status: z.string() }).strict();
-
 export const rpcContract = defineRpcContract({
   snapshot: { input: z.null(), output: snapshotSchema },
   listTools: { input: z.null(), output: z.object({ tools: z.array(toolSchema) }).strict() },
@@ -74,7 +85,9 @@ export const rpcContract = defineRpcContract({
   subscribeResource: { input: z.object({ opaqueId: z.string().min(1) }).strict(), output: z.object({ subscribed: z.boolean() }).strict() },
   unsubscribeResource: { input: z.object({ opaqueId: z.string().min(1) }).strict(), output: z.object({ unsubscribed: z.boolean() }).strict() },
   setLoggingLevel: { input: z.object({ level: z.string().min(1) }).strict(), output: z.object({ updated: z.boolean() }).strict() },
-  install: { input: z.object({ source: z.string().min(1), tagPrefix: z.string().optional() }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
+  install: { input: z.object({ source: z.string().min(1), tagPrefix: z.string().optional() }).strict(), output: z.object({ id: z.string(), name: z.string().nullable(), version: z.string().nullable() }).strict() },
+  checkUpdates: { input: z.object({ id: z.string().min(1).optional(), refresh: z.boolean().optional() }).strict(), output: z.object({ updates: z.array(updateResultSchema) }).strict() },
+  update: { input: z.object({ id: z.string().min(1) }).strict(), output: z.object({ id: z.string(), name: z.string().nullable(), version: z.string().nullable() }).strict() },
   remove: { input: z.object({ id: z.string().min(1), purgeData: z.boolean().optional() }).strict(), output: z.object({ deleted: z.boolean() }).strict() },
   refresh: { input: z.object({ id: z.string().min(1) }).strict(), output: z.object({ id: z.string(), name: z.string().nullable() }).strict() },
   approve: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ approved: z.boolean() }).strict() },
@@ -85,6 +98,7 @@ export const rpcContract = defineRpcContract({
   reauthorize: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: authActionOutput },
   authStatus: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ status: z.string() }).strict() },
   finishAuthentication: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1), callbackUrl: z.string().url() }).strict(), output: z.object({ authenticated: z.boolean() }).strict() },
+  cancelAuthentication: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ canceled: z.boolean() }).strict() },
   clearAuthentication: { input: z.object({ id: z.string().min(1), serverId: z.string().min(1) }).strict(), output: z.object({ cleared: z.boolean() }).strict() },
   pickFolder: { input: z.null(), output: z.object({ path: z.string().nullable() }).strict() },
 });
@@ -92,6 +106,20 @@ export const rpcContract = defineRpcContract({
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e); }
 
 function randomId(): string { return crypto.randomUUID(); }
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function sameMcpConfig(previous: McpServerRecord, nextType: string, nextRaw: unknown): boolean {
+  if (previous.type !== nextType) return false;
+  try { return canonicalJson(JSON.parse(previous.configJson)) === canonicalJson(nextRaw); }
+  catch { return false; }
+}
 
 async function readJsonLimited(filePath: string): Promise<unknown> {
   const stat = await fsp.stat(filePath);
@@ -173,8 +201,59 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Could not delete OAuth credentials for ${pluginId}:${serverId}: ${errorText(e)}`, { cause: e });
     }
   }
+  const mcpHostClient = bb.hosts.experimental_client({
+    contract: mcpHostContract,
+    experimental_signals: mcpHostSignals,
+  });
+  let mcpHostIdPromise: Promise<string> | null = null;
+  async function getMcpHostId(): Promise<string> {
+    if (mcpHostIdPromise) return mcpHostIdPromise;
+    mcpHostIdPromise = (async () => {
+      const cfg = await bb.sdk.system.config() as unknown as { primaryHostId?: string | null };
+      if (cfg.primaryHostId) return cfg.primaryHostId;
+      const hosts = await bb.sdk.hosts.list();
+      const hostId = hosts[0]?.id;
+      if (!hostId) throw new Error("No host available for isolated MCP servers");
+      return hostId;
+    })().catch((error) => {
+      mcpHostIdPromise = null;
+      throw error;
+    });
+    return mcpHostIdPromise;
+  }
+  const hostCall = async (method: string, input: unknown, signal?: AbortSignal): Promise<unknown> => {
+    const hostId = await getMcpHostId();
+    const client = mcpHostClient as unknown as {
+      call(name: string, value: unknown, options: { hostId: string; signal?: AbortSignal }): Promise<unknown>;
+    };
+    return client.call(method, input, { hostId, ...(signal ? { signal } : {}) });
+  };
+  const stdioHost: McpStdioHost = {
+    async start(config, signal) { return await hostCall("start", config, signal) as McpStdioCatalog; },
+    async refresh(key, signal) { return await hostCall("refresh", { key }, signal) as McpStdioCatalog; },
+    async close(key, signal) { await hostCall("close", { key }, signal); },
+    async callTool(key, name, args, toolDefinition, signal) {
+      return hostCall("callTool", { key, name, args, ...(toolDefinition ? { toolDefinition } : {}) }, signal);
+    },
+    async getPrompt(key, name, args, signal) { return hostCall("getPrompt", { key, name, args }, signal); },
+    async readResource(key, uri, signal) { return hostCall("readResource", { key, uri }, signal); },
+    async complete(key, ref, argument, signal) { return hostCall("complete", { key, ref, argument }, signal); },
+    async subscribeResource(key, uri, signal) { await hostCall("subscribeResource", { key, uri }, signal); },
+    async unsubscribeResource(key, uri, signal) { await hostCall("unsubscribeResource", { key, uri }, signal); },
+    async setLoggingLevel(key, level, signal) { await hostCall("setLoggingLevel", { key, level }, signal); },
+    onWorkerExit(handler) {
+      return mcpHostClient.experimental_onWorkerExit(({ hostId }) => handler(hostId));
+    },
+    onCatalogChanged(handler) {
+      return mcpHostClient.experimental_onSignal("catalogChanged", ({ payload }) => handler(payload.key, payload.kind, payload.error));
+    },
+    onConnectionChanged(handler) {
+      return mcpHostClient.experimental_onSignal("connectionChanged", ({ payload }) => handler(payload.key, payload.status, payload.error));
+    },
+  };
   const gateway = new McpGateway(store, bb.log, {
     onChanged: () => publishChanged({ kind: "mcp-runtime" }),
+    stdioHost,
     oauth: {
       async getProvider(pluginId, serverId, serverUrl) {
         const redirect = new URL(`/api/v1/plugins/${encodeURIComponent(bb.pluginId)}/http/oauth/callback`, bb.server.loopbackBaseUrl);
@@ -184,6 +263,103 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   const installLocks = new Set<string>();
+  const updateCache = new Map<string, UpdateResult>();
+  const updateGenerations = new Map<string, number>();
+  const updateQueue: string[] = [];
+  const queuedUpdateIds = new Set<string>();
+  const updateTasks = new Map<string, {
+    promise: Promise<UpdateResult>;
+    resolve: (result: UpdateResult) => void;
+    reject: (error: unknown) => void;
+  }>();
+  const UPDATE_CHECK_INTERVAL_MS = 15 * 60_000;
+  const UPDATE_CHECK_GAP_MS = 1_000;
+  const UPDATE_CHECK_TTL_MS = 15 * 60_000;
+  let wakeUpdateWorker: (() => void) | null = null;
+  let updateWorkerActive = false;
+  let manualUpdateDrain: Promise<void> | null = null;
+
+  function wakeUpdateWorkerIfIdle(): void {
+    wakeUpdateWorker?.();
+    wakeUpdateWorker = null;
+  }
+
+  function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, ms);
+      const onAbort = () => done();
+      function done() {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  function waitForUpdateWork(signal: AbortSignal, timeoutMs: number): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, timeoutMs);
+      const onAbort = () => done();
+      const previousWake = wakeUpdateWorker;
+      function done() {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        if (wakeUpdateWorker === done) wakeUpdateWorker = previousWake;
+        resolve();
+      }
+      wakeUpdateWorker = done;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  function enqueueUpdateCheck(pluginId: string): Promise<UpdateResult> {
+    const existing = updateTasks.get(pluginId);
+    if (existing) return existing.promise;
+    let resolveTask!: (result: UpdateResult) => void;
+    let rejectTask!: (error: unknown) => void;
+    const promise = new Promise<UpdateResult>((resolve, reject) => {
+      resolveTask = resolve;
+      rejectTask = reject;
+    });
+    // Background refreshes normally have no RPC waiter. Keep a rejection
+    // from plugin shutdown from becoming an unhandled promise rejection while
+    // still returning the same promise to explicit callers.
+    void promise.catch(() => {});
+    updateTasks.set(pluginId, { promise, resolve: resolveTask, reject: rejectTask });
+    if (!queuedUpdateIds.has(pluginId)) {
+      queuedUpdateIds.add(pluginId);
+      updateQueue.push(pluginId);
+      wakeUpdateWorkerIfIdle();
+    }
+    return promise;
+  }
+
+  function duePluginIds(): string[] {
+    const now = Date.now();
+    return store.listPlugins()
+      .filter((plugin) => {
+        const cached = updateCache.get(plugin.id);
+        return !cached || now - cached.checkedAt >= UPDATE_CHECK_TTL_MS;
+      })
+      .map((plugin) => plugin.id);
+  }
+
+  function invalidateUpdateCheck(pluginId: string): void {
+    updateGenerations.set(pluginId, (updateGenerations.get(pluginId) ?? 0) + 1);
+    updateCache.delete(pluginId);
+    const task = updateTasks.get(pluginId);
+    if (task) {
+      task.reject(new Error(`update check invalidated for ${pluginId}`));
+      if (updateTasks.get(pluginId) === task) updateTasks.delete(pluginId);
+    }
+    queuedUpdateIds.delete(pluginId);
+    for (let index = updateQueue.length - 1; index >= 0; index -= 1) {
+      if (updateQueue[index] === pluginId) updateQueue.splice(index, 1);
+    }
+  }
 
   bb.http.route("GET", "/oauth/callback", async (context) => {
     const url = new URL(context.req.url);
@@ -363,7 +539,9 @@ export default async function plugin(bb: BbPluginApi) {
       }
       return { ...m, enabled: m.enabled === 1, authStatus, configJson: redactMcpConfigJson(m.configJson) };
     }));
-    return { plugins: s.plugins as unknown as Record<string, unknown>[], skills: skills as unknown as Record<string, unknown>[], mcpServers: redactedMcp as unknown as Record<string, unknown>[], dataDir: dd };
+    const installedIds = new Set(s.plugins.map((plugin) => plugin.id));
+    const updates = [...updateCache.values()].filter((update) => installedIds.has(update.id));
+    return { plugins: s.plugins as unknown as Record<string, unknown>[], skills: skills as unknown as Record<string, unknown>[], mcpServers: redactedMcp as unknown as Record<string, unknown>[], updates, dataDir: dd };
   };
 
   // Static bridge
@@ -427,10 +605,10 @@ export default async function plugin(bb: BbPluginApi) {
   // -------------------------------------------------------------------------
   // Core install logic — transactional staging → validation → atomic activation
   // -------------------------------------------------------------------------
-  async function doInstall(sourceInput: string, tagPrefix?: string): Promise<{ id: string; name: string | null }> {
+  async function doInstall(sourceInput: string, tagPrefix?: string, existing?: PluginRecord): Promise<{ id: string; name: string | null; version: string | null }> {
     const dd = await getDataDir();
     const parsed = parseSource(sourceInput, tagPrefix);
-    const lockKey = parsed.normalized;
+    const lockKey = existing ? `plugin:${existing.id}` : parsed.normalized;
     if (installLocks.has(lockKey)) throw new Error(`An install for ${lockKey} is already running — please wait for it to finish. If it seems stuck, run bb plugin reload agent-plugins to clear it.`);
     installLocks.add(lockKey);
     let fetchRes: { stagingPath: string; resolved: string; contentHash: string } | null = null;
@@ -440,6 +618,10 @@ export default async function plugin(bb: BbPluginApi) {
     let cleanupStaging = true;
     let stagingPath: string | null = null;
     const materializedSkillNames: string[] = [];
+    const previousSkills = existing ? store.listSkills(existing.id) : [];
+    const previousServers = existing ? store.listMcpServers(existing.id) : [];
+    const previousSkillByName = new Map(previousSkills.map((skill) => [skill.skillName, skill]));
+    const previousServerById = new Map(previousServers.map((server) => [server.serverId, server]));
     try {
       const stagingBase = path.join(dd, "plugins", "agent-plugins", "staging");
       await ensureDir(stagingBase);
@@ -453,19 +635,24 @@ export default async function plugin(bb: BbPluginApi) {
       if (mRes.fatal) throw new Error(`plugin.json invalid: ${mRes.errors.join("; ")}${mRes.warnings.length ? ` (warnings: ${mRes.warnings.join("; ")})` : ""}`);
       const name = mRes.name!;
       const specVersion = mRes.specVersion!;
-      // Check duplicate name
+      // Check duplicate name. Updates must keep the installed identity stable;
+      // a source that changes its manifest name is a new plugin, not an update.
       const existingByName = store.getPluginByName(name);
-      if (existingByName) throw new Error(`plugin already installed as ${existingByName.id} (name: ${name}); remove or update instead`);
+      if (existing && name !== existing.name) throw new Error(`plugin name changed from ${existing.name} to ${name}; install it as a new plugin instead`);
+      if (existingByName && (!existing || existingByName.id !== existing.id)) throw new Error(`plugin already installed as ${existingByName.id} (name: ${name}); remove or update instead`);
 
       // Content hash for generation
       const contentHash = await hashDirectory(stagingPath!);
 
-      // Determine persistent paths — stable installId
-      installId = randomId();
+      // Determine persistent paths. Updates keep the plugin id and data path,
+      // but activate a fresh generation so the old tree remains recoverable
+      // until the new database state is committed.
+      installId = existing?.id ?? randomId();
       const pluginsRootBase = path.join(dd, "plugins", "agent-plugins", "plugins");
       const dataBase = path.join(dd, "plugins", "agent-plugins", "data");
-      pluginRoot = path.join(pluginsRootBase, installId, `v1`);
-      const pluginData = path.join(dataBase, installId);
+      const nextGen = existing ? existing.activeGen + 1 : 1;
+      pluginRoot = path.join(pluginsRootBase, installId, `v${nextGen}`);
+      const pluginData = existing?.pluginData ?? path.join(dataBase, installId);
       pluginDataPath = pluginData;
       await ensureDir(path.dirname(pluginRoot));
       await ensureDir(pluginData);
@@ -541,10 +728,32 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`[agent-plugins] mcp disabled for ${name}: ${errorText(err)}`);
       }
 
+      const updatedMcpServers: McpServerRecord[] = mcpServers.map((srv) => {
+        const previous = previousServerById.get(srv.id);
+        const unchanged = previous !== undefined && srv.valid && sameMcpConfig(previous, srv.type ?? "stdio", srv.raw);
+        const enabled = previous?.enabled ?? 1;
+        const approved = unchanged ? previous!.approved : 0;
+        const status = !srv.valid
+          ? "error"
+          : enabled !== 1
+            ? "disabled"
+            : approved === 1
+              ? (unchanged && previous?.status === "needs-auth" ? "needs-auth" : "idle")
+              : "needs-approval";
+        return {
+          pluginId: installId!,
+          serverId: srv.id,
+          type: (srv.type as McpServerRecord["type"]) ?? "stdio",
+          configJson: JSON.stringify(srv.raw),
+          status,
+          lastError: srv.valid ? null : srv.errors.join("; "),
+          approved,
+          enabled,
+        };
+      });
+
       // Atomic promotion: move staging to pluginRoot
       await ensureDir(path.dirname(pluginRoot));
-      // If pluginRoot exists (shouldn't), remove
-      await rimraf(pluginRoot).catch(() => {});
       await atomicRename(stagingPath!, pluginRoot!);
       cleanupStaging = false; // now owned
 
@@ -556,20 +765,52 @@ export default async function plugin(bb: BbPluginApi) {
             skillResults.push({ name: s.dirName, status: "skipped", error: s.errors.join("; "), materializedPath: null });
             continue;
           }
+          const previous = previousSkillByName.get(s.dirName);
+          if (previous?.enabled === 0) {
+            skillResults.push({ name: s.dirName, status: "skipped", error: null, materializedPath: null });
+            continue;
+          }
           const res = await materializeSkill({ installId: installId!, pluginName: name, skillName: s.dirName, srcDir: path.join(pluginRoot!, "skills", s.dirName), dataDir: dd, specVersion });
           skillResults.push({ name: s.dirName, status: res.status, error: res.error, materializedPath: res.materializedPath });
           if (res.materializedPath) materializedSkillNames.push(s.dirName);
         }
       }
 
+      const discoveredSkillNames = skillsDisabled && existing
+        ? new Set(previousSkills.map((skill) => skill.skillName))
+        : new Set(discoveredSkills.map((skill) => skill.dirName));
+      const removedSkillConflicts: PluginSkillRecord[] = [];
+      for (const previous of previousSkills) {
+        if (discoveredSkillNames.has(previous.skillName)) continue;
+        if (previous.materializedPath) {
+          const removed = await unmaterializeSkill({ installId: installId!, skillName: previous.skillName, dataDir: dd });
+          if (!removed && await pathExists(previous.materializedPath)) {
+            removedSkillConflicts.push({
+              ...previous,
+              status: "conflicted",
+              lastError: `Skill /${previous.skillName} was removed by the updated plugin but local files were modified; it was left in place.`,
+            });
+          }
+        }
+      }
+
+      const updatedServerIds = new Set(updatedMcpServers.map((server) => server.serverId));
+      const removedServerIds = previousServers.filter((server) => !updatedServerIds.has(server.serverId)).map((server) => server.serverId);
+      const changedServerIds = updatedMcpServers
+        .filter((server) => {
+          const previous = previousServerById.get(server.serverId);
+          return previous !== undefined && !sameMcpConfig(previous, server.type, JSON.parse(server.configJson));
+        })
+        .map((server) => server.serverId);
+
       // DB commit — generations + plugins + skills + mcp
       const now = Date.now();
       const pluginVersion = (mRes.manifest as { version?: string } | null)?.version ?? null;
       const pluginDescription = mRes.description ?? null;
-      const hasValidMcp = mcpServers.some((s) => s.valid);
-      const pluginStatus: "active" | "needs-approval" = hasValidMcp ? "needs-approval" : "active";
-      const pluginApproval: "pending" | "approved" = hasValidMcp ? "pending" : "approved";
-      const pluginRecord = {
+      const hasPendingApproval = updatedMcpServers.some((server) => server.status === "needs-approval");
+      const pluginStatus: "active" | "needs-approval" = hasPendingApproval ? "needs-approval" : "active";
+      const pluginApproval: "pending" | "approved" = hasPendingApproval ? "pending" : "approved";
+      const pluginRecord: PluginRecord = {
         id: installId!,
         name,
         version: typeof pluginVersion === "string" ? pluginVersion : null,
@@ -582,19 +823,23 @@ export default async function plugin(bb: BbPluginApi) {
         tagPrefix: parsed.tagPrefix ?? null,
         pluginRoot: pluginRoot!,
         pluginData,
-        activeGen: 1,
+        activeGen: existing ? existing.activeGen + 1 : 1,
         status: pluginStatus,
         approval: pluginApproval,
         lastError: null,
         contentHash,
-        installedAt: now,
+        installedAt: existing?.installedAt ?? now,
         updatedAt: now,
       };
       store.transaction(() => {
-        store.upsertPlugin(pluginRecord as unknown as import("./src/types.js").PluginRecord);
-        store.db.prepare(`INSERT OR REPLACE INTO generations (pluginId, gen, pluginRoot, contentHash, createdAt) VALUES (?,?,?,?,?)`).run(installId!, 1, pluginRoot!, contentHash, now);
+        store.upsertPlugin(pluginRecord);
+        store.db.prepare(`INSERT OR REPLACE INTO generations (pluginId, gen, pluginRoot, contentHash, createdAt) VALUES (?,?,?,?,?)`).run(installId!, pluginRecord.activeGen, pluginRoot!, contentHash, now);
+        if (existing) {
+          store.db.prepare(`DELETE FROM generations WHERE pluginId = ? AND gen < ?`).run(installId!, pluginRecord.activeGen);
+        }
         for (const s of discoveredSkills) {
           const mr = skillResults.find(r => r.name === s.dirName);
+          const previous = previousSkillByName.get(s.dirName);
           store.upsertSkill({
             pluginId: installId!,
             skillName: s.dirName,
@@ -604,34 +849,57 @@ export default async function plugin(bb: BbPluginApi) {
             materializedPath: mr?.materializedPath ?? null,
             status: (mr?.status as unknown as "active" | "conflicted" | "skipped" | "error") ?? (s.valid ? "active" : "skipped"),
             lastError: mr?.error ?? (s.valid ? null : s.errors.join("; ")),
-            enabled: 1,
+            enabled: previous?.enabled ?? 1,
           });
         }
-        for (const srv of mcpServers) {
-          store.upsertMcpServer({
-            pluginId: installId!,
-            serverId: srv.id,
-            type: (srv.type as "stdio" | "streamable-http" | "sse") ?? "stdio",
-            configJson: JSON.stringify(srv.raw),
-            status: srv.valid ? "idle" : "error",
-            lastError: srv.valid ? null : srv.errors.join("; "),
-            approved: 0,
-            enabled: 1,
-          });
+        for (const server of updatedMcpServers) store.upsertMcpServer(server);
+        for (const previous of previousSkills) {
+          if (discoveredSkillNames.has(previous.skillName)) continue;
+          const conflict = removedSkillConflicts.find((skill) => skill.skillName === previous.skillName);
+          if (conflict) store.upsertSkill(conflict);
+          else store.deleteSkill(installId!, previous.skillName);
         }
+        for (const serverId of removedServerIds) store.deleteMcpServer(installId!, serverId);
       });
 
-      await publishChanged({ kind: "install", id: installId! });
-      return { id: installId!, name };
+      // Close old connections only after the new generation and DB state are
+      // committed. If an update fails during validation or promotion, the old
+      // generation remains fully usable. We deliberately do not reconnect
+      // here: updates must not synchronously trigger an OAuth flow or hang BB.
+      if (existing) {
+        for (const server of previousServers) {
+          await gateway.closeServer(existing.id, server.serverId).catch((error) => {
+            bb.log.warn(`[agent-plugins] close after update ${server.serverId}: ${errorText(error)}`);
+          });
+        }
+      }
+      if (existing?.pluginRoot && existing.pluginRoot !== pluginRoot) await rimraf(existing.pluginRoot).catch(() => {});
+      for (const serverId of [...removedServerIds, ...changedServerIds]) {
+        await gateway.resetServer(installId!, serverId).catch((error) => {
+          bb.log.warn(`[agent-plugins] reset updated server ${serverId}: ${errorText(error)}`);
+        });
+        await deleteOAuthCredentials(installId!, serverId).catch((error) => {
+          bb.log.warn(`[agent-plugins] OAuth credentials reset for updated server ${serverId}: ${errorText(error)}`);
+        });
+      }
+
+      invalidateUpdateCheck(installId!);
+      await publishChanged({ kind: existing ? "update" : "install", id: installId! });
+      return { id: installId!, name, version: typeof pluginVersion === "string" ? pluginVersion : null };
     } catch (e) {
       // Transactional cleanup: remove promoted pluginRoot and any materialized skills if DB failed
-      try { if (pluginRoot) { await rimraf(pluginRoot).catch(() => {}); await rimraf(path.dirname(pluginRoot)).catch(() => {}); } } catch {}
-      if (installId) {
+      try {
+        if (pluginRoot) {
+          await rimraf(pluginRoot).catch(() => {});
+          if (!existing) await rimraf(path.dirname(pluginRoot)).catch(() => {});
+        }
+      } catch {}
+      if (installId && !existing) {
         for (const skillName of materializedSkillNames) {
           await unmaterializeSkill({ installId, skillName, dataDir: dd }).catch(() => {});
         }
       }
-      if (pluginDataPath) await rimraf(pluginDataPath).catch(() => {});
+      if (pluginDataPath && !existing) await rimraf(pluginDataPath).catch(() => {});
       throw e;
     } finally {
       installLocks.delete(lockKey);
@@ -640,8 +908,116 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // RPC registrations
+  async function checkPluginUpdate(plugin: PluginRecord) {
+    const checkedAt = Date.now();
+    try {
+      const parsed = parseSource(plugin.sourceIntent, plugin.tagPrefix ?? undefined);
+      const probe = await probeSource(parsed);
+      return {
+        id: plugin.id,
+        currentVersion: plugin.version,
+        latestVersion: probe.version,
+        available: plugin.sourceResolved !== probe.resolved,
+        checkedAt,
+        error: null,
+      };
+    } catch (error) {
+      return {
+        id: plugin.id,
+        currentVersion: plugin.version,
+        latestVersion: null,
+        available: false,
+        checkedAt,
+        error: errorText(error),
+      };
+    }
+  }
+
+  async function processNextUpdate(signal: AbortSignal): Promise<void> {
+    const id = updateQueue.shift();
+    if (!id) return;
+    queuedUpdateIds.delete(id);
+    const task = updateTasks.get(id);
+    if (!task) return;
+    const generation = updateGenerations.get(id) ?? 0;
+    try {
+      if (signal.aborted) throw new Error("update checker stopped");
+      const plugin = store.getPlugin(id);
+      if (!plugin) throw new Error(`not found: ${id}`);
+      const result = await checkPluginUpdate(plugin);
+      if ((updateGenerations.get(id) ?? 0) !== generation || updateTasks.get(id) !== task) return;
+      updateCache.set(id, result);
+      task.resolve(result);
+      await publishChanged({ kind: "update-check", id });
+    } catch (error) {
+      task.reject(error);
+    } finally {
+      if (updateTasks.get(id) === task) updateTasks.delete(id);
+    }
+  }
+
+  async function runUpdateChecker(signal: AbortSignal): Promise<void> {
+    updateWorkerActive = true;
+    try {
+      for (const id of duePluginIds()) enqueueUpdateCheck(id);
+      while (!signal.aborted) {
+        if (updateQueue.length > 0) {
+          await processNextUpdate(signal);
+          await sleepWithSignal(UPDATE_CHECK_GAP_MS, signal);
+          continue;
+        }
+        await waitForUpdateWork(signal, UPDATE_CHECK_INTERVAL_MS);
+        if (!signal.aborted) for (const id of duePluginIds()) enqueueUpdateCheck(id);
+      }
+    } finally {
+      updateWorkerActive = false;
+      const stopped = new Error("update checker stopped");
+      updateQueue.length = 0;
+      queuedUpdateIds.clear();
+      for (const task of updateTasks.values()) task.reject(stopped);
+      updateTasks.clear();
+    }
+  }
+
+  async function drainUpdateQueue(): Promise<void> {
+    if (manualUpdateDrain) return manualUpdateDrain;
+    const drain = (async () => {
+      const signal = new AbortController().signal;
+      while (updateQueue.length > 0) {
+        await processNextUpdate(signal);
+        await sleepWithSignal(UPDATE_CHECK_GAP_MS, signal);
+      }
+    })();
+    manualUpdateDrain = drain;
+    try { await drain; }
+    finally { if (manualUpdateDrain === drain) manualUpdateDrain = null; }
+  }
+
+  async function requestedUpdateResults(plugins: PluginRecord[], refresh: boolean): Promise<UpdateResult[]> {
+    const waits: Promise<UpdateResult>[] = [];
+    for (const plugin of plugins) {
+      const cached = updateCache.get(plugin.id);
+      const stale = !cached || Date.now() - cached.checkedAt >= UPDATE_CHECK_TTL_MS;
+      if (refresh || stale) waits.push(enqueueUpdateCheck(plugin.id));
+    }
+    if (refresh && waits.length > 0) {
+      if (!updateWorkerActive) {
+        await drainUpdateQueue();
+      } else {
+        await Promise.all(waits);
+      }
+    }
+    return plugins
+      .map((plugin) => updateCache.get(plugin.id))
+      .filter((update): update is UpdateResult => update !== undefined);
+  }
+
+  bb.background.service("update-checker", {
+    start: runUpdateChecker,
+  });
+
   bb.rpc.register(rpcContract, {
-    async snapshot() { return await buildSnapshot() as unknown as { plugins: Record<string, unknown>[]; skills: Record<string, unknown>[]; mcpServers: Record<string, unknown>[]; dataDir: string | null }; },
+    async snapshot() { return await buildSnapshot() as unknown as { plugins: Record<string, unknown>[]; skills: Record<string, unknown>[]; mcpServers: Record<string, unknown>[]; updates: UpdateResult[]; dataDir: string | null }; },
     async listTools() { return { tools: await gateway.listTools() }; },
     async callTool({ opaqueId, args }) { return gateway.call(opaqueId, args as Record<string, unknown>); },
     async listPrompts() { return { prompts: await gateway.listPrompts() }; },
@@ -654,6 +1030,18 @@ export default async function plugin(bb: BbPluginApi) {
     async unsubscribeResource({ opaqueId }) { await gateway.unsubscribeResource(opaqueId); return { unsubscribed: true }; },
     async setLoggingLevel({ level }) { await gateway.setLoggingLevel(level); return { updated: true }; },
     async install({ source, tagPrefix }) { return doInstall(source, tagPrefix); },
+    async checkUpdates({ id, refresh }) {
+      const plugins = id ? [store.getPlugin(id) ?? store.getPluginByName(id)].filter((plugin): plugin is PluginRecord => plugin !== undefined) : store.listPlugins();
+      if (id && plugins.length === 0) throw new Error(`not found: ${id}`);
+      // Keep the legacy single-plugin call synchronous for existing clients;
+      // the page-wide call is the throttled background path.
+      return { updates: await requestedUpdateResults(plugins, refresh === true || Boolean(id)) };
+    },
+    async update({ id }) {
+      const plugin = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!plugin) throw new Error(`not found: ${id}`);
+      return doInstall(plugin.sourceIntent, plugin.tagPrefix ?? undefined, plugin);
+    },
     async remove({ id, purgeData }) {
       const p = store.getPlugin(id) ?? store.getPluginByName(id);
       if (!p) return { deleted: false };
@@ -732,6 +1120,12 @@ export default async function plugin(bb: BbPluginApi) {
       await publishChanged({ kind: "oauth", id: p.id, serverId });
       return { authenticated: true };
     },
+    async cancelAuthentication({ id, serverId }) {
+      const p = store.getPlugin(id) ?? store.getPluginByName(id);
+      if (!p) throw new Error(`not found: ${id}`);
+      await withDeferredOAuthPersistence(() => gateway.cancelAuthentication(p.id, serverId));
+      return { canceled: true };
+    },
     async clearAuthentication({ id, serverId }) {
       const p = store.getPlugin(id) ?? store.getPluginByName(id);
       if (!p) throw new Error(`not found: ${id}`);
@@ -766,6 +1160,8 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "list", summary: "List installed Agent Plugins", usage: "bb agent-plugins list [--json]" },
       { name: "show", summary: "Show one plugin", usage: "bb agent-plugins show <id> [--json]" },
       { name: "install", summary: "Install from path/git/npm", usage: "bb agent-plugins install <path|git:url|npm:spec> [--tag-prefix <p>] [--json]" },
+      { name: "outdated", summary: "Check tracked Agent Plugins for updates", usage: "bb agent-plugins outdated [--json]" },
+      { name: "update", summary: "Update one installed Agent Plugin", usage: "bb agent-plugins update <id> [--json]" },
       { name: "remove", summary: "Remove a plugin", usage: "bb agent-plugins remove <id> [--purge-data] [--json]" },
       { name: "tools", summary: "List MCP tools via bridge", usage: "bb agent-plugins tools [--json]" },
       { name: "call", summary: "Call an MCP tool by opaqueId", usage: "bb agent-plugins call <opaqueId> <json> [--json]" },
@@ -801,6 +1197,28 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const res = await doInstall(source, tagPrefix);
           return { exitCode: 0, stdout: (asJson ? JSON.stringify(res, null, 2) : `Installed ${res.name} as ${res.id}\n`) };
+        } catch (e) {
+          return { exitCode: 1, stderr: `${errorText(e)}\n` };
+        }
+      }
+      if (cmd === "outdated") {
+        const updates = await requestedUpdateResults(snap.plugins, true);
+        const available = updates.filter((update) => update.available || update.error);
+        return {
+          exitCode: available.some((update) => update.error) ? 1 : 0,
+          stdout: asJson
+            ? JSON.stringify({ updates: available }, null, 2) + "\n"
+            : (available.length === 0 ? "All Agent Plugins are up to date.\n" : available.map((update) => `${update.id}: ${update.error ?? "update available"}`).join("\n") + "\n"),
+        };
+      }
+      if (cmd === "update") {
+        const id = rest[0];
+        if (!id || id === "--json") return { exitCode: 2, stderr: "Usage: bb agent-plugins update <id> [--json]\n" };
+        const plugin = store.getPlugin(id) ?? store.getPluginByName(id);
+        if (!plugin) return { exitCode: 1, stderr: `not found: ${id}\n` };
+        try {
+          const result = await doInstall(plugin.sourceIntent, plugin.tagPrefix ?? undefined, plugin);
+          return { exitCode: 0, stdout: asJson ? JSON.stringify(result, null, 2) + "\n" : `Updated ${result.name} to ${result.version ?? "the latest source"}\n` };
         } catch (e) {
           return { exitCode: 1, stderr: `${errorText(e)}\n` };
         }
@@ -873,7 +1291,7 @@ export default async function plugin(bb: BbPluginApi) {
           return { exitCode: 0, stdout: asJson ? JSON.stringify({ url, status }, null, 2) + "\n" : `${status}${url ? ` — authorize at ${url}` : ""}\n` };
         } catch (e) { return { exitCode: 1, stderr: `${errorText(e)}\n` }; }
       }
-      return { exitCode: 2, stderr: "Usage: bb agent-plugins <list|show|install|remove|tools|call|prompts|resources|skills|approve|auth> …\n" };
+      return { exitCode: 2, stderr: "Usage: bb agent-plugins <list|show|install|outdated|update|remove|tools|call|prompts|resources|skills|approve|auth> …\n" };
     },
   });
 

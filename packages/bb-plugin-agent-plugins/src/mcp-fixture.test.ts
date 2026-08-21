@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import { McpGateway } from "./gateway.js";
+import { McpGateway, type McpStdioHost } from "./gateway.js";
 import { AgentPluginsStore } from "./store.js";
 import type { PluginRecord } from "./types.js";
 
@@ -82,6 +82,10 @@ function handle(message) {
     return;
   }
   if (method === "resources/templates/list") {
+    if (process.argv.includes("--no-resource-templates")) {
+      send(message.id, undefined, { code: -32601, message: "Method not found" });
+      return;
+    }
     send(message.id, { resourceTemplates: [{ uriTemplate: "fixture://item/{id}", name: "item", description: "Fixture item", mimeType: "text/plain" }] });
     return;
   }
@@ -177,6 +181,78 @@ describe("official MCP gateway integration", () => {
     });
     expect(store.listMcpServers(plugin.id)[0]?.type).toBe("sse");
   });
+
+  it("uses the isolated stdio boundary once and serves repeated catalog reads from cache", async () => {
+    const store = createStore();
+    const plugin = addPlugin(store, "isolated-plugin");
+    store.upsertMcpServer({
+      pluginId: plugin.id,
+      serverId: "isolated",
+      type: "stdio",
+      configJson: JSON.stringify({ type: "stdio", command: "node" }),
+      status: "idle",
+      lastError: null,
+      approved: 1,
+      enabled: 1,
+    });
+    const catalog = {
+      tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object" } }],
+      prompts: [],
+      resources: [],
+      resourceTemplates: [],
+    };
+    const host = {
+      start: async () => catalog,
+      refresh: async () => catalog,
+      close: async () => undefined,
+      callTool: async () => ({ content: [{ type: "text", text: "isolated" }] }),
+      getPrompt: async () => ({}),
+      readResource: async () => ({}),
+      complete: async () => ({}),
+      subscribeResource: async () => undefined,
+      unsubscribeResource: async () => undefined,
+      setLoggingLevel: async () => undefined,
+    } as unknown as McpStdioHost;
+    const start = vi.fn(host.start);
+    const close = vi.fn(host.close);
+    host.start = start;
+    host.close = close;
+    const gateway = new McpGateway(store, { info() {}, warn() {}, error() {} }, { stdioHost: host });
+
+    const first = await gateway.listTools();
+    const second = await gateway.listTools();
+    expect(first[0]?.name).toBe("echo");
+    expect(second[0]?.opaqueId).toBe(first[0]?.opaqueId);
+    expect(start).toHaveBeenCalledTimes(1);
+
+    const call = await gateway.call(first[0]!.opaqueId, {});
+    expect(call.content).toEqual([{ type: "text", text: "isolated" }]);
+    await gateway.closeServer(plugin.id, "isolated");
+    expect(close).toHaveBeenCalledTimes(1);
+    await gateway.close();
+  });
+
+  it("keeps an authenticated server ready when an optional catalog method is absent", async () => {
+    const store = createStore();
+    const plugin = addPlugin(store, "optional-catalog-plugin");
+    store.upsertPlugin({ ...plugin, pluginRoot: "/tmp", pluginData: "/tmp" });
+    store.upsertMcpServer({
+      pluginId: plugin.id,
+      serverId: "fastmail-like",
+      type: "stdio",
+      configJson: JSON.stringify({ type: "stdio", command: "node", args: ["-e", FIXTURE, "--", "--no-resource-templates"] }),
+      status: "idle",
+      lastError: null,
+      approved: 1,
+      enabled: 1,
+    });
+    const gateway = new McpGateway(store, { info() {}, warn() {}, error() {} });
+
+    expect(await gateway.listTools()).toHaveLength(1);
+    expect(await gateway.listResourceTemplates()).toEqual([]);
+    expect(store.listMcpServers(plugin.id)[0]).toMatchObject({ status: "ready", lastError: null });
+    await gateway.close();
+  }, 15_000);
 
   it("persists an unexpected transport close as an actionable error", async () => {
     const store = createStore();

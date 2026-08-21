@@ -34,6 +34,7 @@ import type {
   JsonRecord,
   McpCallResult,
 } from "./types.js";
+import { optionalMcpCall } from "./mcp-compat.js";
 
 export interface McpRuntime {
   listTools(): Promise<CatalogTool[]>;
@@ -54,6 +55,7 @@ export interface McpRuntime {
   authStatus(pluginId: string, serverId: string): Promise<"unauthenticated" | "authorizing" | "authenticated">;
   reconnectServer(pluginId: string, serverId: string): Promise<string | null>;
   finishAuth(pluginId: string, serverId: string, params: URLSearchParams): Promise<void>;
+  cancelAuthentication(pluginId: string, serverId: string): Promise<void>;
   clearAuthentication(pluginId: string, serverId: string): Promise<void>;
   close(): Promise<void>;
   closeServer(pluginId: string, serverId: string): Promise<void>;
@@ -71,16 +73,51 @@ export interface McpGatewayOptions {
   onSampling?: (request: unknown, pluginId: string, serverId: string) => Promise<unknown>;
   onElicitation?: (request: unknown, pluginId: string, serverId: string) => Promise<unknown>;
   onRoots?: (pluginId: string, serverId: string) => Promise<unknown>;
+  /** Isolated worker boundary used for local stdio MCP servers. */
+  stdioHost?: McpStdioHost;
 }
 
-const MCP_CLIENT_INFO = { name: "bb-agent-plugins", version: "0.2.1" };
+export interface McpStdioConfig {
+  key: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+}
+
+export interface McpStdioCatalog {
+  tools: Tool[];
+  prompts: Prompt[];
+  resources: Resource[];
+  resourceTemplates: ResourceTemplateType[];
+}
+
+export interface McpStdioHost {
+  start(config: McpStdioConfig, signal?: AbortSignal): Promise<McpStdioCatalog>;
+  refresh(key: string, signal?: AbortSignal): Promise<McpStdioCatalog>;
+  close(key: string, signal?: AbortSignal): Promise<void>;
+  callTool(key: string, name: string, args: JsonRecord, toolDefinition?: Tool, signal?: AbortSignal): Promise<unknown>;
+  getPrompt(key: string, name: string, args: JsonRecord, signal?: AbortSignal): Promise<unknown>;
+  readResource(key: string, uri: string, signal?: AbortSignal): Promise<unknown>;
+  complete(key: string, ref: JsonRecord, argument: JsonRecord, signal?: AbortSignal): Promise<unknown>;
+  subscribeResource(key: string, uri: string, signal?: AbortSignal): Promise<void>;
+  unsubscribeResource(key: string, uri: string, signal?: AbortSignal): Promise<void>;
+  setLoggingLevel(key: string, level: string, signal?: AbortSignal): Promise<void>;
+  onWorkerExit?(handler: (hostId: string) => void | Promise<void>): () => void;
+  onCatalogChanged?(handler: (key: string, kind: "tools" | "prompts" | "resources", error: string | null) => void | Promise<void>): () => void;
+  onConnectionChanged?(handler: (key: string, status: "closed" | "error", error: string | null) => void | Promise<void>): () => void;
+}
+
+const MCP_CLIENT_INFO = { name: "bb-agent-plugins", version: "0.2.2" };
 const CONNECT_TIMEOUT_MS = 15_000;
 const OAUTH_TIMEOUT_MS = 15_000;
 const FETCH_TIMEOUT_GRACE_MS = 1_000;
 const CLOSE_TIMEOUT_MS = 2_000;
 const RETRY_AFTER_MS = 5_000;
+const CATALOG_TTL_MS = 5 * 60_000;
 
 function errorText(e: unknown): string { return e instanceof Error ? e.message : String(e); }
+function isOAuthStateMismatch(error: unknown): boolean { return errorText(error) === "MCP OAuth state mismatch"; }
 function authorizationFailure(params: URLSearchParams): string {
   const code = params.get("error") ?? "unknown_error";
   const description = params.get("error_description");
@@ -116,9 +153,19 @@ function optionalRecord(value: unknown): JsonRecord | undefined { return asRecor
 
 function optionalRecordArray(value: unknown): JsonRecord[] | undefined { return asRecordArray(value); }
 
+function omitUndefined<T extends object>(value: T): T {
+  for (const key of Object.keys(value)) {
+    if ((value as Record<string, unknown>)[key] === undefined) delete (value as Record<string, unknown>)[key];
+  }
+  return value;
+}
+
 interface Connected {
-  client: Client;
-  transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
+  kind: "local" | "host";
+  client?: Client;
+  transport?: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
+  host?: McpStdioHost;
+  hostKey?: string;
   tools: Tool[];
   prompts: Prompt[];
   resources: Resource[];
@@ -134,6 +181,16 @@ interface PendingAuth {
 }
 
 interface Failure { message: string; at: number; }
+
+interface CatalogCache {
+  configJson: string;
+  tools: Tool[];
+  prompts: Prompt[];
+  resources: Resource[];
+  resourceTemplates: ResourceTemplateType[];
+  updatedAt: number;
+  error: string | null;
+}
 
 interface ServerConfig {
   type: "stdio" | "streamable-http" | "sse";
@@ -156,9 +213,12 @@ function parseServerConfig(rawJson: string): ServerConfig | null {
   try { return JSON.parse(rawJson) as ServerConfig; } catch { return null; }
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
     p.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
   });
 }
@@ -235,12 +295,12 @@ export function redirectGuardFetch(url: URL, baseHeaders: Record<string, string>
 
 function contentResult(result: unknown): McpCallResult {
   const record = asRecord(result) ?? {};
-  return {
+  return omitUndefined({
     content: (asRecordArray(record.content) ?? []) as JsonRecord[],
     isError: typeof record.isError === "boolean" ? record.isError : undefined,
     structuredContent: record.structuredContent,
     _meta: optionalRecord(record._meta),
-  };
+  });
 }
 
 function responseRecord(result: unknown): JsonRecord {
@@ -250,20 +310,39 @@ function responseRecord(result: unknown): JsonRecord {
 export class McpGateway implements McpRuntime {
   private readonly conns = new Map<string, Connected>();
   private readonly pending = new Map<string, Promise<Connected>>();
+  private readonly connectControllers = new Map<string, AbortController>();
   private readonly oauthPending = new Map<string, PendingAuth>();
   private readonly providers = new Map<string, McpOAuthProvider>();
   private readonly failures = new Map<string, Failure>();
+  private readonly catalogCache = new Map<string, CatalogCache>();
+  private readonly catalogLoads = new Map<string, Promise<CatalogCache>>();
+  private readonly catalogGenerations = new Map<string, number>();
+  private readonly dirtyCatalogs = new Set<string>();
   private readonly serverEpochs = new Map<string, number>();
+  private readonly hostExitUnsubscribe?: () => void;
+  private readonly hostCatalogUnsubscribe?: () => void;
+  private readonly hostConnectionUnsubscribe?: () => void;
   private closed = false;
 
   constructor(
     private readonly store: AgentPluginsStore,
     private readonly log: { info(m: string): void; warn(m: string): void; error(m: string): void },
     private readonly options: McpGatewayOptions = {},
-  ) {}
+  ) {
+    this.hostExitUnsubscribe = options.stdioHost?.onWorkerExit?.(() => {
+      void this.handleHostWorkerExit();
+    });
+    this.hostCatalogUnsubscribe = options.stdioHost?.onCatalogChanged?.((key, kind, error) => {
+      this.onCatalogChanged(key, kind, error ? new Error(error) : null, undefined);
+    });
+    this.hostConnectionUnsubscribe = options.stdioHost?.onConnectionChanged?.((key, status, error) => {
+      void this.handleHostConnectionChanged(key, status, error);
+    });
+  }
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const controller of this.connectControllers.values()) controller.abort(new Error("MCP gateway closing"));
     await Promise.allSettled([...this.pending.entries()].map(async ([key, pending]) => {
       try { await withTimeout(pending, CLOSE_TIMEOUT_MS, `wait for MCP connection ${key}`); }
       catch (error) { this.log.warn(`wait for MCP connection ${key}: ${errorText(error)}`); }
@@ -276,16 +355,19 @@ export class McpGateway implements McpRuntime {
     this.failures.clear();
     await Promise.all([...all.entries()].map(async ([key, value]) => {
       try {
-        if ("expectedClose" in value) value.expectedClose = true;
-        else await withTimeout(value.transport.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth transport ${key}`);
-        await withTimeout(value.client.close(), CLOSE_TIMEOUT_MS, `close ${key}`);
+        if ("expectedClose" in value) await this.closeConnected(key, value);
+        else await this.closePendingAuthValue(key, value);
       } catch (e) { this.log.warn(`close ${key}: ${errorText(e)}`); }
     }));
+    this.hostExitUnsubscribe?.();
+    this.hostCatalogUnsubscribe?.();
+    this.hostConnectionUnsubscribe?.();
   }
 
   async closeServer(pluginId: string, serverId: string): Promise<void> {
     const key = keyOf(pluginId, serverId);
     this.serverEpochs.set(key, (this.serverEpochs.get(key) ?? 0) + 1);
+    this.connectControllers.get(key)?.abort(new Error(`MCP connection cancelled for ${serverId}`));
     const pendingConnect = this.pending.get(key);
     if (pendingConnect) {
       try { await withTimeout(pendingConnect, CLOSE_TIMEOUT_MS, `wait for MCP connection ${key}`); }
@@ -299,13 +381,79 @@ export class McpGateway implements McpRuntime {
     this.conns.delete(key);
     this.oauthPending.delete(key);
     this.failures.delete(key);
+    this.invalidateCatalog(key);
     const value = conn ?? auth;
     if (!value) return;
     try {
-      if ("expectedClose" in value) value.expectedClose = true;
-      else await withTimeout(value.transport.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth transport ${key}`);
-      await withTimeout(value.client.close(), CLOSE_TIMEOUT_MS, `close ${key}`);
+      if ("expectedClose" in value) await this.closeConnected(key, value);
+      else await this.closePendingAuthValue(key, value);
     } catch (e) { this.log.warn(`close ${key}: ${errorText(e)}`); }
+  }
+
+  private async closeConnected(key: string, connection: Connected): Promise<void> {
+    connection.expectedClose = true;
+    if (connection.kind === "host") {
+      if (connection.host && connection.hostKey) {
+        const controller = new AbortController();
+        await withTimeout(
+          connection.host.close(connection.hostKey, controller.signal),
+          CLOSE_TIMEOUT_MS,
+          `close isolated MCP ${key}`,
+          () => controller.abort(new Error(`close isolated MCP ${key} timed out`)),
+        );
+      }
+      return;
+    }
+    if (connection.client) await withTimeout(connection.client.close(), CLOSE_TIMEOUT_MS, `close ${key}`);
+  }
+
+  private async closePendingAuthValue(key: string, pending: PendingAuth): Promise<void> {
+    await Promise.all([
+      withTimeout(pending.transport.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth transport ${key}`)
+        .catch((error) => this.log.warn(`close pending MCP OAuth transport ${key}: ${errorText(error)}`)),
+      withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close ${key}`)
+        .catch((error) => this.log.warn(`close pending MCP OAuth client ${key}: ${errorText(error)}`)),
+    ]);
+  }
+
+  private async handleHostWorkerExit(): Promise<void> {
+    if (this.closed) return;
+    const isolated = [...this.conns.entries()].filter(([, connection]) => connection.kind === "host");
+    for (const [key, connection] of isolated) {
+      if (this.conns.get(key) !== connection) continue;
+      this.conns.delete(key);
+      const [pluginId, serverId] = key.split(":", 2);
+      const message = "Isolated MCP worker exited; the server will reconnect on the next request";
+      this.failures.set(key, { message, at: Date.now() });
+      this.invalidateCatalog(key);
+      if (pluginId && serverId) this.persistStatus(pluginId, serverId, "error", message);
+    }
+    if (isolated.length > 0) await this.notifyChanged();
+  }
+
+  private async handleHostConnectionChanged(key: string, status: "closed" | "error", error: string | null): Promise<void> {
+    const connection = this.conns.get(key);
+    if (!connection || connection.kind !== "host") return;
+    this.conns.delete(key);
+    this.invalidateCatalog(key);
+    const [pluginId, serverId] = key.split(":", 2);
+    const message = error ?? `Isolated MCP transport ${status}`;
+    if (pluginId && serverId) this.persistStatus(pluginId, serverId, "error", message);
+    this.failures.set(key, { message, at: Date.now() });
+    await this.notifyChanged();
+  }
+
+  /**
+   * Drop a cached OAuth provider when an update changes or removes an MCP
+   * definition. Keeping the provider would retain the old server origin and
+   * redirect metadata under the same plugin/server key.
+   */
+  async resetServer(pluginId: string, serverId: string): Promise<void> {
+    const key = keyOf(pluginId, serverId);
+    const provider = this.providers.get(key);
+    await this.closeServer(pluginId, serverId);
+    if (provider) await provider.clearPending().catch((error) => this.log.warn(`clear MCP OAuth state ${key}: ${errorText(error)}`));
+    this.providers.delete(key);
   }
 
   async startServer(pluginId: string, serverId: string): Promise<void> { await this.ensureServer(pluginId, serverId); }
@@ -376,13 +524,12 @@ export class McpGateway implements McpRuntime {
       try {
         await provider.validateState(params.get("state"));
       } catch (error) {
-        const message = errorText(error);
-        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        if (!isOAuthStateMismatch(error)) this.log.warn(`MCP OAuth callback validation failed for ${key}: ${errorText(error)}`);
         throw error;
       }
       if (params.get("error")) {
         const message = authorizationFailure(params);
-        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        await this.cancelPendingAuthentication(pluginId, serverId, provider, undefined, message);
         throw new Error(message);
       }
       const transport = this.createHttpTransport(cfg, provider);
@@ -391,10 +538,11 @@ export class McpGateway implements McpRuntime {
           transport.finishAuth(params),
           this.options.oauthTimeoutMs ?? OAUTH_TIMEOUT_MS,
           `OAuth token exchange ${serverId}`,
+          () => { void transport.close().catch(() => {}); },
         );
       } catch (error) {
         const message = errorText(error);
-        await this.cancelAuthentication(pluginId, serverId, provider, undefined, message);
+        await this.cancelPendingAuthentication(pluginId, serverId, provider, undefined, message);
         throw error;
       } finally {
         try { await withTimeout(transport.close(), CLOSE_TIMEOUT_MS, `close OAuth transport ${serverId}`); } catch {}
@@ -416,13 +564,12 @@ export class McpGateway implements McpRuntime {
     try {
       await pending.provider.validateState(params.get("state"));
     } catch (error) {
-      const message = errorText(error);
-      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
+      if (!isOAuthStateMismatch(error)) this.log.warn(`MCP OAuth callback validation failed for ${key}: ${errorText(error)}`);
       throw error;
     }
     if (params.get("error")) {
       const message = authorizationFailure(params);
-      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
+      await this.cancelPendingAuthentication(pluginId, serverId, pending.provider, pending, message);
       throw new Error(message);
     }
     try {
@@ -430,16 +577,18 @@ export class McpGateway implements McpRuntime {
         pending.transport.finishAuth(params),
         this.options.oauthTimeoutMs ?? OAUTH_TIMEOUT_MS,
         `OAuth token exchange ${serverId}`,
+        () => { void pending.transport.close().catch(() => {}); },
       );
     } catch (error) {
       const message = errorText(error);
-      await this.cancelAuthentication(pluginId, serverId, pending.provider, pending, message);
+      await this.cancelPendingAuthentication(pluginId, serverId, pending.provider, pending, message);
       throw error;
     }
     try {
       await pending.provider.clearPending();
     } catch (error) {
       const message = errorText(error);
+      await this.closePendingAuth(key, pending);
       this.persistStatus(pluginId, serverId, "error", message);
       await this.notifyChanged();
       throw error;
@@ -448,8 +597,7 @@ export class McpGateway implements McpRuntime {
     // challenge. The SDK transport is already started at this point and must
     // not be passed to Client.connect() again; rebuild the connection with the
     // now-authenticated provider instead.
-    this.oauthPending.delete(key);
-    try { await withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth client ${key}`); } catch {}
+    await this.closePendingAuth(key, pending);
     try {
       await withTimeout(this.ensureServer(pluginId, serverId), CONNECT_TIMEOUT_MS, `reconnect ${serverId}`);
       this.failures.delete(key);
@@ -457,10 +605,27 @@ export class McpGateway implements McpRuntime {
     } catch (error) {
       const message = errorText(error);
       this.persistStatus(pluginId, serverId, "error", message);
-      this.oauthPending.delete(key);
-      try { await withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth client ${key}`); } catch {}
       await this.notifyChanged();
       throw new Error(message);
+    }
+  }
+
+  async cancelAuthentication(pluginId: string, serverId: string): Promise<void> {
+    const record = this.serverRecord(pluginId, serverId);
+    const cfg = this.validatedConfig(record);
+    if (cfg.type === "stdio") return;
+    const provider = await this.providerFor(pluginId, serverId, new URL(cfg.url!));
+    await this.closeServer(pluginId, serverId);
+    try {
+      await provider.clearPending();
+      const status = record.enabled === 1 ? "needs-auth" : "disabled";
+      this.persistStatus(pluginId, serverId, status, null);
+      await this.notifyChanged();
+    } catch (error) {
+      const message = errorText(error);
+      this.persistStatus(pluginId, serverId, "error", message);
+      await this.notifyChanged();
+      throw error;
     }
   }
 
@@ -475,21 +640,91 @@ export class McpGateway implements McpRuntime {
     await this.notifyChanged();
   }
 
+  private cacheCatalog(key: string, configJson: string, connection: Connected, error: string | null = null): CatalogCache {
+    const cached: CatalogCache = {
+      configJson,
+      tools: connection.tools,
+      prompts: connection.prompts,
+      resources: connection.resources,
+      resourceTemplates: connection.resourceTemplates,
+      updatedAt: Date.now(),
+      error,
+    };
+    this.catalogCache.set(key, cached);
+    this.dirtyCatalogs.delete(key);
+    return cached;
+  }
+
+  private invalidateCatalog(key: string): void {
+    this.catalogGenerations.set(key, (this.catalogGenerations.get(key) ?? 0) + 1);
+    this.catalogCache.delete(key);
+    this.catalogLoads.delete(key);
+    this.dirtyCatalogs.delete(key);
+  }
+
+  private async getCatalog(record: ReturnType<McpGateway["serverRecord"]>): Promise<CatalogCache> {
+    const key = keyOf(record.pluginId, record.serverId);
+    const cached = this.catalogCache.get(key);
+    const age = cached ? Date.now() - cached.updatedAt : Number.POSITIVE_INFINITY;
+    if (cached && cached.configJson === record.configJson && !this.dirtyCatalogs.has(key)) {
+      if (cached.error && age < RETRY_AFTER_MS) throw new Error(cached.error);
+      if (!cached.error && age < CATALOG_TTL_MS) return cached;
+    }
+    const existingLoad = this.catalogLoads.get(key);
+    if (existingLoad) return existingLoad;
+    const generation = this.catalogGenerations.get(key) ?? 0;
+
+    const load = (async () => {
+      try {
+        const connection = await this.ensureServer(record.pluginId, record.serverId);
+        if (!connection) throw new Error(`MCP server unavailable: ${record.serverId}`);
+        const needsRefresh = this.dirtyCatalogs.has(key) || !cached || cached.configJson !== record.configJson || age >= CATALOG_TTL_MS;
+        if (needsRefresh && cached) {
+          const controller = new AbortController();
+          await withTimeout(
+            this.refreshCatalog(connection, controller.signal),
+            CONNECT_TIMEOUT_MS,
+            `refresh MCP catalog ${record.serverId}`,
+            () => controller.abort(new Error(`MCP catalog refresh timed out for ${record.serverId}`)),
+          );
+        }
+        if ((this.catalogGenerations.get(key) ?? 0) !== generation) throw new Error(`MCP catalog invalidated for ${record.serverId}`);
+        return this.cacheCatalog(key, record.configJson, connection);
+      } catch (error) {
+        if ((this.catalogGenerations.get(key) ?? 0) === generation) {
+          const message = errorText(error);
+          const empty: Connected = {
+            kind: "local",
+            tools: [],
+            prompts: [],
+            resources: [],
+            resourceTemplates: [],
+            expectedClose: false,
+          };
+          this.cacheCatalog(key, record.configJson, empty, message);
+        }
+        throw error;
+      }
+    })();
+    this.catalogLoads.set(key, load);
+    try { return await load; }
+    finally { if (this.catalogLoads.get(key) === load) this.catalogLoads.delete(key); }
+  }
+
   async listTools(): Promise<CatalogTool[]> {
     const result: CatalogTool[] = [];
     for (const record of this.enabledApprovedServers()) {
       const cfg = parseServerConfig(record.configJson);
       if (!cfg) continue;
-      let conn: Connected | null = null;
-      try { conn = await this.ensureServer(record.pluginId, record.serverId); }
+      let catalog: CatalogCache;
+      try { catalog = await this.getCatalog(record); }
       catch (error) {
         this.log.warn(`listTools skip ${record.serverId}: ${errorText(error)}`);
         result.push(this.toolError(record, cfg, error));
         continue;
       }
-      if (!conn) continue;
       const pluginName = this.store.getPlugin(record.pluginId)?.name ?? record.pluginId;
-      for (const tool of conn.tools) result.push(this.catalogTool(record, cfg, pluginName, tool));
+      for (const tool of catalog.tools) result.push(this.catalogTool(record, cfg, pluginName, tool));
     }
     return result;
   }
@@ -502,10 +737,7 @@ export class McpGateway implements McpRuntime {
     const conn = await this.ensureServer(definition.pluginId, definition.serverId);
     if (!conn) throw new Error(`MCP server unavailable: ${definition.serverId}`);
     const tool = conn.tools.find((item) => item.name === definition.name);
-    const result = await this.withAuthState(definition.pluginId, definition.serverId, () => conn!.client.callTool(
-      { name: definition.name, arguments: args as Record<string, unknown> },
-      { ...(signal ? { signal } : {}), ...(tool ? { toolDefinition: tool } : {}) },
-    ));
+    const result = await this.withAuthState(definition.pluginId, definition.serverId, () => this.callTool(conn!, definition.name, args, tool, signal));
     return contentResult(result);
   }
 
@@ -515,10 +747,9 @@ export class McpGateway implements McpRuntime {
       const cfg = parseServerConfig(record.configJson);
       if (!cfg) continue;
       try {
-        const conn = await this.ensureServer(record.pluginId, record.serverId);
-        if (!conn) continue;
+        const catalog = await this.getCatalog(record);
         const pluginName = this.store.getPlugin(record.pluginId)?.name ?? record.pluginId;
-        for (const prompt of conn.prompts) result.push(this.catalogPrompt(record, cfg, pluginName, prompt));
+        for (const prompt of catalog.prompts) result.push(this.catalogPrompt(record, cfg, pluginName, prompt));
       } catch (error) { this.log.warn(`listPrompts skip ${record.serverId}: ${errorText(error)}`); }
     }
     return result;
@@ -534,7 +765,7 @@ export class McpGateway implements McpRuntime {
       if (typeof value !== "string") throw new Error(`Prompt argument ${name} must be a string`);
       argumentsMap[name] = value;
     }
-    return responseRecord(await this.withAuthState(definition.pluginId, definition.serverId, () => conn!.client.getPrompt({ name: definition.name, arguments: argumentsMap }, signal ? { signal } : undefined)));
+    return responseRecord(await this.withAuthState(definition.pluginId, definition.serverId, () => this.callPrompt(conn!, definition.name, argumentsMap, signal)));
   }
 
   async listResources(): Promise<CatalogResource[]> {
@@ -543,10 +774,9 @@ export class McpGateway implements McpRuntime {
       const cfg = parseServerConfig(record.configJson);
       if (!cfg) continue;
       try {
-        const conn = await this.ensureServer(record.pluginId, record.serverId);
-        if (!conn) continue;
+        const catalog = await this.getCatalog(record);
         const pluginName = this.store.getPlugin(record.pluginId)?.name ?? record.pluginId;
-        for (const resource of conn.resources) result.push(this.catalogResource(record, cfg, pluginName, resource));
+        for (const resource of catalog.resources) result.push(this.catalogResource(record, cfg, pluginName, resource));
       } catch (error) { this.log.warn(`listResources skip ${record.serverId}: ${errorText(error)}`); }
     }
     return result;
@@ -558,10 +788,9 @@ export class McpGateway implements McpRuntime {
       const cfg = parseServerConfig(record.configJson);
       if (!cfg) continue;
       try {
-        const conn = await this.ensureServer(record.pluginId, record.serverId);
-        if (!conn) continue;
+        const catalog = await this.getCatalog(record);
         const pluginName = this.store.getPlugin(record.pluginId)?.name ?? record.pluginId;
-        for (const template of conn.resourceTemplates) result.push(this.catalogResourceTemplate(record, cfg, pluginName, template));
+        for (const template of catalog.resourceTemplates) result.push(this.catalogResourceTemplate(record, cfg, pluginName, template));
       } catch (error) { this.log.warn(`listResourceTemplates skip ${record.serverId}: ${errorText(error)}`); }
     }
     return result;
@@ -572,7 +801,7 @@ export class McpGateway implements McpRuntime {
     if (!definition) throw new Error(`Resource not found: ${opaqueId}`);
     const conn = await this.ensureServer(definition.pluginId, definition.serverId);
     if (!conn) throw new Error(`MCP server unavailable: ${definition.serverId}`);
-    return responseRecord(await this.withAuthState(definition.pluginId, definition.serverId, () => conn!.client.readResource({ uri: definition.uri }, signal ? { signal } : undefined)));
+    return responseRecord(await this.withAuthState(definition.pluginId, definition.serverId, () => this.readResourceOnConnection(conn!, definition.uri, signal)));
   }
 
   async complete(ref: JsonRecord, argument: JsonRecord, signal?: AbortSignal): Promise<JsonRecord> {
@@ -615,7 +844,7 @@ export class McpGateway implements McpRuntime {
       value: typeof argument.value === "string" ? argument.value : String(argument.value ?? ""),
     };
     const params: JsonRecord = { ref: wireRef, argument: wireArgument };
-    return responseRecord(await this.withAuthState(target.pluginId, target.serverId, () => conn!.client.complete(params as never, signal ? { signal } : undefined)));
+    return responseRecord(await this.withAuthState(target.pluginId, target.serverId, () => this.completeOnConnection(conn!, wireRef, wireArgument, signal)));
   }
 
   async subscribeResource(opaqueId: string, signal?: AbortSignal): Promise<void> {
@@ -623,7 +852,7 @@ export class McpGateway implements McpRuntime {
     if (!definition) throw new Error(`Resource not found: ${opaqueId}`);
     const conn = await this.ensureServer(definition.pluginId, definition.serverId);
     if (!conn) throw new Error(`MCP server unavailable: ${definition.serverId}`);
-    await this.withAuthState(definition.pluginId, definition.serverId, () => conn!.client.subscribeResource({ uri: definition.uri }, signal ? { signal } : undefined));
+    await this.withAuthState(definition.pluginId, definition.serverId, () => this.subscribeOnConnection(conn!, definition.uri, signal));
   }
 
   async unsubscribeResource(opaqueId: string, signal?: AbortSignal): Promise<void> {
@@ -631,7 +860,7 @@ export class McpGateway implements McpRuntime {
     if (!definition) throw new Error(`Resource not found: ${opaqueId}`);
     const conn = await this.ensureServer(definition.pluginId, definition.serverId);
     if (!conn) throw new Error(`MCP server unavailable: ${definition.serverId}`);
-    await this.withAuthState(definition.pluginId, definition.serverId, () => conn!.client.unsubscribeResource({ uri: definition.uri }, signal ? { signal } : undefined));
+    await this.withAuthState(definition.pluginId, definition.serverId, () => this.unsubscribeOnConnection(conn!, definition.uri, signal));
   }
 
   async setLoggingLevel(level: string, signal?: AbortSignal): Promise<void> {
@@ -639,8 +868,55 @@ export class McpGateway implements McpRuntime {
     if (!allowed.has(level)) throw new Error(`Invalid MCP logging level: ${level}`);
     for (const record of this.enabledApprovedServers()) {
       const conn = await this.ensureServer(record.pluginId, record.serverId);
-      if (conn) await this.withAuthState(record.pluginId, record.serverId, () => conn!.client.setLoggingLevel(level as never, signal ? { signal } : undefined));
+      if (conn) await this.withAuthState(record.pluginId, record.serverId, () => this.setLoggingLevelOnConnection(conn!, level, signal));
     }
+  }
+
+  private async callTool(conn: Connected, name: string, args: JsonRecord, tool?: Tool, signal?: AbortSignal): Promise<unknown> {
+    if (conn.kind === "host") return conn.host!.callTool(conn.hostKey!, name, args, tool, signal);
+    return conn.client!.callTool(
+      { name, arguments: args as Record<string, unknown> },
+      { ...(signal ? { signal } : {}), ...(tool ? { toolDefinition: tool } : {}) },
+    );
+  }
+
+  private async callPrompt(conn: Connected, name: string, args: JsonRecord, signal?: AbortSignal): Promise<unknown> {
+    if (conn.kind === "host") return conn.host!.getPrompt(conn.hostKey!, name, args, signal);
+    return conn.client!.getPrompt({ name, arguments: args as Record<string, string> }, signal ? { signal } : undefined);
+  }
+
+  private async readResourceOnConnection(conn: Connected, uri: string, signal?: AbortSignal): Promise<unknown> {
+    if (conn.kind === "host") return conn.host!.readResource(conn.hostKey!, uri, signal);
+    return conn.client!.readResource({ uri }, signal ? { signal } : undefined);
+  }
+
+  private async completeOnConnection(conn: Connected, ref: JsonRecord, argument: JsonRecord, signal?: AbortSignal): Promise<unknown> {
+    if (conn.kind === "host") return conn.host!.complete(conn.hostKey!, ref, argument, signal);
+    return conn.client!.complete({ ref: ref as never, argument: argument as never }, signal ? { signal } : undefined);
+  }
+
+  private async subscribeOnConnection(conn: Connected, uri: string, signal?: AbortSignal): Promise<void> {
+    if (conn.kind === "host") {
+      await conn.host!.subscribeResource(conn.hostKey!, uri, signal);
+      return;
+    }
+    await conn.client!.subscribeResource({ uri }, signal ? { signal } : undefined);
+  }
+
+  private async unsubscribeOnConnection(conn: Connected, uri: string, signal?: AbortSignal): Promise<void> {
+    if (conn.kind === "host") {
+      await conn.host!.unsubscribeResource(conn.hostKey!, uri, signal);
+      return;
+    }
+    await conn.client!.unsubscribeResource({ uri }, signal ? { signal } : undefined);
+  }
+
+  private async setLoggingLevelOnConnection(conn: Connected, level: string, signal?: AbortSignal): Promise<void> {
+    if (conn.kind === "host") {
+      await conn.host!.setLoggingLevel(conn.hostKey!, level, signal);
+      return;
+    }
+    await conn.client!.setLoggingLevel(level as never, signal ? { signal } : undefined);
   }
 
   private async ensureServer(pluginId: string, serverId: string): Promise<Connected | null> {
@@ -660,13 +936,18 @@ export class McpGateway implements McpRuntime {
     const failure = this.failures.get(key);
     if (failure && Date.now() - failure.at < RETRY_AFTER_MS) throw new Error(failure.message);
     const cfg = this.validatedConfig(record);
-    const connectPromise = this.connectServer(pluginId, serverId, cfg);
+    const controller = new AbortController();
+    this.connectControllers.set(key, controller);
+    const connectPromise = this.connectServer(pluginId, serverId, cfg, controller.signal);
     this.pending.set(key, connectPromise);
     try { return await connectPromise; }
-    finally { if (this.pending.get(key) === connectPromise) this.pending.delete(key); }
+    finally {
+      if (this.pending.get(key) === connectPromise) this.pending.delete(key);
+      if (this.connectControllers.get(key) === controller) this.connectControllers.delete(key);
+    }
   }
 
-  private async connectServer(pluginId: string, serverId: string, cfg: ServerConfig): Promise<Connected> {
+  private async connectServer(pluginId: string, serverId: string, cfg: ServerConfig, signal: AbortSignal): Promise<Connected> {
     const key = keyOf(pluginId, serverId);
     const epoch = this.serverEpochs.get(key) ?? 0;
     const plugin = this.store.getPlugin(pluginId);
@@ -674,82 +955,94 @@ export class McpGateway implements McpRuntime {
     let client: Client | undefined;
     let transport: Connected["transport"] | undefined;
     let provider: McpOAuthProvider | undefined;
+    let connection: Connected | undefined;
     try {
-      const capabilities: ClientCapabilities = {};
-      if (this.options.onSampling) capabilities.sampling = {};
-      if (this.options.onElicitation) capabilities.elicitation = { form: {} };
-      if (this.options.onRoots) capabilities.roots = { listChanged: true };
-      const clientOptions: ClientOptions = {
-        capabilities,
-        versionNegotiation: { mode: "auto" },
-        listChanged: {
-          tools: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "tools", error, items) },
-          prompts: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "prompts", error, items) },
-          resources: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "resources", error, items) },
-        },
-      };
-      client = new Client(MCP_CLIENT_INFO, clientOptions);
-      this.installRequestHandlers(client, pluginId, serverId);
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("MCP connection cancelled");
+      if (cfg.type === "stdio" && this.options.stdioHost) {
+        const stdio = await this.expandedStdioConfig(key, cfg, plugin);
+        const catalog = await withTimeout(
+          this.options.stdioHost.start(stdio, signal),
+          CONNECT_TIMEOUT_MS,
+          `start isolated MCP ${serverId}`,
+          () => this.connectControllers.get(key)?.abort(new Error(`start isolated MCP ${serverId} timed out`)),
+        );
+        connection = {
+          kind: "host",
+          host: this.options.stdioHost,
+          hostKey: key,
+          tools: catalog.tools,
+          prompts: catalog.prompts,
+          resources: catalog.resources,
+          resourceTemplates: catalog.resourceTemplates,
+          expectedClose: false,
+        };
+      } else {
+        const capabilities: ClientCapabilities = {};
+        if (this.options.onSampling) capabilities.sampling = {};
+        if (this.options.onElicitation) capabilities.elicitation = { form: {} };
+        if (this.options.onRoots) capabilities.roots = { listChanged: true };
+        const clientOptions: ClientOptions = {
+          capabilities,
+          versionNegotiation: { mode: "auto" },
+          listChanged: {
+            tools: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "tools", error, items) },
+            prompts: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "prompts", error, items) },
+            resources: { autoRefresh: true, onChanged: (error, items) => this.onCatalogChanged(key, "resources", error, items) },
+          },
+        };
+        client = new Client(MCP_CLIENT_INFO, clientOptions);
+        this.installRequestHandlers(client, pluginId, serverId);
 
-      if (cfg.type === "streamable-http" || cfg.type === "sse") {
+        if (cfg.type === "streamable-http" || cfg.type === "sse") {
         const serverUrl = new URL(cfg.url!);
         provider = await this.providerFor(pluginId, serverId, serverUrl);
         transport = this.createHttpTransport(cfg, provider);
-      } else {
-        const args = (cfg.args ?? []).map((item) => expandPlaceholders(item, plugin.pluginRoot, plugin.pluginData));
-        const envOverlay: Record<string, string> = {};
-        for (const [name, value] of Object.entries(cfg.env ?? {})) envOverlay[name] = expandPlaceholders(value, plugin.pluginRoot, plugin.pluginData);
-        const baseEnv: Record<string, string> = {};
-        for (const name of ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TMPDIR"]) if (process.env[name]) baseEnv[name] = process.env[name]!;
-        const env = { ...baseEnv, ...envOverlay, PLUGIN_ROOT: plugin.pluginRoot, PLUGIN_DATA: plugin.pluginData };
-        let cwd = plugin.pluginRoot;
-        if (cfg.cwd) {
-          const original = cfg.cwd;
-          const expanded = expandPlaceholders(original, plugin.pluginRoot, plugin.pluginData);
-          let anchor = plugin.pluginRoot;
-          let resolved: string;
-          if (original.startsWith("./")) resolved = path.resolve(plugin.pluginRoot, expanded.slice(2));
-          else if (original === "${PLUGIN_DATA}" || original.startsWith("${PLUGIN_DATA}/")) { anchor = plugin.pluginData; resolved = path.resolve(expanded); }
-          else resolved = path.resolve(expanded);
-          if (!isWithinRoot(resolved, anchor)) throw new Error(`cwd escapes ${anchor === plugin.pluginRoot ? "PLUGIN_ROOT" : "PLUGIN_DATA"}: ${original} -> ${resolved}`);
-          const real = await fsp.realpath(resolved).catch(() => resolved);
-          if (!isWithinRoot(real, anchor)) throw new Error(`cwd realpath escapes: ${real}`);
-          cwd = resolved;
+        } else {
+          const stdio = await this.expandedStdioConfig(key, cfg, plugin);
+          transport = new StdioClientTransport({ command: stdio.command, args: stdio.args, cwd: stdio.cwd, env: stdio.env, stderr: "pipe" });
+          transport.stderr?.on("data", (chunk: Buffer) => {
+            const message = chunk.toString("utf8").trim();
+            if (message) this.log.warn(`MCP ${serverId} stderr: ${message.slice(0, 2000)}`);
+          });
         }
-        const executable = cfg.command!.startsWith("./") ? path.resolve(plugin.pluginRoot, cfg.command!.slice(2)) : cfg.command!;
-        if (cfg.command!.startsWith("./") && !isWithinRoot(executable, plugin.pluginRoot)) throw new Error(`command escapes plugin root: ${cfg.command} -> ${executable}`);
-        const stdio = new StdioClientTransport({ command: executable, args, cwd, env, stderr: "pipe" });
-        stdio.stderr?.on("data", (chunk: Buffer) => {
-          const message = chunk.toString("utf8").trim();
-          if (message) this.log.warn(`MCP ${serverId} stderr: ${message.slice(0, 2000)}`);
-        });
-        transport = stdio;
-      }
 
-      const conn: Connected = { client, transport, tools: [], prompts: [], resources: [], resourceTemplates: [], expectedClose: false, provider };
-      this.installTransportHandlers(key, pluginId, serverId, conn);
-      await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, `connect ${serverId}`);
-      await withTimeout(this.refreshCatalog(conn), CONNECT_TIMEOUT_MS, `list MCP capabilities ${serverId}`);
+        connection = { kind: "local", client, transport, tools: [], prompts: [], resources: [], resourceTemplates: [], expectedClose: false, provider };
+        this.installTransportHandlers(key, pluginId, serverId, connection);
+        await withTimeout(
+          client.connect(transport, { signal, timeout: CONNECT_TIMEOUT_MS }),
+          CONNECT_TIMEOUT_MS,
+          `connect ${serverId}`,
+          () => { void client?.close().catch(() => {}); },
+        );
+        await withTimeout(
+          this.refreshCatalog(connection, signal),
+          CONNECT_TIMEOUT_MS,
+          `list MCP capabilities ${serverId}`,
+          () => this.connectControllers.get(key)?.abort(new Error(`list MCP capabilities ${serverId} timed out`)),
+        );
+      }
       if (provider) await provider.clearPending();
       if (this.closed) throw new Error("MCP gateway closed");
       if ((this.serverEpochs.get(key) ?? 0) !== epoch) throw new Error(`MCP connection cancelled for ${serverId}`);
-      this.conns.set(key, conn);
+      this.conns.set(key, connection);
+      this.cacheCatalog(key, this.serverRecord(pluginId, serverId).configJson, connection);
       this.oauthPending.delete(key);
       this.failures.delete(key);
       this.persistStatus(pluginId, serverId, "ready", null);
-      this.log.info(`MCP connected ${pluginId}:${serverId} (${conn.tools.length} tools, ${conn.prompts.length} prompts, ${conn.resources.length} resources)`);
+      this.log.info(`MCP connected ${pluginId}:${serverId} (${connection.tools.length} tools, ${connection.prompts.length} prompts, ${connection.resources.length} resources)`);
       await this.notifyChanged();
-      return conn;
+      return connection;
     } catch (error) {
       const message = errorText(error);
-      const cancelled = this.closed || (this.serverEpochs.get(key) ?? 0) !== epoch;
+      const cancelled = this.closed || signal.aborted || (this.serverEpochs.get(key) ?? 0) !== epoch;
       if (cancelled) {
-        if (client) try { await withTimeout(client.close(), CLOSE_TIMEOUT_MS, `close cancelled ${serverId}`); } catch {}
+        if (connection) try { await this.closeConnected(key, connection); } catch {}
+        else if (client) try { await withTimeout(client.close(), CLOSE_TIMEOUT_MS, `close cancelled ${serverId}`); } catch {}
         this.conns.delete(key);
         throw new Error(this.closed ? "MCP gateway closed" : `MCP connection cancelled for ${serverId}`);
       }
       const authorizationUrl = provider ? await provider.authorizationUrlValue() : undefined;
-      if (provider && transport && authorizationUrl) {
+      if (provider && client && transport && authorizationUrl) {
         this.oauthPending.set(key, { client: client!, transport: transport as StreamableHTTPClientTransport | SSEClientTransport, provider });
         this.failures.delete(key);
         this.persistStatus(pluginId, serverId, "needs-auth", "Authentication required");
@@ -758,18 +1051,52 @@ export class McpGateway implements McpRuntime {
       }
       this.failures.set(key, { message, at: Date.now() });
       this.persistStatus(pluginId, serverId, "error", message);
-      if (client) try { await withTimeout(client.close(), CLOSE_TIMEOUT_MS, `close ${serverId}`); } catch {}
+      if (connection) try { await this.closeConnected(key, connection); } catch {}
+      else if (client) try { await withTimeout(client.close(), CLOSE_TIMEOUT_MS, `close ${serverId}`); } catch {}
       this.conns.delete(key);
       throw new Error(message);
     }
   }
 
+  private async expandedStdioConfig(
+    key: string,
+    cfg: ServerConfig,
+    plugin: { pluginRoot: string; pluginData: string },
+  ): Promise<McpStdioConfig> {
+    if (!cfg.command) throw new Error("stdio MCP server is missing command");
+    const args = (cfg.args ?? []).map((item) => expandPlaceholders(item, plugin.pluginRoot, plugin.pluginData));
+    const envOverlay: Record<string, string> = {};
+    for (const [name, value] of Object.entries(cfg.env ?? {})) envOverlay[name] = expandPlaceholders(value, plugin.pluginRoot, plugin.pluginData);
+    const baseEnv: Record<string, string> = {};
+    for (const name of ["PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TMPDIR"]) if (process.env[name]) baseEnv[name] = process.env[name]!;
+    const env = { ...baseEnv, ...envOverlay, PLUGIN_ROOT: plugin.pluginRoot, PLUGIN_DATA: plugin.pluginData };
+    let cwd = plugin.pluginRoot;
+    if (cfg.cwd) {
+      const original = cfg.cwd;
+      const expanded = expandPlaceholders(original, plugin.pluginRoot, plugin.pluginData);
+      let anchor = plugin.pluginRoot;
+      let resolved: string;
+      if (original.startsWith("./")) resolved = path.resolve(plugin.pluginRoot, expanded.slice(2));
+      else if (original === "${PLUGIN_DATA}" || original.startsWith("${PLUGIN_DATA}/")) { anchor = plugin.pluginData; resolved = path.resolve(expanded); }
+      else resolved = path.resolve(expanded);
+      if (!isWithinRoot(resolved, anchor)) throw new Error(`cwd escapes ${anchor === plugin.pluginRoot ? "PLUGIN_ROOT" : "PLUGIN_DATA"}: ${original} -> ${resolved}`);
+      const real = await fsp.realpath(resolved).catch(() => resolved);
+      if (!isWithinRoot(real, anchor)) throw new Error(`cwd realpath escapes: ${real}`);
+      cwd = resolved;
+    }
+    const executable = cfg.command.startsWith("./") ? path.resolve(plugin.pluginRoot, cfg.command.slice(2)) : cfg.command;
+    if (cfg.command.startsWith("./") && !isWithinRoot(executable, plugin.pluginRoot)) throw new Error(`command escapes plugin root: ${cfg.command} -> ${executable}`);
+    return { key, command: executable, args, cwd, env };
+  }
+
   private installTransportHandlers(key: string, pluginId: string, serverId: string, conn: Connected): void {
+    if (!conn.transport) return;
     conn.transport.onerror = (error) => this.log.warn(`MCP ${serverId} error: ${errorText(error)}`);
     conn.transport.onclose = () => {
       if (conn.expectedClose || this.closed) return;
       if (this.conns.get(key)?.transport !== conn.transport) return;
       this.conns.delete(key);
+      this.invalidateCatalog(key);
       const message = `MCP transport closed unexpectedly for ${serverId}`;
       this.failures.set(key, { message, at: Date.now() });
       this.persistStatus(pluginId, serverId, "error", message);
@@ -786,12 +1113,22 @@ export class McpGateway implements McpRuntime {
     if (this.options.onRoots) requestClient.setRequestHandler("roots/list", () => this.options.onRoots!(pluginId, serverId));
   }
 
-  private async refreshCatalog(conn: Connected): Promise<void> {
+  private async refreshCatalog(conn: Connected, signal?: AbortSignal): Promise<void> {
+    if (conn.kind === "host") {
+      if (!conn.host || !conn.hostKey) throw new Error("isolated MCP connection is missing its host key");
+      const catalog = await conn.host.refresh(conn.hostKey, signal);
+      conn.tools = catalog.tools;
+      conn.prompts = catalog.prompts;
+      conn.resources = catalog.resources;
+      conn.resourceTemplates = catalog.resourceTemplates;
+      return;
+    }
+    const options = signal ? { signal, cacheMode: "refresh" as const } : { cacheMode: "refresh" as const };
     const [tools, prompts, resources, resourceTemplates] = await Promise.all([
-      conn.client.listTools(),
-      conn.client.listPrompts(),
-      conn.client.listResources(),
-      conn.client.listResourceTemplates(),
+      optionalMcpCall(() => conn.client!.listTools(undefined, options), { tools: [] }),
+      optionalMcpCall(() => conn.client!.listPrompts(undefined, options), { prompts: [] }),
+      optionalMcpCall(() => conn.client!.listResources(undefined, options), { resources: [] }),
+      optionalMcpCall(() => conn.client!.listResourceTemplates(undefined, options), { resourceTemplates: [] }),
     ]);
     conn.tools = tools.tools;
     conn.prompts = prompts.prompts;
@@ -803,6 +1140,21 @@ export class McpGateway implements McpRuntime {
     if (error) this.log.warn(`MCP ${key} ${kind} refresh failed: ${errorText(error)}`);
     const conn = this.conns.get(key);
     if (conn && !error) {
+      if (conn.kind === "host") {
+        if (conn.host && conn.hostKey) {
+          void conn.host.refresh(conn.hostKey).then((catalog) => {
+            if (this.conns.get(key) !== conn) return;
+            conn.tools = catalog.tools;
+            conn.prompts = catalog.prompts;
+            conn.resources = catalog.resources;
+            conn.resourceTemplates = catalog.resourceTemplates;
+            this.cacheCatalog(key, this.serverRecord(key.split(":", 2)[0]!, key.split(":", 2)[1]!).configJson, conn);
+            void this.notifyChanged();
+          }).catch((refreshError) => this.log.warn(`MCP ${key} isolated catalog refresh failed: ${errorText(refreshError)}`));
+        }
+        void this.notifyChanged();
+        return;
+      }
       if (kind === "tools" && Array.isArray(items)) conn.tools = items as Tool[];
       if (kind === "prompts" && Array.isArray(items)) conn.prompts = items as Prompt[];
       if (kind === "resources" && Array.isArray(items)) {
@@ -810,9 +1162,24 @@ export class McpGateway implements McpRuntime {
         // MCP uses one resources/list_changed notification for both the
         // resources and resource-template catalogs. Refresh the latter too;
         // the SDK's listChanged option exposes the former callback only.
-        void conn.client.listResourceTemplates().then((result) => {
-          if (this.conns.get(key) === conn) conn.resourceTemplates = result.resourceTemplates;
+        void optionalMcpCall(
+          () => conn.client!.listResourceTemplates(undefined, { cacheMode: "refresh" }),
+          { resourceTemplates: [] },
+        ).then((result) => {
+          if (this.conns.get(key) === conn) {
+            conn.resourceTemplates = result.resourceTemplates;
+            const [pluginId, serverId] = key.split(":", 2);
+            if (pluginId && serverId) {
+              const record = this.store.listMcpServers(pluginId).find((item) => item.serverId === serverId);
+              if (record) this.cacheCatalog(key, record.configJson, conn);
+            }
+          }
         }).catch((templateError) => this.log.warn(`MCP ${key} resource template refresh failed: ${errorText(templateError)}`));
+      }
+      const [pluginId, serverId] = key.split(":", 2);
+      if (pluginId && serverId) {
+        const record = this.store.listMcpServers(pluginId).find((item) => item.serverId === serverId);
+        if (record) this.cacheCatalog(key, record.configJson, conn);
       }
     }
     void this.notifyChanged();
@@ -887,7 +1254,7 @@ export class McpGateway implements McpRuntime {
     }
   }
 
-  private async cancelAuthentication(
+  private async cancelPendingAuthentication(
     pluginId: string,
     serverId: string,
     provider: McpOAuthProvider,
@@ -895,32 +1262,34 @@ export class McpGateway implements McpRuntime {
     message = "Authentication was not completed",
   ): Promise<void> {
     const key = keyOf(pluginId, serverId);
-    if (pending) this.oauthPending.delete(key);
     await provider.clearPending().catch((error) => this.log.warn(`clear MCP OAuth state ${key}: ${errorText(error)}`));
-    if (pending) {
-      try {
-        // Closing the client is not sufficient for every SDK transport to
-        // abort an in-flight token request. Close the transport explicitly so
-        // a timed-out OAuth exchange cannot keep the plugin worker alive.
-        await withTimeout(pending.transport.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth transport ${key}`);
-      } catch (error) {
-        this.log.warn(`close pending MCP OAuth transport ${key}: ${errorText(error)}`);
-      }
-      try {
-        await withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth client ${key}`);
-      } catch (error) {
-        this.log.warn(`close pending MCP OAuth client ${key}: ${errorText(error)}`);
-      }
-    }
+    if (pending) await this.closePendingAuth(key, pending);
     const record = this.serverRecord(pluginId, serverId);
     const status = record.enabled === 1 ? "needs-auth" : "disabled";
     this.persistStatus(pluginId, serverId, status, message);
     await this.notifyChanged();
   }
 
+  private async closePendingAuth(key: string, pending: PendingAuth): Promise<void> {
+    if (this.oauthPending.get(key) === pending) this.oauthPending.delete(key);
+    try {
+      // Closing the client is not sufficient for every SDK transport to
+      // abort an in-flight token request. Close the transport explicitly so
+      // a timed-out OAuth exchange cannot keep the plugin worker alive.
+      await withTimeout(pending.transport.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth transport ${key}`);
+    } catch (error) {
+      this.log.warn(`close pending MCP OAuth transport ${key}: ${errorText(error)}`);
+    }
+    try {
+      await withTimeout(pending.client.close(), CLOSE_TIMEOUT_MS, `close pending MCP OAuth client ${key}`);
+    } catch (error) {
+      this.log.warn(`close pending MCP OAuth client ${key}: ${errorText(error)}`);
+    }
+  }
+
   private catalogTool(record: ReturnType<McpGateway["serverRecord"]>, cfg: ServerConfig, pluginName: string, tool: Tool): CatalogTool {
     const raw = tool as unknown as JsonRecord;
-    return {
+    return omitUndefined({
       opaqueId: exposedId("tool", record.pluginId, record.serverId, tool.name),
       pluginId: record.pluginId,
       pluginName,
@@ -935,7 +1304,7 @@ export class McpGateway implements McpRuntime {
       icons: optionalRecordArray(raw.icons),
       _meta: optionalRecord(raw._meta),
       status: "ready",
-    };
+    });
   }
 
   private toolError(record: ReturnType<McpGateway["serverRecord"]>, cfg: ServerConfig, error: unknown): CatalogTool {
@@ -956,7 +1325,7 @@ export class McpGateway implements McpRuntime {
 
   private catalogPrompt(record: ReturnType<McpGateway["serverRecord"]>, cfg: ServerConfig, pluginName: string, prompt: Prompt): CatalogPrompt {
     const raw = prompt as unknown as JsonRecord;
-    return {
+    return omitUndefined({
       opaqueId: exposedId("prompt", record.pluginId, record.serverId, prompt.name),
       pluginId: record.pluginId,
       pluginName,
@@ -969,12 +1338,12 @@ export class McpGateway implements McpRuntime {
       icons: optionalRecordArray(raw.icons),
       _meta: optionalRecord(raw._meta),
       status: "ready",
-    };
+    });
   }
 
   private catalogResource(record: ReturnType<McpGateway["serverRecord"]>, cfg: ServerConfig, pluginName: string, resource: Resource): CatalogResource {
     const raw = resource as unknown as JsonRecord;
-    return {
+    return omitUndefined({
       opaqueId: exposedId("resource", record.pluginId, record.serverId, resource.uri),
       pluginId: record.pluginId,
       pluginName,
@@ -988,12 +1357,12 @@ export class McpGateway implements McpRuntime {
       icons: optionalRecordArray(raw.icons),
       _meta: optionalRecord(raw._meta),
       status: "ready",
-    };
+    });
   }
 
   private catalogResourceTemplate(record: ReturnType<McpGateway["serverRecord"]>, cfg: ServerConfig, pluginName: string, template: ResourceTemplateType): CatalogResourceTemplate {
     const raw = template as unknown as JsonRecord;
-    return {
+    return omitUndefined({
       opaqueId: exposedId("resource-template", record.pluginId, record.serverId, template.uriTemplate),
       pluginId: record.pluginId,
       pluginName,
@@ -1007,6 +1376,6 @@ export class McpGateway implements McpRuntime {
       icons: optionalRecordArray(raw.icons),
       _meta: optionalRecord(raw._meta),
       status: "ready",
-    };
+    });
   }
 }
