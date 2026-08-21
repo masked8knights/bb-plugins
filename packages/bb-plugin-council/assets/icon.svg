@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <!-- Council glyph: a chamber pediment over three columns (rendered by bb
+       as a CSS mask, so the fill color here is ignored and the shape
+       inherits the surrounding text color). -->
+  <path d="M12 1.6 20.9 7H3.1L12 1.6ZM5 9h2.4v8H5V9Zm5.8 0h2.4v8h-2.4V9Zm5.8 0H19v8h-2.4V9ZM3 18.7h18v2.7H3v-2.7Z"/>
+</svg>

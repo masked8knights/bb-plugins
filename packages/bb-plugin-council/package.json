@@ -10,7 +10,7 @@
     "name": "Council",
     "description": "Convene a council of advisor agents: independent review, discussion rounds, and a verdict with dissent.",
     "branding": {
-      "icon": "Users"
+      "icon": "./assets/icon.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

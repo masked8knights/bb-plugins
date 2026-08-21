@@ -749,7 +749,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "council",
     title: "Council",
-    icon: "Users",
+    icon: "Landmark",
     path: "council",
     component: CouncilPage,
   });
