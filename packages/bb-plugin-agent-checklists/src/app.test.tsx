@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@bb/plugin-sdk/testing/app";
 
@@ -288,6 +289,46 @@ describe("Checklists app", () => {
       input: { expectedUpdatedAt: number };
     };
     expect(saveCall.input.expectedUpdatedAt).toBe(template.updatedAt);
+  });
+
+  it("confirms a save and returns to the Checklist collection", async () => {
+    const successToast = vi.spyOn(toast, "success");
+    const slot = renderSlot(
+      app.navPanels[0]!,
+      { subPath: "template/agent-release" },
+      {
+        rpc: {
+          listTemplates: () => ({ templates: [template] }),
+          saveTemplate: () => ({ ...template, updatedAt: template.updatedAt + 1 }),
+        },
+      },
+    );
+
+    await slot.findByRole("button", { name: "Save Checklist" });
+    fireEvent.click(slot.getByRole("button", { name: "Save Checklist" }));
+
+    await waitFor(() =>
+      expect(slot.inspection.navigateCalls).toContainEqual({
+        method: "toPluginPanel",
+        path: "checklists",
+        options: { subPath: "", replace: true },
+      }),
+    );
+    expect(successToast).toHaveBeenCalledWith("Checklist saved");
+  });
+
+  it("keeps the Checklist editor in a scrollable panel body", async () => {
+    const slot = renderSlot(
+      app.navPanels[0]!,
+      { subPath: "template/agent-release" },
+      { rpc: { listTemplates: () => ({ templates: [template] }) } },
+    );
+
+    await slot.findByRole("heading", { name: "Edit Checklist" });
+    const editor = slot.getByTestId("checklist-editor-scroll");
+    expect(editor.className).toContain("min-h-0");
+    expect(editor.className).toContain("flex-1");
+    expect(editor.className).toContain("overflow-y-auto");
   });
 
   it("uses the latest revision for a second save in the same editor", async () => {

@@ -412,7 +412,10 @@ function TemplateEditor({
   };
 
   return (
-    <div className="min-h-full bg-background p-4 md:p-6">
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-background p-4 md:p-6"
+      data-testid="checklist-editor-scroll"
+    >
       <div className="mx-auto w-full max-w-4xl space-y-6">
         <button
           type="button"
@@ -755,10 +758,8 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
       const withoutSaved = current.filter((item) => item.id !== template.id);
       return [...withoutSaved, template].sort((left, right) => left.name.localeCompare(right.name));
     });
-    navigate.toPluginPanel("checklists", {
-      subPath: `template/${encodeURIComponent(template.id)}`,
-      replace: true,
-    });
+    toast.success("Checklist saved");
+    navigate.toPluginPanel("checklists", { subPath: "", replace: true });
   };
 
   const deleteTemplate = async (template: ChecklistTemplate) => {
@@ -814,7 +815,7 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
     const template = templates.find((item) => item.id === route.templateId) ?? null;
     if (!template) {
       return (
-        <div className="min-h-full bg-background p-4 md:p-6">
+        <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-background p-4 md:p-6">
           <div className="mx-auto w-full max-w-3xl space-y-4">
             <ErrorNotice message="Checklist not found." />
             <button
@@ -832,7 +833,7 @@ function TemplateCatalog({ subPath }: PluginNavPanelProps) {
   }
 
   return (
-    <div className="min-h-full bg-background p-4 md:p-6">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain bg-background p-4 md:p-6">
       <div className="mx-auto w-full max-w-4xl space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
