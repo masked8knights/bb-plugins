@@ -28,6 +28,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
 - [`bb-plugin-traces`](packages/bb-plugin-traces/) — index local Codex, Claude,
   Pi, OMP, and DeepSeek Harness sessions in a private, searchable trajectory
   explorer.
+- [`bb-plugin-copy-session-id`](packages/bb-plugin-copy-session-id/) — add a
+  Copy session ID action to thread context menus in the left sidebar.
 
 ## Development
 
