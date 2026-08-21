@@ -117,6 +117,10 @@ export const rpcContract = defineRpcContract({
     input: z.object({ id: z.string() }),
     output: sessionDetailDto,
   },
+  deleteSession: {
+    input: z.object({ id: z.string() }),
+    output: z.null(),
+  },
   startConversation: {
     input: z.object({
       proposal: z.string().min(1),

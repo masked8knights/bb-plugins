@@ -513,6 +513,8 @@ function SessionsList(props: { refreshKey: number }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const refresh = useCallback(async () => {
     const result = await rpc.call("listSessions", null);
@@ -522,6 +524,17 @@ function SessionsList(props: { refreshKey: number }) {
   useEffect(() => {
     void refresh();
   }, [refresh, props.refreshKey]);
+
+  async function remove(sessionId: string) {
+    setDeleting(true);
+    try {
+      await rpc.call("deleteSession", { id: sessionId });
+      setConfirmingDelete(null);
+      await refresh();
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   return (
     <div className="space-y-3">
@@ -535,28 +548,53 @@ function SessionsList(props: { refreshKey: number }) {
         </Card>
       ) : (
         sessions.map((session) => (
-          <button
+          <div
             key={session.id}
-            className="block w-full rounded-lg border border-border p-3 text-left transition-colors hover:bg-accent"
-            onClick={() =>
-              navigate.toPluginPanel("council", { subPath: `session/${session.id}` })
-            }
+            className="flex w-full items-stretch gap-2 rounded-lg border border-border transition-colors hover:bg-accent"
           >
-            <div className="flex items-center justify-between gap-2">
-              <StatusPill status={session.status} />
-              <span className="text-xs text-muted-foreground">
-                {formatTime(session.createdAtMs)}
-              </span>
+            <button
+              className="min-w-0 flex-1 p-3 text-left"
+              onClick={() =>
+                navigate.toPluginPanel("council", { subPath: `session/${session.id}` })
+              }
+            >
+              <div className="flex items-center justify-between gap-2">
+                <StatusPill status={session.status} />
+                <span className="text-xs text-muted-foreground">
+                  {formatTime(session.createdAtMs)}
+                </span>
+              </div>
+              <p className="mt-2 line-clamp-2 text-sm">{session.proposalExcerpt}</p>
+              <div className="mt-2">
+                <TallyChips
+                  support={session.support}
+                  oppose={session.oppose}
+                  abstain={session.abstain}
+                />
+              </div>
+            </button>
+            <div className="flex items-center pr-2">
+              {confirmingDelete === session.id ? (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={deleting}
+                  onClick={() => void remove(session.id)}
+                >
+                  {deleting ? "…" : "Confirm delete"}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={`Delete session ${session.id}`}
+                  onClick={() => setConfirmingDelete(session.id)}
+                >
+                  Delete
+                </Button>
+              )}
             </div>
-            <p className="mt-2 line-clamp-2 text-sm">{session.proposalExcerpt}</p>
-            <div className="mt-2">
-              <TallyChips
-                support={session.support}
-                oppose={session.oppose}
-                abstain={session.abstain}
-              />
-            </div>
-          </button>
+          </div>
         ))
       )}
     </div>

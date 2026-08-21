@@ -353,6 +353,12 @@ export default async function plugin(bb: BbPluginApi) {
         .listSessions(100)
         .map((session) => sessionSummary(session, store.listRoster(session.id))),
     }),
+    deleteSession: (input) => {
+      if (!store.deleteSession(input.id)) {
+        throw new Error("Session not found.");
+      }
+      return null;
+    },
     getSession: (input) => {
       const session = store.getSession(input.id);
       if (!session) throw new Error("Session not found.");
@@ -464,6 +470,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb council session <id>",
       },
       {
+        name: "delete",
+        summary: "Delete one council session",
+        usage: "bb council delete <id>",
+      },
+      {
         name: "convene",
         summary: "Convene the council on a proposal (blocking)",
         usage: 'bb council convene "<proposal>"',
@@ -496,6 +507,12 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (session.verdict) parts.push(`\n== Final report ==\n${session.verdict}`);
         return { exitCode: 0, stdout: parts.join("\n") };
+      }
+      if (sub === "delete" && rest[0]) {
+        if (!store.deleteSession(rest[0])) {
+          return { exitCode: 1, stderr: "Session not found." };
+        }
+        return { exitCode: 0, stdout: `Deleted session ${rest[0]}.` };
       }
       if (sub === "convene") {
         const proposal = rest.join(" ").trim();

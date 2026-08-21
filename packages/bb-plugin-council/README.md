@@ -48,10 +48,13 @@ From a terminal or thread shell:
 ```
 bb council sessions
 bb council session <id>
+bb council delete <id>
 bb council convene "<proposal>"
 ```
 
 `bb council convene` blocks and prints its session id with the report. Cancel it and the session is recorded as cancelled; member threads are stopped either way.
+
+Deleting a session removes its transcript, turns, and roster permanently — from the panel (Delete button on each session card) or via `bb council delete`.
 
 ## Settings
 

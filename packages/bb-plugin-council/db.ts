@@ -305,6 +305,15 @@ export class CouncilStore {
       .run(verdict, dissent, JSON.stringify(tally), Date.now(), id);
   }
 
+  deleteSession(id: string): boolean {
+    const session = this.getSession(id);
+    if (!session) return false;
+    this.db.prepare("DELETE FROM turns WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM session_members WHERE session_id = ?").run(id);
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    return true;
+  }
+
   addTurn(input: {
     sessionId: string;
     phase: TurnRow["phase"];
