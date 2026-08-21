@@ -1,5 +1,7 @@
 # Agent Plugins for BB
 
+> Install from the [BB Community marketplace](https://github.com/get-bb/marketplace/pull/84) (entry pending review).
+
 Install [Agent Plugins](https://agent-plugins.org) once in BB and use them everywhere — skills become `/skill` commands and MCP capabilities flow to Codex and other BB providers through one canonical bridge.
 
 This is the Agent Plugins/spec-plugin integration for BB. It is not a Claude marketplace plugin and does not publish to, install from, or emulate Claude's marketplace.

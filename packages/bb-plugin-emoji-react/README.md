@@ -1,5 +1,7 @@
 # bb-plugin-emoji-react
 
+> Install from the [BB Community marketplace](https://github.com/get-bb/marketplace/blob/main/entries/emoji-react.json).
+
 Emoji reactions in the assistant-message text-selection menu **and the
 per-message action bar** — a port of NeonPilot's `system-reply-actions`
 extension to bb.

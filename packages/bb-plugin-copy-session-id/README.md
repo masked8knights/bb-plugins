@@ -1,5 +1,7 @@
 # Copy Session ID
 
+> Install from the [BB Community marketplace](https://github.com/get-bb/marketplace/pull/88) (entry pending review).
+
 This plugin adds **Copy session ID** to the context menu for thread rows in
 BB's left sidebar. It copies the row's BB thread/session identifier to the
 clipboard and shows a success or error toast.

@@ -1,5 +1,7 @@
 # Checklists
 
+> Install from the [BB Community marketplace](https://github.com/get-bb/marketplace/blob/main/entries/agent-checklists.json).
+
 The Checklists plugin gives a BB thread a persisted, structured set of steps for
 the agent to follow. The agent reads and updates progress through native tools;
 the user gets a compact status summary and a read-only detail view.

@@ -1,5 +1,7 @@
 # Traces
 
+> Install from the [BB Community marketplace](https://github.com/get-bb/marketplace/blob/main/entries/traces.json).
+
 Traces is a local-only session and trajectory explorer for BB. It builds a
 durable SQLite index over session files already written by local agent
 harnesses.
