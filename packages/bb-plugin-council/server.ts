@@ -284,18 +284,19 @@ export default async function plugin(bb: BbPluginApi) {
     projectId?: string | null;
     originThreadId?: string | null;
     signal?: AbortSignal;
-  }): Promise<string> => {
+  }): Promise<{ sessionId: string; report: string }> => {
     const sessionId = await startSession(input);
     const session = store.getSession(sessionId);
     if (!session) throw new Error("Council session disappeared.");
     const members = enabledMembers();
     const projectId = await resolveProjectId(bb, session.projectId);
-    return engine.runSession({
+    const report = await engine.runSession({
       session,
       members,
       projectId,
       signal: input.signal ?? new AbortController().signal,
     });
+    return { sessionId, report };
   };
 
   bb.agents.registerTool({
@@ -320,7 +321,7 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute(params, ctx) {
       try {
-        const report = await runToCompletion({
+        const { report } = await runToCompletion({
           proposal: params.proposal,
           context: params.context,
           projectId: ctx.projectId,
@@ -510,12 +511,9 @@ export default async function plugin(bb: BbPluginApi) {
         ];
         if (session.error) parts.push(`Error: ${session.error}`);
         for (const turn of store.listTurns(session.id)) {
+          if (turn.phase === "verdict") continue;
           const where =
-            turn.phase === "consideration"
-              ? "initial review"
-              : turn.phase === "discussion"
-                ? `round ${turn.round}`
-                : "verdict";
+            turn.phase === "consideration" ? "initial review" : `round ${turn.round}`;
           parts.push(`\n== ${turn.memberName} (${where}) [${turn.stance ?? "-"}] ==\n${turn.comment}`);
         }
         if (session.verdict) parts.push(`\n== Final report ==\n${session.verdict}`);
@@ -524,23 +522,28 @@ export default async function plugin(bb: BbPluginApi) {
       if (sub === "convene") {
         const proposal = rest.join(" ").trim();
         if (!proposal) {
-          return { exitCode: 1, stderr: "Usage: bb council convene \"<proposal>\"" };
+          return {
+            exitCode: 1,
+            stderr: 'Usage: bb council convene "<proposal>"',
+          };
         }
         try {
-          const report = await runToCompletion({
+          const { sessionId, report } = await runToCompletion({
             proposal,
             projectId: ctx.projectId ?? null,
             originThreadId: ctx.threadId ?? null,
             signal: ctx.signal,
           });
-          return { exitCode: 0, stdout: report };
+          return { exitCode: 0, stdout: `Session ${sessionId}\n\n${report}` };
         } catch (error) {
           return { exitCode: 1, stderr: String(error) };
         }
       }
+      const usage =
+        'Usage: bb council sessions | bb council session <id> | bb council convene "<proposal>"';
       return {
         exitCode: 1,
-        stderr: "Usage: bb council sessions | bb council session <id> | bb council convene \"<proposal>\"",
+        stderr: sub ? `Unknown council command: ${sub}\n${usage}` : usage,
       };
     },
   });
