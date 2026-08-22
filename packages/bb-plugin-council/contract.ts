@@ -126,8 +126,17 @@ export const rpcContract = defineRpcContract({
       proposal: z.string().min(1),
       context: z.string().optional(),
       projectId: z.string().optional(),
+      preset: z.string().optional(),
     }),
     output: z.object({ threadId: z.string() }),
+  },
+  listPresets: {
+    input: z.null(),
+    output: z.object({
+      presets: z.array(
+        z.object({ name: z.string(), members: z.array(z.string()) }),
+      ),
+    }),
   },
   listProviders: {
     input: z.null(),

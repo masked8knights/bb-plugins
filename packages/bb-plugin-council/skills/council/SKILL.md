@@ -25,6 +25,8 @@ Call `council_deliberate` with:
 
 - `proposal` — the complete proposal, plan, or question under review.
 - `context` — optional supporting material: constraints, diffs, background.
+- `preset` — optional name of a saved council preset (`bb council presets`) to
+  convene a specific panel instead of all enabled members.
 
 The call blocks for one or more minutes. Members research the workspace,
 debate with no preset round count, and each registers a final vote through

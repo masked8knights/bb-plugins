@@ -30,6 +30,19 @@ Members live in the plugin database and are managed in the panel. Each has:
 
 Default members: **Grug** (chief; grugbrain.dev pragmatism — complexity is the enemy, 80/20 solutions, Chesterton's fence), **Architect** (systems thinking, boundaries, trade-offs), **Designer** (user experience, states nobody designed, accessibility). They are seeded once; deleting them is permanent.
 
+## Presets
+
+A preset is a named subset of members for scoping a single convene — a small "eng" panel for code questions, say, while the full council stays available elsewhere. Presets never touch global enable flags; each session snapshots whoever was actually invited, so transcripts stay coherent.
+
+```
+bb council presets
+bb council preset-add eng Grug Architect
+bb council preset-delete eng
+bb council convene --preset eng "<proposal>"
+```
+
+Members are matched by name or id at save time. Convening with an unknown or empty preset fails loudly rather than silently inviting the wrong panel. The panel's "Start a council conversation" dialog and the `council_deliberate` tool accept the same preset names.
+
 Agents (and you, from any terminal) manage members through the CLI:
 
 ```

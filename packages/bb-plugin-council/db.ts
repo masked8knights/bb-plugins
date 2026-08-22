@@ -51,6 +51,13 @@ export type RosterRow = {
   status: "ok" | "recused";
 };
 
+export type PresetRow = {
+  id: string;
+  name: string;
+  memberIds: string[];
+  createdAtMs: number;
+};
+
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS members (
     id TEXT PRIMARY KEY,
@@ -106,6 +113,12 @@ export const migrations = [
     stance TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (session_id, member_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    member_ids TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
   )`,
 ];
 
@@ -443,5 +456,48 @@ export class CouncilStore {
       .get(threadId) as
       | { sessionId: string; memberId: string; memberName: string }
       | undefined;
+  }
+
+  listPresets(): PresetRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, name, member_ids AS memberIdsJson, created_at_ms AS createdAtMs
+         FROM presets ORDER BY name ASC`,
+      )
+      .all() as { id: string; name: string; memberIdsJson: string; createdAtMs: number }[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      memberIds: JSON.parse(row.memberIdsJson) as string[],
+      createdAtMs: row.createdAtMs,
+    }));
+  }
+
+  getPresetByName(name: string): PresetRow | undefined {
+    return this.listPresets().find(
+      (preset) => preset.name.toLowerCase() === name.toLowerCase(),
+    );
+  }
+
+  savePreset(name: string, memberIds: string[]): void {
+    const existing = this.getPresetByName(name);
+    if (existing) {
+      this.db
+        .prepare("UPDATE presets SET member_ids = ? WHERE id = ?")
+        .run(JSON.stringify(memberIds), existing.id);
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO presets (id, name, member_ids, created_at_ms) VALUES (?, ?, ?, ?)",
+      )
+      .run(randomUUID(), name, JSON.stringify(memberIds), Date.now());
+  }
+
+  deletePreset(name: string): boolean {
+    const existing = this.getPresetByName(name);
+    if (!existing) return false;
+    this.db.prepare("DELETE FROM presets WHERE id = ?").run(existing.id);
+    return true;
   }
 }

@@ -430,8 +430,18 @@ function StartConversationButton(props: { onStarted: () => void }) {
   const [open, setOpen] = useState(false);
   const [proposal, setProposal] = useState("");
   const [context, setContext] = useState("");
+  const [preset, setPreset] = useState("");
+  const [presets, setPresets] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    rpc
+      .call("listPresets", null)
+      .then((result) => setPresets(result.presets.map((p) => p.name)))
+      .catch(() => setPresets([]));
+  }, [open, rpc]);
 
   async function submit() {
     if (!proposal.trim()) {
@@ -445,10 +455,12 @@ function StartConversationButton(props: { onStarted: () => void }) {
         proposal: proposal.trim(),
         context: context.trim() || undefined,
         projectId: bbContext.projectId ?? undefined,
+        preset: preset.trim() || undefined,
       });
       setOpen(false);
       setProposal("");
       setContext("");
+      setPreset("");
       props.onStarted();
       navigate.toThread(result.threadId);
     } catch (cause) {
@@ -486,6 +498,18 @@ function StartConversationButton(props: { onStarted: () => void }) {
               onChange={(event) => setContext(event.target.value)}
               placeholder="Optional context…"
             />
+            <input
+              className={inputClass}
+              value={preset}
+              onChange={(event) => setPreset(event.target.value)}
+              placeholder="Optional council preset…"
+              list="council-preset-options"
+            />
+            <datalist id="council-preset-options">
+              {presets.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
             {error ? (
               <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
             ) : null}

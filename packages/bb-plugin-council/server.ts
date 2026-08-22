@@ -182,9 +182,16 @@ function nullableFlag(
   }
   return { changed: true, value };
 }
-
-function conversationPrompt(proposal: string, context?: string): string {  const contextBlock = context
+function conversationPrompt(
+  proposal: string,
+  context?: string,
+  preset?: string,
+): string {
+  const contextBlock = context
     ? `\nSupporting context:\n\n<context>\n${context}\n</context>\n`
+    : "";
+  const presetLine = preset
+    ? `Convene the "${preset}" council preset — pass preset: "${preset}" to the tool. `
     : "";
   return [
     "Please present this proposal to the Council using its council_deliberate tool.",
@@ -193,7 +200,7 @@ function conversationPrompt(proposal: string, context?: string): string {  const
     proposal,
     "</proposal>",
     contextBlock,
-    `Call council_deliberate exactly once with the full proposal text${
+    `${presetLine}Call council_deliberate exactly once with the full proposal text${
       context ? " and the supporting context" : ""
     }. The tool blocks for one or more minutes while the members deliberate — let it run rather than retrying.`,
     "",
@@ -270,13 +277,37 @@ export default async function plugin(bb: BbPluginApi) {
         a.isChief === b.isChief ? 0 : a.isChief === 1 ? -1 : 1,
       );
 
+  // A preset scopes one convene to a named subset of members. Global
+  // enable flags are never mutated; the session roster snapshots whoever
+  // is actually invited.
+  const resolveMembers = (preset?: string | null): MemberRow[] => {
+    if (!preset) return enabledMembers();
+    const saved = store.getPresetByName(preset);
+    if (!saved) {
+      const known = store.listPresets().map((p) => p.name);
+      throw new Error(
+        `Unknown council preset "${preset}".${known.length ? ` Known presets: ${known.join(", ")}.` : " No presets are defined — create one with bb council preset-add."}`,
+      );
+    }
+    const members = enabledMembers().filter((member) =>
+      saved.memberIds.includes(member.id),
+    );
+    if (members.length === 0) {
+      throw new Error(
+        `Preset "${preset}" matches no currently enabled members. Re-save it with bb council preset-add.`,
+      );
+    }
+    return members;
+  };
+
   const startSession = async (input: {
     proposal: string;
     context?: string;
     projectId?: string | null;
     originThreadId?: string | null;
+    preset?: string | null;
   }): Promise<string> => {
-    const members = enabledMembers();
+    const members = resolveMembers(input.preset);
     if (members.length === 0) {
       throw new Error(
         "The council has no enabled members. Add members in the Council panel.",
@@ -305,12 +336,13 @@ export default async function plugin(bb: BbPluginApi) {
     context?: string;
     projectId?: string | null;
     originThreadId?: string | null;
+    preset?: string | null;
     signal?: AbortSignal;
   }): Promise<{ sessionId: string; report: string }> => {
     const sessionId = await startSession(input);
     const session = store.getSession(sessionId);
     if (!session) throw new Error("Council session disappeared.");
-    const members = enabledMembers();
+    const members = resolveMembers(input.preset);
     const projectId = await resolveProjectId(bb, session.projectId);
     const report = await engine.runSession({
       session,
@@ -340,6 +372,12 @@ export default async function plugin(bb: BbPluginApi) {
         .string()
         .optional()
         .describe("Optional supporting material: diffs, constraints, background."),
+      preset: z
+        .string()
+        .optional()
+        .describe(
+          "Name of a saved council preset to convene a specific panel. Omit for the default council (all enabled members).",
+        ),
     }),
     async execute(params, ctx) {
       try {
@@ -348,6 +386,7 @@ export default async function plugin(bb: BbPluginApi) {
           context: params.context,
           projectId: ctx.projectId,
           originThreadId: ctx.threadId,
+          preset: params.preset ?? null,
           signal: ctx.signal,
         });
         return `${report}\n\n---\nCouncil session recorded. Full transcripts are available in the Council panel.`;
@@ -518,7 +557,7 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
     startConversation: async (input) => {
-      if (enabledMembers().length === 0) {
+      if (resolveMembers(input.preset ?? null).length === 0) {
         throw new Error(
           "The council has no enabled members. Add members in the Council panel first.",
         );
@@ -527,11 +566,19 @@ export default async function plugin(bb: BbPluginApi) {
       const thread = await bb.sdk.threads.spawn({
         projectId,
         environment: { type: "project-default" },
-        prompt: conversationPrompt(input.proposal, input.context),
+        prompt: conversationPrompt(input.proposal, input.context, input.preset),
         title: `Council: ${excerpt(input.proposal, 60)}`,
       });
       return { threadId: thread.id };
     },
+    listPresets: () => ({
+      presets: store.listPresets().map((preset) => ({
+        name: preset.name,
+        members: preset.memberIds
+          .map((id) => store.getMember(id)?.name)
+          .filter((name): name is string => Boolean(name)),
+      })),
+    }),
     listProviders: async () => {
       const providers = await bb.sdk.providers.list();
       return {
@@ -597,9 +644,25 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb council member-delete <id>",
       },
       {
+        name: "presets",
+        summary: "List saved council presets",
+        usage: "bb council presets",
+      },
+      {
+        name: "preset-add",
+        summary: "Create or update a council preset from member names or ids",
+        usage: "bb council preset-add <name> <member...>",
+      },
+      {
+        name: "preset-delete",
+        summary: "Delete a council preset",
+        usage: "bb council preset-delete <name>",
+      },
+      {
         name: "convene",
-        summary: "Convene the council on a proposal (blocking)",
-        usage: 'bb council convene "<proposal>"',
+        summary:
+          "Convene the council on a proposal (blocking; --preset <name> scopes the panel)",
+        usage: 'bb council convene [--preset <name>] "<proposal>"',
       },
     ],
     async run(argv, ctx) {
@@ -754,12 +817,72 @@ export default async function plugin(bb: BbPluginApi) {
         store.deleteMember(rest[0]);
         return { exitCode: 0, stdout: `Deleted member ${member.name}.` };
       }
+      if (sub === "presets") {
+        const presets = store.listPresets();
+        if (presets.length === 0) {
+          return { exitCode: 0, stdout: "No presets saved. Create one: bb council preset-add <name> <member...>" };
+        }
+        const lines = presets.map((preset) => {
+          const names = preset.memberIds
+            .map((id) => store.getMember(id)?.name ?? "(deleted)")
+            .join(", ");
+          return `${preset.name.padEnd(16)} ${names}`;
+        });
+        return { exitCode: 0, stdout: lines.join("\n") };
+      }
+      if (sub === "preset-add") {
+        const { positional } = parseCliFlags(rest);
+        const [name, ...wanted] = positional;
+        if (!name || wanted.length === 0) {
+          return {
+            exitCode: 1,
+            stderr: "Usage: bb council preset-add <name> <memberNameOrId...>",
+          };
+        }
+        if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) {
+          return { exitCode: 1, stderr: "Preset names use letters, digits, and dashes." };
+        }
+        const all = store.listMembers();
+        const resolved: string[] = [];
+        const missing: string[] = [];
+        for (const want of wanted) {
+          const match =
+            all.find((member) => member.id === want) ??
+            all.find(
+              (member) =>
+                member.name.toLowerCase() === want.toLowerCase(),
+            );
+          if (match) resolved.push(match.id);
+          else missing.push(want);
+        }
+        if (missing.length > 0) {
+          return {
+            exitCode: 1,
+            stderr: `Unknown members: ${missing.join(", ")}. Known: ${all.map((m) => m.name).join(", ")}.`,
+          };
+        }
+        store.savePreset(name, [...new Set(resolved)]);
+        const names = resolved
+          .map((id) => all.find((m) => m.id === id)?.name)
+          .filter(Boolean)
+          .join(", ");
+        return { exitCode: 0, stdout: `Saved preset "${name}": ${names}.` };
+      }
+      if (sub === "preset-delete" && rest[0]) {
+        if (!store.deletePreset(rest[0])) {
+          return { exitCode: 1, stderr: "Preset not found." };
+        }
+        return { exitCode: 0, stdout: `Deleted preset ${rest[0]}.` };
+      }
       if (sub === "convene") {
-        const proposal = rest.join(" ").trim();
+        const { positional, flags } = parseCliFlags(rest);
+        const proposal = positional.join(" ").trim();
+        const preset = optionalString(flags, "preset") ?? null;
         if (!proposal) {
           return {
             exitCode: 1,
-            stderr: 'Usage: bb council convene "<proposal>"',
+            stderr:
+              'Usage: bb council convene [--preset <name>] "<proposal>"',
           };
         }
         try {
@@ -767,6 +890,7 @@ export default async function plugin(bb: BbPluginApi) {
             proposal,
             projectId: ctx.projectId ?? null,
             originThreadId: ctx.threadId ?? null,
+            preset,
             signal: ctx.signal,
           });
           return { exitCode: 0, stdout: `Session ${sessionId}\n\n${report}` };
