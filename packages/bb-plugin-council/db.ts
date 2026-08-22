@@ -58,6 +58,18 @@ export type PresetRow = {
   createdAtMs: number;
 };
 
+export type EvidenceRow = {
+  id: string;
+  sessionId: string;
+  memberId: string;
+  memberName: string;
+  kind: string;
+  title: string;
+  result: string | null;
+  seq: number;
+  createdAtMs: number;
+};
+
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS members (
     id TEXT PRIMARY KEY,
@@ -120,6 +132,18 @@ export const migrations = [
     member_ids TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS session_evidence (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    member_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    result TEXT,
+    seq INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_evidence_session ON session_evidence(session_id, seq)`,
 ];
 
 export class CouncilStore {
@@ -499,5 +523,51 @@ export class CouncilStore {
     if (!existing) return false;
     this.db.prepare("DELETE FROM presets WHERE id = ?").run(existing.id);
     return true;
+  }
+
+  addEvidence(
+    sessionId: string,
+    memberId: string,
+    memberName: string,
+    items: { kind: string; title: string; result: string | null }[],
+  ): void {
+    if (items.length === 0) return;
+    const seqRow = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM session_evidence WHERE session_id = ?",
+      )
+      .get(sessionId) as { next: number };
+    const insert = this.db.prepare(
+      `INSERT INTO session_evidence (id, session_id, member_id, member_name, kind, title, result, seq, created_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    let seq = seqRow.next;
+    for (const item of items) {
+      insert.run(
+        randomUUID(),
+        sessionId,
+        memberId,
+        memberName,
+        item.kind,
+        item.title,
+        item.result,
+        seq++,
+        Date.now(),
+      );
+    }
+  }
+
+  listEvidence(sessionId: string): EvidenceRow[] {
+    return this.db
+      .prepare(
+        `SELECT id,
+          session_id AS sessionId,
+          member_id AS memberId,
+          member_name AS memberName,
+          kind, title, result, seq,
+          created_at_ms AS createdAtMs
+         FROM session_evidence WHERE session_id = ? ORDER BY seq ASC`,
+      )
+      .all(sessionId) as EvidenceRow[];
   }
 }

@@ -76,6 +76,14 @@ type SessionDetailDto = {
   completedAtMs: number | null;
   turns: TurnDto[];
   roster: { memberId: string; memberName: string; status: "ok" | "recused" }[];
+  votes: { memberId: string; memberName: string; stance: "support" | "oppose" | "abstain" }[];
+  evidence: {
+    memberId: string;
+    memberName: string;
+    kind: string;
+    title: string;
+    result: string | null;
+  }[];
 };
 
 type ProviderDto = { id: string; displayName: string; available: boolean };
@@ -625,11 +633,198 @@ function SessionsList(props: { refreshKey: number }) {
   );
 }
 
+type TabId = "overview" | "members" | "materials";
+
+function duration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+const STANCE_COLOR: Record<string, string> = {
+  support: "text-emerald-500",
+  oppose: "text-red-400",
+  abstain: "text-amber-400",
+};
+
+function StanceDots({ stance, final }: { stance: string | null; final?: boolean }) {
+  if (!stance) return <span className="text-xs text-muted-foreground">—</span>;
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${STANCE_COLOR[stance] ?? ""}`}>
+      <span
+        className={`inline-block h-2 w-2 rounded-full bg-current ${final ? "ring-2 ring-current/30" : ""}`}
+      />
+      {stance}
+    </span>
+  );
+}
+
+function MemberChip({
+  name,
+  onClick,
+}: {
+  name: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center rounded-full border border-border bg-secondary px-2 py-0.5 text-[11px] font-semibold text-secondary-foreground hover:bg-accent"
+    >
+      {name}
+    </button>
+  );
+}
+
+function PhaseSpine({ session }: { session: SessionDetailDto }) {
+  const turns = session.turns;
+  const okIds = new Set(
+    session.roster.filter((r) => r.status === "ok").map((r) => r.memberId),
+  );
+  const considerationDone = okIds.size > 0 &&
+    [...okIds].every((id) =>
+      turns.some((t) => t.phase === "consideration" && t.memberId === id && t.stance !== null),
+    );
+  const rounds = [
+    ...new Set(
+      turns.filter((t) => t.phase === "discussion" && t.round !== null).map((t) => t.round as number),
+    ),
+  ].sort((a, b) => a - b);
+  const researchCalls = session.evidence.length;
+
+  const steps: { name: string; meta: string; done: boolean }[] = [];
+  steps.push({
+    name: "Consideration",
+    meta:
+      researchCalls > 0
+        ? `${researchCalls} research call${researchCalls === 1 ? "" : "s"}`
+        : "no research recorded",
+    done: considerationDone,
+  });
+  rounds.forEach((round) => {
+    const replies = turns.filter((t) => t.phase === "discussion" && t.round === round).length;
+    steps.push({ name: `Discussion R${round}`, meta: `${replies} replies`, done: true });
+  });
+  const verdictDone = Boolean(session.verdict) || turns.some((t) => t.phase === "verdict");
+  steps.push({
+    name: "Verdict",
+    meta: verdictDone ? "report written" : "waiting",
+    done: verdictDone,
+  });
+
+  return (
+    <ol className="mt-4 flex flex-col gap-0 sm:flex-row">
+      {steps.map((step, i) => (
+        <li key={step.name} className="flex flex-1 items-start gap-3 sm:flex-col sm:gap-1">
+          <div className="flex items-center sm:w-full">
+            <span
+              className={`relative z-10 inline-block h-3 w-3 shrink-0 rounded-full border-2 border-background ${
+                step.done ? "bg-emerald-500" : "bg-muted"
+              }`}
+            />
+            {i < steps.length - 1 ? (
+              <span className={`h-px flex-1 ${step.done ? "bg-emerald-500/60" : "bg-border"}`} />
+            ) : null}
+          </div>
+          <div className="pb-3">
+            <p className="text-xs font-semibold">{step.name}</p>
+            <p className="text-[11px] text-muted-foreground">{step.meta}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function StanceMatrix({
+  session,
+  onOpenMember,
+}: {
+  session: SessionDetailDto;
+  onOpenMember: (memberId: string) => void;
+}) {
+  const turns = session.turns;
+  const votesByMember = new Map(session.votes.map((v) => [v.memberId, v.stance]));
+  const active = session.roster.filter((r) => r.status === "ok");
+  const rounds = [
+    ...new Set(
+      turns.filter((t) => t.phase === "discussion" && t.round !== null).map((t) => t.round as number),
+    ),
+  ].sort((a, b) => a - b);
+
+  function trail(memberId: string): (string | null)[] {
+    const out: (string | null)[] = [];
+    const consider = turns.find(
+      (t) => t.phase === "consideration" && t.memberId === memberId && t.stance !== null,
+    );
+    out.push(consider?.stance ?? null);
+    for (let round = 1; round <= rounds.length; round++) {
+      const latest = turns
+        .filter(
+          (t) =>
+            t.phase === "discussion" &&
+            t.memberId === memberId &&
+            t.stance !== null &&
+            ((t.round ?? 0) <= round),
+        )
+        .sort((a, b) => a.seq - b.seq)
+        .at(-1);
+      out.push(latest?.stance ?? out[out.length - 1]);
+    }
+    return out;
+  }
+
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-border text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+          <th className="py-1.5 pr-2 font-semibold">Member</th>
+          <th className="py-1.5 pr-2 font-semibold">Consider</th>
+          {rounds.map((round) => (
+            <th key={round} className="py-1.5 pr-2 font-semibold">R{round}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {active.map((entry) => {
+          const trailCells = trail(entry.memberId);
+          const finalStance = votesByMember.get(entry.memberId);
+          return (
+            <tr key={entry.memberId} className="border-b border-border/50 last:border-b-0">
+              <td className="py-2 pr-2">
+                <MemberChip name={entry.memberName} onClick={() => onOpenMember(entry.memberId)} />
+              </td>
+              {trailCells.map((stance, i) => {
+                const changed = i > 0 && stance !== null && trailCells[i - 1] !== stance;
+                const isLast = i === trailCells.length - 1;
+                return (
+                  <td key={i} className="py-2 pr-2 whitespace-nowrap">
+                    <StanceDots stance={stance} final={isLast && finalStance != null} />
+                    {changed ? <span className="ml-1 font-mono text-[10px] text-amber-400">▲</span> : null}
+                  </td>
+                );
+              })}
+              {!finalStance ? null : (
+                <td className="py-2 text-right font-mono text-[10px] text-muted-foreground">voted</td>
+              )}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 function SessionDetail(props: { sessionId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [session, setSession] = useState<SessionDetailDto | null>(null);
   const [missing, setMissing] = useState(false);
+  const [tab, setTab] = useState<TabId>("overview");
+  const [activeMemberId, setActiveMemberId] = useState<string | null>(null);
+  const [highlightTitle, setHighlightTitle] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -669,99 +864,325 @@ function SessionDetail(props: { sessionId: string }) {
     return <p className="text-sm text-muted-foreground">Loading…</p>;
   }
 
-  const consideration = session.turns.filter((turn) => turn.phase === "consideration");
-  const rounds = [
-    ...new Set(
-      session.turns
-        .filter((turn) => turn.phase === "discussion")
-        .map((turn) => turn.round),
-    ),
-  ].sort((a, b) => (a ?? 0) - (b ?? 0));
-  const verdictTurns = session.turns.filter((turn) => turn.phase === "verdict");
+  const turns = session.turns;
+  const votesByMember = new Map(session.votes.map((v) => [v.memberId, v.stance]));
+  const activeRoster = session.roster.filter((r) => r.status === "ok");
+  const selectedMemberId =
+    activeMemberId && activeRoster.some((r) => r.memberId === activeMemberId)
+      ? activeMemberId
+      : (activeRoster[0]?.memberId ?? null);
+  const memberEvidence = session.evidence.filter(
+    (e) => e.memberId === selectedMemberId,
+  );
+  const memberTurns = turns
+    .filter((t) => t.memberId === selectedMemberId && t.phase !== "verdict")
+    .sort((a, b) => {
+      const rank = (phase: string, round: number | null) =>
+        phase === "consideration" ? -1 : (round ?? 999);
+      return rank(a.phase, a.round) - rank(b.phase, b.round) || a.seq - b.seq;
+    });
+  const chiefTurn = turns.find((t) => t.phase === "verdict");
+
+  // Materials ledger: group evidence by artifact title across members.
+  const ledger = new Map<
+    string,
+    { kind: string; title: string; finding: string; citedBy: { memberId: string; memberName: string }[] }
+  >();
+  for (const item of session.evidence) {
+    const entry = ledger.get(item.title) ?? {
+      kind: item.kind,
+      title: item.title,
+      finding: item.result ?? "",
+      citedBy: [],
+    };
+    if (!entry.finding && item.result) entry.finding = item.result;
+    if (!entry.citedBy.some((c) => c.memberId === item.memberId)) {
+      entry.citedBy.push({ memberId: item.memberId, memberName: item.memberName });
+    }
+    ledger.set(item.title, entry);
+  }
+  const ledgerRows = [...ledger.values()];
+
+  function openMember(memberId: string) {
+    setActiveMemberId(memberId);
+    setTab("members");
+  }
+  function openMaterial(title: string) {
+    setHighlightTitle(title);
+    setTab("materials");
+  }
+
+  const tabs: { id: TabId; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "members", label: "Members" },
+    { id: "materials", label: "Materials" },
+  ];
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => navigate.toPluginPanel("council", { subPath: "" })}
-        >
-          ← All sessions
-        </Button>
-        <div className="flex items-center gap-2">
+      <Button
+        size="sm"
+        variant="ghost"
+        className="-ml-2"
+        onClick={() => navigate.toPluginPanel("council", { subPath: "" })}
+      >
+        ← All sessions
+      </Button>
+
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
           <StatusPill status={session.status} />
-          <TallyChips
-            support={session.support}
-            oppose={session.oppose}
-            abstain={session.abstain}
-          />
+          {session.completedAtMs ? (
+            <span className="rounded-md border border-border bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
+              ⏱ {duration(session.completedAtMs - session.createdAtMs)}
+            </span>
+          ) : null}
+          {session.evidence.length > 0 ? (
+            <span className="rounded-md border border-border bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
+              🔬 researched · {session.evidence.length} calls
+            </span>
+          ) : (
+            <span className="rounded-md border border-border bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
+              no research recorded
+            </span>
+          )}
         </div>
+        <p className="max-w-prose whitespace-pre-wrap text-base font-semibold">{session.proposal}</p>
+        {session.context ? (
+          <p className="max-w-prose whitespace-pre-wrap text-xs text-muted-foreground">{session.context}</p>
+        ) : null}
+        {session.error ? (
+          <p className="rounded-lg border border-red-500/40 bg-red-500/5 p-2.5 text-sm text-red-600 dark:text-red-400">
+            {session.error}
+          </p>
+        ) : null}
       </div>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Proposal</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <p className="whitespace-pre-wrap text-sm">{session.proposal}</p>
-          {session.context ? (
-            <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-              Context: {session.context}
-            </p>
-          ) : null}
-          <p className="text-xs text-muted-foreground">
-            {formatTime(session.createdAtMs)} · {session.consensusMode} rule · max{" "}
-            {session.maxRounds} rounds · {session.activeMembers}/{session.totalMembers}{" "}
-            members active
-          </p>
-          {session.error ? (
-            <p className="text-sm text-red-600 dark:text-red-400">{session.error}</p>
-          ) : null}
-        </CardContent>
-      </Card>
+      <PhaseSpine session={session} />
 
-      <section className="space-y-2">
-        <h3 className="text-sm font-semibold">Initial review</h3>
-        {consideration.map((turn) => (
-          <div key={turn.id} className="rounded-lg border border-border p-3">
-            <div className="mb-1 flex items-center gap-2">
-              <span className="text-sm font-medium">{turn.memberName}</span>
-              <StanceBadge stance={turn.stance} />
-            </div>
-            <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-              {turn.comment}
-            </p>
-          </div>
+      <div className="flex w-fit gap-1 rounded-lg border border-border p-1">
+        {tabs.map((candidate) => (
+          <button
+            key={candidate.id}
+            type="button"
+            className={`rounded-md px-3 py-1.5 text-sm ${
+              tab === candidate.id ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+            onClick={() => setTab(candidate.id)}
+          >
+            {candidate.label}
+          </button>
         ))}
-      </section>
+      </div>
 
-      {rounds.map((round) => (
-        <section key={round} className="space-y-2">
-          <h3 className="text-sm font-semibold">Discussion round {round}</h3>
-          {session.turns
-            .filter((turn) => turn.phase === "discussion" && turn.round === round)
-            .map((turn) => (
-              <div key={turn.id} className="rounded-lg border border-border p-3">
-                <div className="mb-1 flex items-center gap-2">
-                  <span className="text-sm font-medium">{turn.memberName}</span>
-                  <StanceBadge stance={turn.stance} />
+      {tab === "overview" ? (
+        <div className="grid gap-6 lg:grid-cols-[1.55fr_1fr]">
+          <div className="space-y-4">
+            {session.verdict ? (
+              <>
+                <h3 className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                  Verdict
+                </h3>
+                <div className="rounded-lg border border-border p-4">
+                  <Markdown content={session.verdict} />
                 </div>
-                <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-                  {turn.comment}
-                </p>
-              </div>
-            ))}
-        </section>
-      ))}
-
-      {verdictTurns.length > 0 || session.verdict ? (
-        <section className="space-y-2">
-          <h3 className="text-sm font-semibold">Verdict</h3>
-          <div className="rounded-lg border border-border p-3">
-            <Markdown content={session.verdict ?? verdictTurns[0]?.comment ?? ""} />
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {session.error
+                  ? "The session ended before a verdict was written. Stances below are the last recorded positions."
+                  : "Deliberation in progress — the verdict appears here once every member has voted."}
+              </p>
+            )}
           </div>
-        </section>
+          <div className="space-y-4">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+              Tally
+            </h3>
+            <div className="rounded-lg border border-border p-4">
+              <TallyChips
+                support={session.support}
+                oppose={session.oppose}
+                abstain={session.abstain}
+              />
+              <div className="mt-3">
+                <StanceMatrix
+                  session={session}
+                  onOpenMember={(memberId) => openMember(memberId)}
+                />
+              </div>
+            </div>
+          </div>
+          {ledgerRows.length > 0 ? (
+            <div className="space-y-2 lg:col-span-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                Verified materials
+              </h3>
+              {ledgerRows.slice(0, 4).map((row) => (
+                <div
+                  key={row.title}
+                  className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 py-2 last:border-b-0"
+                >
+                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">{row.title}</p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {row.citedBy.map((c) => (
+                      <MemberChip key={c.memberId} name={c.memberName} onClick={() => openMember(c.memberId)} />
+                    ))}
+                    <button
+                      type="button"
+                      className="rounded-md border border-border bg-secondary px-2 py-0.5 font-mono text-[11px] text-accent hover:bg-accent hover:text-accent-foreground"
+                      onClick={() => openMaterial(row.title)}
+                    >
+                      {row.kind.toUpperCase()}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {ledgerRows.length > 4 ? (
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-accent hover:underline"
+                  onClick={() => setTab("materials")}
+                >
+                  View all {ledgerRows.length} materials →
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {tab === "members" ? (
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {activeRoster.map((entry) => (
+              <button
+                key={entry.memberId}
+                type="button"
+                className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                  entry.memberId === selectedMemberId
+                    ? "border-accent bg-accent/15 text-foreground"
+                    : "border-border text-muted-foreground hover:bg-accent/10"
+                }`}
+                onClick={() => setActiveMemberId(entry.memberId)}
+              >
+                {entry.memberName}
+                {votesByMember.has(entry.memberId) ? " ✓" : ""}
+              </button>
+            ))}
+          </div>
+          {selectedMemberId == null ? (
+            <p className="text-sm text-muted-foreground">No members participated.</p>
+          ) : (
+            <div className="ml-2 space-y-3 border-l-2 border-border pl-5">
+              {memberEvidence.map((item, i) => (
+                <div key={`ev-${i}`} className="relative">
+                  <span className="absolute -left-[26.5px] top-2 block h-2.5 w-2.5 rounded-full border-2 border-accent bg-background" />
+                  <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-accent">
+                    {item.kind === "bash" ? "BASH" : "TOOL"} · {item.title}
+                  </p>
+                  {item.result ? (
+                    <p className="mt-1 line-clamp-3 whitespace-pre-wrap rounded-md bg-secondary/60 p-2 font-mono text-[11px] text-muted-foreground">
+                      {item.result}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+              {memberTurns.map((turn) => {
+                if (turn.comment.startsWith("(final vote)")) {
+                  return (
+                    <div key={turn.id} className="relative">
+                      <span className="absolute -left-[26.5px] top-2 block h-2.5 w-2.5 rounded-full border-2 border-emerald-500 bg-background" />
+                      <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-emerald-500">
+                        FINAL VOTE REGISTERED
+                      </p>
+                      <div className="mt-1 rounded-lg border border-border bg-secondary/40 p-3">
+                        <StanceBadge stance={turn.stance} />
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {turn.comment.replace("(final vote)", "").trim()}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                }
+                const label =
+                  turn.phase === "consideration"
+                    ? "CONSIDERATION"
+                    : `DISCUSSION · ROUND ${turn.round}`;
+                return (
+                  <div key={turn.id} className="relative">
+                    <span className="absolute -left-[26.5px] top-2 block h-2.5 w-2.5 rounded-full border-2 border-muted-foreground bg-background" />
+                    <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                      {label}
+                    </p>
+                    <div className="mt-1 rounded-lg border border-border bg-secondary/40 p-3">
+                      <StanceBadge stance={turn.stance} />
+                      <p className="mt-1.5 whitespace-pre-wrap text-sm">{turn.comment}</p>
+                    </div>
+                  </div>
+                );
+              })}
+              {chiefTurn && chiefTurn.memberId === selectedMemberId ? (
+                <div className="relative">
+                  <span className="absolute -left-[26.5px] top-2 block h-2.5 w-2.5 rounded-full border-2 border-emerald-500 bg-background" />
+                  <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-emerald-500">
+                    VERDICT · WRITTEN BY THIS MEMBER
+                  </p>
+                  <div className="mt-1 rounded-lg border border-border p-3">
+                    <Markdown content={chiefTurn.comment} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {tab === "materials" ? (
+        ledgerRows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No research artifacts were recorded for this session.
+          </p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-border text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <th className="px-3 py-2 font-semibold">Artifact</th>
+                  <th className="px-3 py-2 font-semibold">Finding used by the council</th>
+                  <th className="px-3 py-2 font-semibold">Cited by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerRows.map((row) => (
+                  <tr
+                    key={row.title}
+                    className={`border-b border-border/50 last:border-b-0 ${
+                      highlightTitle === row.title ? "bg-accent/10" : ""
+                    }`}
+                  >
+                    <td className="px-3 py-2.5 align-top">
+                      <span className="mr-2 rounded border border-border px-1 py-0.5 font-mono text-[9px] font-bold uppercase text-accent">
+                        {row.kind}
+                      </span>
+                      <span className="font-mono text-xs">{row.title}</span>
+                    </td>
+                    <td className="px-3 py-2.5 align-top text-muted-foreground">{row.finding || "—"}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                      {row.citedBy.map((c) => (
+                        <MemberChip
+                          key={c.memberId}
+                          name={c.memberName}
+                          onClick={() => openMember(c.memberId)}
+                        />
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
       ) : null}
     </div>
   );

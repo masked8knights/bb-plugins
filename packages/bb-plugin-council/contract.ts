@@ -73,6 +73,22 @@ export const sessionDetailDto = z.object({
   completedAtMs: z.number().nullable(),
   turns: z.array(turnDto),
   roster: z.array(rosterEntryDto),
+  votes: z.array(
+    z.object({
+      memberId: z.string(),
+      memberName: z.string(),
+      stance: z.enum(["support", "oppose", "abstain"]),
+    }),
+  ),
+  evidence: z.array(
+    z.object({
+      memberId: z.string(),
+      memberName: z.string(),
+      kind: z.string(),
+      title: z.string(),
+      result: z.string().nullable(),
+    }),
+  ),
 });
 
 export const providerDto = z.object({

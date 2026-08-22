@@ -554,6 +554,22 @@ export default async function plugin(bb: BbPluginApi) {
           memberName: entry.memberName,
           status: entry.status,
         })),
+        votes: [...store.listVotes(session.id).entries()].map(
+          ([memberId, vote]) => ({
+            memberId,
+            memberName:
+              roster.find((entry) => entry.memberId === memberId)?.memberName ??
+              "Member",
+            stance: vote.stance as "support" | "oppose" | "abstain",
+          }),
+        ),
+        evidence: store.listEvidence(session.id).map((item) => ({
+          memberId: item.memberId,
+          memberName: item.memberName,
+          kind: item.kind,
+          title: item.title,
+          result: item.result,
+        })),
       };
     },
     startConversation: async (input) => {

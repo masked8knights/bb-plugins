@@ -79,6 +79,16 @@ bb council convene "<proposal>"
 
 Deleting a session removes its transcript, turns, and roster permanently — from the panel (Delete button on each session card) or via `bb council delete`.
 
+## Panel
+
+The session view has three tabs:
+
+- **Overview** — verdict, phase spine (consideration → discussion rounds → verdict), tally with each member's stance across rounds (▲ marks changes), and top verified materials.
+- **Members** — pick a member to see their full arc: the research calls they made (commands run, files read), their consideration summary, every discussion round, their registered final vote, and their verdict if they are chief.
+- **Materials** — the evidence ledger: every artifact any member touched, what it showed, and who cited it.
+
+Research artifacts are captured from each member thread before it is archived; they never affect the deliberation itself.
+
 ## Settings
 
 | Setting | Default | Meaning |

@@ -245,6 +245,18 @@ function verdictPrompt(
   ].join("\n");
 }
 
+function describeToolArgs(args: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const key of ["path", "file_path", "query", "command", "url"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.length > 0) {
+      parts.push(clamp(value, 90));
+    }
+    if (parts.length >= 2) break;
+  }
+  return parts.join(", ");
+}
+
 function fallbackReport(tally: Tally, turns: TurnRow[]): string {
   const latest = [...latestTurnPerMember(turns).values()];
   const positions = latest
@@ -322,6 +334,60 @@ export class CouncilEngine {
     if (signal.aborted) return true;
     const name = (error as { name?: string } | null | undefined)?.name;
     return name === "AbortError" || name === "TimeoutError";
+  }
+
+  // Persist a compact record of what the member actually did while
+  // researching, before their worker thread is archived. Failure here is
+  // logged and skipped — evidence must never break a deliberation.
+  private async captureEvidence(
+    sessionId: string,
+    memberId: string,
+    memberName: string,
+    threadId: string,
+  ): Promise<void> {
+    try {
+      const timeline = await this.bb.sdk.threads.timeline({
+        threadId,
+        includeNestedRows: "true",
+      });
+      const items: { kind: string; title: string; result: string | null }[] = [];
+      const walk = (rows: typeof timeline.rows) => {
+        for (const row of rows) {
+          if (row.kind === "turn" && row.children) walk(row.children);
+          if (row.kind !== "work") continue;
+          if (row.workKind === "command") {
+            const title = row.command.trim();
+            if (!title) continue;
+            items.push({
+              kind: "bash",
+              title: clamp(title, 160),
+              result: row.output ? clamp(row.output, 240) : null,
+            });
+          } else if (row.workKind === "tool") {
+            const args = row.toolArgs ? describeToolArgs(row.toolArgs) : "";
+            const title = `${row.toolName}${args ? `(${args})` : ""}`;
+            if (!title.trim()) continue;
+            items.push({
+              kind: "tool",
+              title: clamp(title, 160),
+              result: row.output ? clamp(row.output, 240) : null,
+            });
+          }
+          if (items.length >= 40) return;
+        }
+      };
+      walk(timeline.rows);
+      if (items.length > 0) {
+        this.store.addEvidence(sessionId, memberId, memberName, items);
+        this.bb.log.debug(
+          `council: captured ${items.length} evidence items from ${memberName}`,
+        );
+      }
+    } catch (error) {
+      this.bb.log.warn(
+        `council: evidence capture failed for ${memberName}: ${String(error)}`,
+      );
+    }
   }
 
   async runSession(input: {
@@ -450,6 +516,15 @@ export class CouncilEngine {
             stance: parseStance(result.value.output),
             comment: result.value.output.trim(),
           });
+          const threadId = threadsByMember.get(member.id);
+          if (threadId) {
+            await this.captureEvidence(
+              session.id,
+              member.id,
+              member.name,
+              threadId,
+            );
+          }
         } else {
           rosterOk.delete(member.id);
           this.store.upsertRoster({
