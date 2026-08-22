@@ -26,10 +26,12 @@ Call `council_deliberate` with:
 - `proposal` — the complete proposal, plan, or question under review.
 - `context` — optional supporting material: constraints, diffs, background.
 
-The call blocks for several minutes — members research the workspace during
-consideration, then discuss. Tell the user the council is deliberating before
-you call. Do not call it repeatedly for the same proposal; if the verdict is
-unclear, summarize it and ask the user how to proceed.
+The call blocks for one or more minutes. Members research the workspace,
+debate with no preset round count, and each registers a final vote through
+the `council_register_vote` tool; the session ends when every member has
+voted (or at the safety cap). Tell the user the council is deliberating
+before you call. Do not call it repeatedly for the same proposal; if the
+verdict is unclear, summarize it and ask the user how to proceed.
 
 ## Reading results
 

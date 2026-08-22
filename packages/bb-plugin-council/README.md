@@ -11,13 +11,12 @@ It provides:
 
 ## How a session runs
 
-1. **Consideration** — every enabled member gets its own hidden worker thread and reviews the proposal independently, ending with a `STANCE:` line (`support`, `oppose`, or `abstain`).
-2. **Discussion** — up to N rounds (setting, default 2). Each member sees the others' current positions and can comment, pass, or change stance. The loop stops early when consensus is reached.
-3. **Verdict** — the chief justice writes the final report: verdict, reasoning highlights attributed to members, and dissent/minority views. If the chief was recused mid-session, the first remaining member writes it; if no member remains, a fallback report lists recorded positions.
+1. **Consideration** — every enabled member gets its own hidden worker thread and reviews the proposal independently (with workspace research when the setting is on), ending with a `STANCE:` line as their current leaning.
+2. **Discussion** — rounds continue with no preset length. Each round, members who have not yet voted see everyone's positions and reply with a comment (or pass). When a member is confident, they call the `council_register_vote` tool to lock in their final stance and leave the discussion. Voted members are skipped; their locked votes show in later digests.
+3. **End of debate** — the session ends the moment every active member has registered a vote. A safety cap (setting, default 20 rounds) bounds runaway debates; members who never register by then keep their last recorded stance.
+4. **Verdict** — the chief justice writes the final report: verdict, reasoning highlights attributed to members, and dissent/minority views, including how many votes were registered and whether the cap fired.
 
-The tally counts each member's latest explicit stance. A transport failure or timeout never flips a member's prior vote — it only makes them silent for that round. Members whose spawn fails are marked `recused` in the roster and excluded from consensus math.
-
-Consensus rules: `majority` (default) needs more than half of active members supporting, with support exceeding opposition; `unanimous` needs every active member supporting.
+The tally counts each member's registered final vote (or, if they never registered, their last recorded stance). A transport failure or timeout never flips a member's prior position — it only makes them silent for that round. Members whose spawn fails are marked `recused` in the roster and excluded from the count.
 
 ## Members
 
@@ -71,9 +70,8 @@ Deleting a session removes its transcript, turns, and roster permanently — fro
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Discussion rounds (max) | 2 | Upper bound on discussion rounds |
+| Safety cap: max discussion rounds | 20 | Upper bound on debate; the session normally ends when all members register their votes |
 | Per-response timeout (seconds) | 240 | Wait per member response before recusing them; also bounds research time |
-| Consensus rule | majority | `majority` or `unanimous` early-stop rule |
 | Member research | workspace tools | During consideration, members may read the workspace and run quick read-only checks (`off` restores facts-presented-only judging) |
 | Max council members | 7 | Guard rail on panel-created members |
 

@@ -100,6 +100,13 @@ export const migrations = [
     status TEXT NOT NULL,
     PRIMARY KEY (session_id, member_id)
   )`,
+  `CREATE TABLE IF NOT EXISTS session_votes (
+    session_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    stance TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (session_id, member_id)
+  )`,
 ];
 
 export class CouncilStore {
@@ -398,5 +405,43 @@ export class CouncilStore {
         `SELECT ${CouncilStore.ROSTER_SELECT} FROM session_members WHERE session_id = ?`,
       )
       .all(sessionId) as RosterRow[];
+  }
+
+  registerVote(sessionId: string, memberId: string, stance: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_votes (session_id, member_id, stance, created_at_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id, member_id) DO NOTHING`,
+      )
+      .run(sessionId, memberId, stance, Date.now());
+  }
+
+  listVotes(
+    sessionId: string,
+  ): Map<string, { stance: string; atMs: number }> {
+    const rows = this.db
+      .prepare(
+        "SELECT member_id AS memberId, stance, created_at_ms AS atMs FROM session_votes WHERE session_id = ?",
+      )
+      .all(sessionId) as { memberId: string; stance: string; atMs: number }[];
+    const map = new Map<string, { stance: string; atMs: number }>();
+    for (const row of rows) map.set(row.memberId, { stance: row.stance, atMs: row.atMs });
+    return map;
+  }
+
+  findOpenSessionByThreadId(
+    threadId: string,
+  ): { sessionId: string; memberId: string; memberName: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT s.id AS sessionId, sm.member_id AS memberId, sm.member_name AS memberName
+         FROM sessions s
+         JOIN session_members sm ON sm.session_id = s.id
+         WHERE s.status = 'running' AND sm.thread_id = ?`,
+      )
+      .get(threadId) as
+      | { sessionId: string; memberId: string; memberName: string }
+      | undefined;
   }
 }

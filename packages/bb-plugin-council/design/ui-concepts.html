@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Council — Session UI Concepts</title>
+<style>
+  :root {
+    --canvas: #121824;
+    --surface: #1a2230;
+    --surface-2: #212c3d;
+    --border: #2b3850;
+    --border-soft: #232e42;
+    --text: #dde5f1;
+    --muted: #8da0ba;
+    --faint: #66788f;
+    --accent: #7aa2f7;
+    --support: #4cc38a;
+    --oppose: #f2777a;
+    --abstain: #d5b06b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  .board-label {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 34px 0 10px;
+  }
+  .board-label:first-of-type { margin-top: 0; }
+  .board-label .num {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 7px;
+    background: var(--surface);
+  }
+  .board-label h2 { font-size: 14px; font-weight: 600; }
+  .board-label p { color: var(--muted); font-size: 12px; }
+  .artboard {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .panel-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--muted); font-size: 12px;
+  }
+  .panel-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--support); }
+  .panel-bar strong { color: var(--text); font-weight: 600; }
+  .pad { padding: 16px 18px 18px; }
+
+  /* shared atoms */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    border-radius: 999px; padding: 2px 9px;
+  }
+  .pill.completed { background: rgba(76,195,138,.14); color: var(--support); }
+  .pill.running   { background: rgba(122,162,247,.14); color: var(--accent); }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
+    background: var(--surface-2);
+  }
+  .chip .mono { font-family: var(--mono); color: var(--text); }
+  .stance-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+  .stance-dot.support { background: var(--support); }
+  .stance-dot.oppose { background: var(--oppose); }
+  .stance-dot.abstain { background: var(--abstain); }
+  .stance-word.support { color: var(--support); }
+  .stance-word.oppose { color: var(--oppose); }
+  .stance-word.abstain { color: var(--abstain); }
+  .member-chip {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 1px 8px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .member-chip.g { color: #e2c08d; }   /* Grug */
+  .member-chip.a { color: #9db8e8; }   /* Architect */
+  .member-chip.d { color: #a8d3b8; }   /* Designer */
+  h3.sec {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--faint); margin-bottom: 10px;
+  }
+
+  /* ---------- artboard 1 ---------- */
+  .head-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .proposal { font-size: 16px; font-weight: 600; margin-top: 8px; max-width: 62ch; }
+  .spine { display: flex; margin: 18px 0 4px; }
+  .step { flex: 1; position: relative; padding-right: 14px; }
+  .step::before {
+    content: ""; position: absolute; top: 5px; left: 14px; right: 0; height: 2px;
+    background: var(--border);
+  }
+  .step:last-child::before { display: none; }
+  .step .knot {
+    position: relative; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--support); border: 2px solid var(--surface);
+    box-shadow: 0 0 0 1px var(--support);
+  }
+  .step.pending .knot { background: var(--surface-2); box-shadow: 0 0 0 1px var(--border); }
+  .step .sname { font-weight: 600; font-size: 12px; margin: 7px 0 1px 14px; }
+  .step .smeta { color: var(--faint); font-size: 11px; margin-left: 14px; }
+  .cols { display: grid; grid-template-columns: 1.55fr 1fr; gap: 26px; margin-top: 20px; }
+  .verdict-body p.lede { font-size: 14px; line-height: 1.6; margin-bottom: 12px; }
+  .verdict-body ul { list-style: none; }
+  .verdict-body li {
+    display: flex; gap: 9px; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid var(--border-soft);
+    color: #c6d2e2;
+  }
+  .verdict-body li:last-child { border-bottom: none; }
+  .dissent {
+    margin-top: 14px; padding: 10px 12px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--muted); font-size: 12px;
+  }
+  .dissent b { color: var(--text); }
+  .tally-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .tally-nums { display: flex; gap: 18px; margin-bottom: 12px; }
+  .tn { text-align: left; }
+  .tn .n { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+  .tn .l { font-size: 11px; color: var(--faint); }
+  table.matrix { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.matrix th {
+    text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--border);
+  }
+  table.matrix td { padding: 6px 6px; border-bottom: 1px solid var(--border-soft); }
+  .flip-note { font-family: var(--mono); font-size: 10px; color: var(--abstain); margin-left: 6px; }
+  .materials { margin-top: 22px; }
+  .mat-row {
+    display: flex; gap: 12px; align-items: baseline;
+    padding: 8px 2px; border-bottom: 1px solid var(--border-soft);
+  }
+  .mat-row:last-child { border-bottom: none; }
+  .mat-row .fact { flex: 1; color: #c6d2e2; min-width: 0; }
+  .mat-row .srcs { white-space: nowrap; display: flex; gap: 6px; align-items: center; }
+  .callout {
+    margin-top: 14px; border: 1px dashed var(--border); border-radius: 6px;
+    padding: 10px 12px; font-size: 12px; color: var(--muted);
+  }
+  .callout b { color: var(--text); }
+
+  /* ---------- artboard 2 ---------- */
+  .mtabs { display: flex; gap: 6px; padding: 12px 18px 0; }
+  .mtab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 13px; border-radius: 6px 6px 0 0;
+    border: 1px solid transparent; border-bottom: none;
+    color: var(--muted); font-size: 12px; font-weight: 600;
+  }
+  .mtab.active {
+    background: var(--surface-2); border-color: var(--border);
+    color: var(--text);
+  }
+  .mtab .role { font-size: 10px; color: var(--faint); font-weight: 500; }
+  .mhead {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 18px; background: var(--surface-2);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .tl { position: relative; margin-left: 7px; padding-left: 22px; }
+  .tl::before {
+    content: ""; position: absolute; left: 4px; top: 6px; bottom: 6px;
+    width: 2px; background: var(--border);
+  }
+  .ev { position: relative; padding: 7px 0; }
+  .ev::before {
+    content: ""; position: absolute; left: -21px; top: 12px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--faint);
+  }
+  .ev.tool::before { border-color: var(--accent); }
+  .ev.verdict-ev::before { border-color: var(--support); }
+  .ev .etype {
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .06em; color: var(--accent);
+  }
+  .ev.read .etype { color: #b58ee0; }
+  .ev.glob .etype { color: #6bb8d6; }
+  .ev.say .etype { color: var(--faint); }
+  .ev.discuss .etype { color: var(--support); }
+  .ev .etitle { font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+  .ev .eresult { color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 72ch; }
+  .ev .eresult .hl { color: var(--text); background: rgba(122,162,247,.10); padding: 0 3px; border-radius: 3px; }
+  .sayblock {
+    border: 1px solid var(--border-soft); border-radius: 6px;
+    background: var(--surface-2); padding: 10px 12px;
+    color: #c6d2e2; font-size: 12.5px; max-width: 78ch;
+  }
+  .sayblock .stance-line {
+    display: block; margin-top: 8px; font-family: var(--mono); font-size: 11px;
+  }
+  .phase-tag {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 4px;
+  }
+  .saw-context { color: var(--faint); font-size: 11px; margin: 3px 0 6px; }
+
+  /* ---------- artboard 3 ---------- */
+  table.ledger { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.ledger th {
+    text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint); font-weight: 600; padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.ledger td { padding: 9px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  table.ledger tr:last-child td { border-bottom: none; }
+  .artifact { font-family: var(--mono); font-size: 12px; }
+  .artifact .kind {
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .05em;
+    color: var(--accent); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 5px; margin-right: 7px; vertical-align: 1px;
+  }
+  .who { white-space: nowrap; }
+  .foot-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 18px 16px; }
+  .btn {
+    font-size: 12px; font-weight: 600; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 12px;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #10151f; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ═══════════════ ARTBOARD 1 ═══════════════ -->
+  <div class="board-label">
+    <span class="num">01</span>
+    <h2>Session overview</h2>
+    <p>The verdict, the phases with research time, how each stance changed, and the facts members found.</p>
+  </div>
+  <div class="artboard">
+    <div class="panel-bar"><span class="dot"></span><strong>Council</strong> · Session 758846e3 <span style="margin-left:auto">Aug 21, 19:03</span></div>
+    <div class="pad">
+      <div class="head-row">
+        <span class="pill completed"><span class="stance-dot" style="background:currentColor;width:6px;height:6px"></span>COMPLETED</span>
+        <span class="chip">⏱ 3m 47s</span>
+        <span class="chip">🔬 research <span class="mono">workspace tools</span></span>
+        <span class="chip">⚖️ majority</span>
+      </div>
+      <div class="proposal">Proposal: migrate this repo's build and package management from pnpm to Bun workspaces to speed up installs and scripts.</div>
+
+      <div class="spine">
+        <div class="step"><div class="knot"></div><div class="sname">Consideration</div><div class="smeta">research on · 9 tool calls · 2m 04s</div></div>
+        <div class="step"><div class="knot"></div><div class="sname">Discussion R1</div><div class="smeta">all members replied · 41s</div></div>
+        <div class="step"><div class="knot"></div><div class="sname">Discussion R2</div><div class="smeta">early stop · 37s</div></div>
+        <div class="step pending"><div class="knot"></div><div class="sname">Verdict</div><div class="smeta">Grug (chief) · 25s</div></div>
+      </div>
+
+      <div class="cols">
+        <div class="verdict-body">
+          <h3 class="sec">Verdict — by Grug, chief justice</h3>
+          <p class="lede">Do not migrate now. Nobody has measured the speed gain. The costs are known: compatibility, reproducibility, CI, and releases. Keep pnpm, and test Bun on a benchmark branch first.</p>
+          <ul>
+            <li><span class="member-chip g">Grug</span><span>Bun speeds up installs, not builds. Our builds run <code>bb</code>, <code>tsc</code>, and <code>vitest</code>.</span></li>
+            <li><span class="member-chip a">Architect</span><span>The migration changes how we install dependencies. We have no rollback plan or CI control for it.</span></li>
+            <li><span class="member-chip d">Designer</span><span>New contributors will not know which installer to use. Each directory needs one documented command.</span></li>
+          </ul>
+          <div class="callout"><b>Alternative:</b> benchmark Bun on a branch. Switch only after it measures faster, installs native modules cleanly, and has a rollback plan.</div>
+          <div class="dissent"><b>Dissent:</b> none. All active members ended opposed.</div>
+        </div>
+
+        <div>
+          <h3 class="sec">Tally</h3>
+          <div class="tally-card">
+            <div class="tally-nums">
+              <div class="tn"><div class="n" style="color:var(--support)">0</div><div class="l">support</div></div>
+              <div class="tn"><div class="n" style="color:var(--oppose)">3</div><div class="l">oppose</div></div>
+              <div class="tn"><div class="n" style="color:var(--abstain)">0</div><div class="l">abstain</div></div>
+            </div>
+            <table class="matrix">
+              <tr><th>Member</th><th>Consider</th><th>R1</th><th>R2</th></tr>
+              <tr><td><span class="member-chip g">Grug</span></td>
+                <td><span class="stance-dot oppose"></span> <span class="stance-word oppose">oppose</span></td>
+                <td><span class="stance-dot oppose"></span></td>
+                <td><span class="stance-dot oppose"></span></td></tr>
+              <tr><td><span class="member-chip a">Architect</span></td>
+                <td><span class="stance-dot oppose"></span> <span class="stance-word oppose">oppose</span></td>
+                <td><span class="stance-dot oppose"></span></td>
+                <td><span class="stance-dot oppose"></span></td></tr>
+              <tr><td><span class="member-chip d">Designer</span></td>
+                <td><span class="stance-dot abstain"></span> <span class="stance-word abstain">abstain</span></td>
+                <td><span class="stance-dot abstain"></span></td>
+                <td><span class="stance-dot oppose"></span><span class="flip-note">▲ changed in R2</span></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="materials">
+        <h3 class="sec" style="margin-top:8px">Verified materials</h3>
+        <div class="mat-row">
+          <div class="fact"><span style="font-family:var(--mono)">better-sqlite3</span> and <span style="font-family:var(--mono)">esbuild</span> run install scripts today. pnpm allows them by name. Bun needs the same allow list.</div>
+          <div class="srcs"><span class="member-chip g">Grug</span><span class="chip"><span class="mono">read pnpm-workspace.yaml</span></span></div>
+        </div>
+        <div class="mat-row">
+          <div class="fact">13 packages share one root lockfile. Builds run through one script: <span style="font-family:var(--mono)">pnpm -r --if-present build</span>.</div>
+          <div class="srcs"><span class="member-chip a">Architect</span><span class="chip"><span class="mono">glob packages/*/package.json</span></span></div>
+        </div>
+        <div class="mat-row">
+          <div class="fact"><span style="font-family:var(--mono)">package.json</span> pins node ≥22.19 and pnpm@11.10.0. CI expects both.</div>
+          <div class="srcs"><span class="member-chip a">Architect</span><span class="chip"><span class="mono">read package.json</span></span></div>
+        </div>
+        <div class="mat-row">
+          <div class="fact">Setup friction comes from missing docs, not slow tools. No doc names the install command.</div>
+          <div class="srcs"><span class="member-chip d">Designer</span><span class="chip"><span class="mono">read README.md</span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ ARTBOARD 2 ═══════════════ -->
+  <div class="board-label">
+    <span class="num">02</span>
+    <h2>Member detail</h2>
+    <p>One member's work: research calls, their summary, discussion replies, and stance changes.</p>
+  </div>
+  <div class="artboard">
+    <div class="panel-bar"><span class="dot"></span><strong>Council</strong> · Session 758846e3 · Members</div>
+    <div class="mtabs">
+      <div class="mtab active">Grug <span class="role">chief</span></div>
+      <div class="mtab">Architect</div>
+      <div class="mtab">Designer</div>
+    </div>
+    <div class="mhead">
+      <span class="pill completed">OPPOSED</span>
+      <span class="chip">grugbrain.dev pragmatism</span>
+      <span class="chip">model <span class="mono">project default · codex</span></span>
+      <span class="chip">research <span class="mono">4 calls · 68s</span></span>
+    </div>
+    <div class="pad">
+      <div class="tl">
+        <div class="ev tool read">
+          <div class="etype">READ · pnpm-workspace.yaml</div>
+          <div class="eresult"><span class="hl">allowBuilds</span> lists better-sqlite3 and esbuild. Their install scripts run today by explicit trust.</div>
+        </div>
+        <div class="ev tool glob">
+          <div class="etype">GLOB · packages/*/package.json</div>
+          <div class="eresult">13 packages. Every build runs through <span class="hl">pnpm -r --if-present build</span>.</div>
+        </div>
+        <div class="ev tool read">
+          <div class="etype">READ · package.json</div>
+          <div class="eresult">Pins <span class="hl">node ≥22.19</span> and pnpm@11.10.0. No mention of Bun.</div>
+        </div>
+        <div class="ev say">
+          <div class="etype">CONSIDERATION · 250w limit</div>
+          <div class="sayblock">The speed claim is unmeasured. Installs are where Bun wins; our builds run <code>bb</code>, <code>tsc</code>, and <code>vitest</code>. Native builds trust pnpm's allow list. Bun must match it before we migrate anything.<span class="stance-line stance-word oppose">STANCE: oppose</span></div>
+        </div>
+        <div class="ev discuss">
+          <div class="etype">DISCUSSION · ROUND 1</div>
+          <div class="saw-context">Saw positions: Architect (oppose), Designer (abstain)</div>
+          <div class="sayblock">The real question is whether we can run a narrow, reversible test: benchmark on pinned CI images against representative workspaces.<span class="stance-line stance-word oppose">STANCE: oppose — held</span></div>
+        </div>
+        <div class="ev discuss">
+          <div class="etype">DISCUSSION · ROUND 2</div>
+          <div class="saw-context">Saw positions unchanged</div>
+          <div class="sayblock">Good point from Architect: test the installer separately from the runtime. That makes results clear. Keep pnpm as the default either way.<span class="stance-line stance-word oppose">STANCE: oppose — held</span></div>
+        </div>
+        <div class="ev verdict-ev">
+          <div class="etype">VERDICT · written by this member</div>
+          <div class="sayblock">Do not migrate now… (full report on Overview)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ ARTBOARD 3 ═══════════════ -->
+  <div class="board-label">
+    <span class="num">03</span>
+    <h2>Evidence ledger</h2>
+    <p>Every file or command a member used, who cited it, and what they found.</p>
+  </div>
+  <div class="artboard">
+    <div class="panel-bar"><span class="dot"></span><strong>Council</strong> · Session 758846e3 · Materials</div>
+    <div class="pad" style="padding-bottom:6px">
+      <table class="ledger">
+        <tr><th style="width:34%">Artifact</th><th>Finding used by the council</th><th class="who">Cited by</th></tr>
+        <tr>
+          <td class="artifact"><span class="kind">READ</span>pnpm-workspace.yaml</td>
+          <td>Native builds depend on the allowBuilds list. A migration must copy it, or clean installs break.</td>
+          <td class="who"><span class="member-chip g">Grug</span></td>
+        </tr>
+        <tr>
+          <td class="artifact"><span class="kind">GLOB</span>packages/*/package.json</td>
+          <td>13 packages use one build script. Preserve it.</td>
+          <td class="who"><span class="member-chip a">Architect</span> <span class="member-chip g">Grug</span></td>
+        </tr>
+        <tr>
+          <td class="artifact"><span class="kind">READ</span>package.json</td>
+          <td>The pinned engines define today's supported tools.</td>
+          <td class="who"><span class="member-chip a">Architect</span></td>
+        </tr>
+        <tr>
+          <td class="artifact"><span class="kind">READ</span>README.md</td>
+          <td>No setup guide exists. Setup friction exists today, without Bun.</td>
+          <td class="who"><span class="member-chip d">Designer</span></td>
+        </tr>
+        <tr>
+          <td class="artifact"><span class="kind">BASH</span>pnpm install --frozen-lock (timed)</td>
+          <td>Cold-install baseline captured for the benchmark branch.</td>
+          <td class="who"><span class="member-chip g">Grug</span></td>
+        </tr>
+      </table>
+    </div>
+    <div class="foot-actions">
+      <button class="btn">Copy materials as markdown</button>
+      <button class="btn primary">Export session report</button>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

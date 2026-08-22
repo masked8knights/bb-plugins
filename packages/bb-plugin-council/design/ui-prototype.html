@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Council — clickable prototype</title>
+<style>
+  :root {
+    --canvas: #121824;
+    --surface: #1a2230;
+    --surface-2: #212c3d;
+    --border: #2b3850;
+    --border-soft: #232e42;
+    --text: #dde5f1;
+    --muted: #8da0ba;
+    --faint: #66788f;
+    --accent: #7aa2f7;
+    --support: #4cc38a;
+    --oppose: #f2777a;
+    --abstain: #d5b06b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--text);
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 22px 18px 60px;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  .hint {
+    color: var(--faint); font-size: 12px; margin-bottom: 14px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .hint b { color: var(--muted); font-weight: 600; }
+
+  .panel-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--muted); font-size: 12px;
+  }
+  .panel-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--support); flex: none; }
+  .panel-bar strong { color: var(--text); font-weight: 600; }
+  .artboard {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .pad { padding: 16px 18px 18px; }
+
+  .backlink {
+    background: none; border: none; cursor: pointer;
+    color: var(--accent); font-size: 12px; font-weight: 600;
+    padding: 0; font-family: inherit;
+  }
+  .backlink:hover { text-decoration: underline; }
+
+  /* atoms */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    border-radius: 999px; padding: 2px 9px;
+  }
+  .pill.completed { background: rgba(76,195,138,.14); color: var(--support); }
+  .pill.failed   { background: rgba(242,119,122,.13); color: var(--oppose); }
+  .pill.opposed { background: rgba(242,119,122,.12); color: var(--oppose); }
+  .pill.supported { background: rgba(76,195,138,.12); color: var(--support); }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
+    background: var(--surface-2);
+  }
+  .chip .mono, .mono { font-family: var(--mono); }
+  .stance-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .stance-dot.support { background: var(--support); }
+  .stance-dot.oppose { background: var(--oppose); }
+  .stance-dot.abstain { background: var(--abstain); }
+  .stance-word.support { color: var(--support); }
+  .stance-word.oppose { color: var(--oppose); }
+  .stance-word.abstain { color: var(--abstain); }
+  .member-chip {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 1px 8px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-family: inherit; cursor: pointer;
+  }
+  .member-chip.g { color: #e2c08d; }
+  .member-chip.a { color: #9db8e8; }
+  .member-chip.d { color: #a8d3b8; }
+  .artifact-chip {
+    font-family: var(--mono); font-size: 11px; color: var(--accent);
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 2px 8px; cursor: pointer; font-family: inherit;
+  }
+  button.linklike { background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
+  h3.sec {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--faint); margin-bottom: 10px;
+  }
+
+  /* sessions list */
+  .btn {
+    font-size: 12px; font-weight: 600; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-family: inherit;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #10151f; }
+  .session-card {
+    width: 100%; text-align: left; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); padding: 13px 15px;
+    transition: background .12s ease;
+  }
+  .session-card:hover { background: #26334a; }
+  .session-card + .session-card { margin-top: 10px; }
+  .sc-top { display: flex; align-items: center; gap: 10px; }
+  .sc-top time { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .sc-proposal { margin-top: 7px; font-size: 13.5px; font-weight: 600; max-width: 70ch; }
+  .sc-meta { margin-top: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .tn-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+  .empty-note { color: var(--faint); font-size: 12px; }
+
+  /* detail head */
+  .head-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .proposal { font-size: 16px; font-weight: 600; margin-top: 8px; max-width: 64ch; }
+  .banner-error {
+    display: flex; gap: 9px; align-items: baseline;
+    margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+    background: rgba(242,119,122,.08); border: 1px solid rgba(242,119,122,.35);
+    color: var(--oppose); font-size: 12.5px;
+  }
+
+  /* tabs */
+  .tabs { display: flex; gap: 4px; padding: 12px 18px 0; border-bottom: 1px solid var(--border-soft); }
+  .tab {
+    padding: 7px 13px; border: none; background: none; cursor: pointer;
+    color: var(--muted); font-size: 12px; font-weight: 600; font-family: inherit;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* phase spine */
+  .spine { display: flex; margin: 16px 0 2px; }
+  .step { flex: 1; position: relative; padding-right: 14px; }
+  .step::before {
+    content: ""; position: absolute; top: 5px; left: 14px; right: 0; height: 2px;
+    background: var(--border);
+  }
+  .step:last-child::before { display: none; }
+  .step .knot {
+    position: relative; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--support); border: 2px solid var(--surface);
+    box-shadow: 0 0 0 1px var(--support);
+  }
+  .step.pending .knot { background: var(--surface-2); box-shadow: 0 0 0 1px var(--border); }
+  .step.aborted .knot { background: var(--oppose); box-shadow: 0 0 0 1px var(--oppose); }
+  .step .sname { font-weight: 600; font-size: 12px; margin: 7px 0 1px 14px; }
+  .step .smeta { color: var(--faint); font-size: 11px; margin-left: 14px; }
+
+  .cols { display: grid; grid-template-columns: 1.55fr 1fr; gap: 26px; margin-top: 18px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+  .verdict-body p.lede { font-size: 14px; line-height: 1.6; margin-bottom: 12px; }
+  .verdict-body ul { list-style: none; }
+  .verdict-body li {
+    display: flex; gap: 9px; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid var(--border-soft);
+    color: #c6d2e2;
+  }
+  .verdict-body li:last-child { border-bottom: none; }
+  .callout {
+    margin-top: 12px; border: 1px dashed var(--border); border-radius: 6px;
+    padding: 10px 12px; font-size: 12px; color: var(--muted);
+  }
+  .callout b { color: var(--text); }
+  .dissent {
+    margin-top: 12px; padding: 10px 12px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--muted); font-size: 12px;
+  }
+  .dissent b { color: var(--text); }
+
+  .tally-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .tally-nums { display: flex; gap: 18px; margin-bottom: 12px; }
+  .tn .n { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+  .tn .l { font-size: 11px; color: var(--faint); }
+  table.matrix { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.matrix th {
+    text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--border);
+  }
+  table.matrix td { padding: 6px 6px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+  .flip-note { font-family: var(--mono); font-size: 10px; color: var(--abstain); margin-left: 6px; }
+
+  .materials { margin-top: 20px; }
+  .mat-row {
+    display: flex; gap: 12px; align-items: baseline;
+    padding: 8px 2px; border-bottom: 1px solid var(--border-soft);
+  }
+  .mat-row:last-child { border-bottom: none; }
+  .mat-row .fact { flex: 1; color: #c6d2e2; min-width: 0; }
+  .mat-row .srcs { white-space: nowrap; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+
+  /* member timeline */
+  .mtabs { display: flex; gap: 6px; padding: 12px 18px 0; }
+  .mtab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 13px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--muted); font-size: 12px; font-weight: 600; font-family: inherit;
+  }
+  .mtab.active { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+  .mtab .role { font-size: 10px; color: var(--faint); font-weight: 500; }
+  .mhead {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 18px; background: var(--surface-2);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .tl { position: relative; margin-left: 7px; padding-left: 22px; }
+  .tl::before {
+    content: ""; position: absolute; left: 4px; top: 6px; bottom: 6px;
+    width: 2px; background: var(--border);
+  }
+  .ev { position: relative; padding: 7px 0; }
+  .ev::before {
+    content: ""; position: absolute; left: -21px; top: 12px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--faint);
+  }
+  .ev.tool::before { border-color: var(--accent); }
+  .ev.verdict-ev::before { border-color: var(--support); }
+  .ev.cancel-ev::before { border-color: var(--oppose); }
+  .etype {
+    font-family: var(--mono); font-size: 10px; font-weight: 700;
+    letter-spacing: .06em; color: var(--accent);
+  }
+  .ev.read .etype { color: #b58ee0; }
+  .ev.glob .etype { color: #6bb8d6; }
+  .ev.say .etype { color: var(--faint); }
+  .ev.discuss .etype { color: var(--support); }
+  .etitle { font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+  .eresult { color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 72ch; }
+  .eresult .hl { color: var(--text); background: rgba(122,162,247,.10); padding: 0 3px; border-radius: 3px; }
+  .sayblock {
+    border: 1px solid var(--border-soft); border-radius: 6px;
+    background: var(--surface-2); padding: 10px 12px;
+    color: #c6d2e2; font-size: 12.5px; max-width: 78ch;
+  }
+  .stance-line { display: block; margin-top: 8px; font-family: var(--mono); font-size: 11px; }
+  .phase-tag {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 4px;
+  }
+  .saw-context { color: var(--faint); font-size: 11px; margin: 3px 0 6px; }
+
+  /* ledger */
+  table.ledger { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.ledger th {
+    text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint); font-weight: 600; padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.ledger td { padding: 9px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  table.ledger tr:last-child td { border-bottom: none; }
+  .artifact { font-family: var(--mono); font-size: 12px; }
+  .kind {
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .05em;
+    color: var(--accent); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 5px; margin-right: 7px; vertical-align: 1px;
+  }
+  .who { white-space: nowrap; }
+  .foot-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 18px 16px; }
+  @keyframes flashRow { from { background: rgba(122,162,247,.20); } to { background: transparent; } }
+  tr.flash td { animation: flashRow 1.6s ease-out 1; }
+  @media (prefers-reduced-motion: reduce) {
+    tr.flash td { animation: none; background: rgba(122,162,247,.10); }
+    .session-card { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hint"><b>Prototype.</b> Click through: pick a session, switch tabs, tap any <span class="mono">member-chip</span> or <span class="mono">artifact</span> to cross-navigate.</div>
+  <div id="app"></div>
+</div>
+
+<script>
+const MEMBERS = {
+  g: { name: "Grug", cls: "g", role: "chief", color: "#e2c08d" },
+  a: { name: "Architect", cls: "a", role: "", color: "#9db8e8" },
+  d: { name: "Designer", cls: "d", role: "", color: "#a8d3b8" },
+};
+
+const SESSIONS = [
+  {
+    id: "bun",
+    proposal: "Proposal: migrate this repo's build and package management from pnpm to Bun workspaces to speed up installs and scripts.",
+    status: "completed",
+    outcome: "opposed",
+    outcomeLabel: "OPPOSED",
+    when: "Aug 21, 19:03",
+    duration: "3m 47s",
+    research: "workspace tools",
+    rule: "majority",
+    phases: [
+      { name: "Consideration", meta: "research on · 9 tool calls · 2m 04s", state: "done" },
+      { name: "Discussion R1", meta: "all members replied · 41s", state: "done" },
+      { name: "Discussion R2", meta: "early stop · 37s", state: "done" },
+      { name: "Verdict", meta: "Grug (chief) · 25s", state: "pending" },
+    ],
+    tally: { support: 0, oppose: 3, abstain: 0 },
+    trails: { g: ["oppose","oppose","oppose"], a: ["oppose","oppose","oppose"], d: ["abstain","abstain","oppose"] },
+    verdict: {
+      chief: "g",
+      lede: "Do not migrate now. Nobody has measured the speed gain. The costs are known: compatibility, reproducibility, CI, and releases. Keep pnpm, and test Bun on a benchmark branch first.",
+      points: [
+        { m: "g", t: "Bun speeds up installs, not builds. Our builds run bb, tsc, and vitest." },
+        { m: "a", t: "The migration changes how we install dependencies. We have no rollback plan or CI control for it." },
+        { m: "d", t: "New contributors will not know which installer to use. Each directory needs one documented command." },
+      ],
+      alternative: "Benchmark Bun on a branch. Switch only after it measures faster, installs native modules cleanly, and has a rollback plan.",
+      dissent: "None. All active members ended opposed.",
+    },
+    materials: [
+      { id: "ws-yaml", kind: "READ", path: "pnpm-workspace.yaml", fact: "better-sqlite3 and esbuild run install scripts today. pnpm allows them by name. Bun needs the same allow list.", citedBy: ["g"] },
+      { id: "pkgs", kind: "GLOB", path: "packages/*/package.json", fact: "13 packages share one root lockfile. Builds run through one script: pnpm -r --if-present build.", citedBy: ["a"] },
+      { id: "pkg-json", kind: "READ", path: "package.json", fact: "package.json pins node ≥22.19 and pnpm@11.10.0. CI expects both.", citedBy: ["a"] },
+      { id: "readme", kind: "READ", path: "README.md", fact: "Setup friction comes from missing docs, not slow tools. No doc names the install command.", citedBy: ["d"] },
+      { id: "baseline", kind: "BASH", path: "pnpm install --frozen-lock (timed)", fact: "Cold-install baseline captured for the benchmark branch.", citedBy: ["g"] },
+    ],
+    memberEvents: {
+      g: [
+        { type: "tool read", icon: "read", title: "READ · pnpm-workspace.yaml", result: "<span class='hl'>allowBuilds</span> lists better-sqlite3 and esbuild. Their install scripts run today by explicit trust." },
+        { type: "tool glob", icon: "glob", title: "GLOB · packages/*/package.json", result: "13 packages. Every build runs through <span class='hl'>pnpm -r --if-present build</span>." },
+        { type: "tool read", icon: "read", title: "READ · package.json", result: "Pins <span class='hl'>node ≥22.19</span> and pnpm@11.10.0. No mention of Bun." },
+        { type: "say", label: "CONSIDERATION · 250w limit", html: "The speed claim is unmeasured. Installs are where Bun wins; our builds run <code>bb</code>, <code>tsc</code>, and <code>vitest</code>. Native builds trust pnpm's allow list. Bun must match it before we migrate anything.", stance: "oppose", note: "" },
+        { type: "discuss", round: 1, saw: "Saw positions: Architect (oppose), Designer (abstain)", html: "The real question is whether we can run a narrow, reversible test: benchmark on pinned CI images against representative workspaces.", stance: "oppose", note: "held" },
+        { type: "discuss", round: 2, saw: "Saw positions unchanged", html: "Good point from Architect: test the installer separately from the runtime. That makes results clear. Keep pnpm as the default either way.", stance: "oppose", note: "held" },
+        { type: "verdict", label: "VERDICT · written by this member", html: "Do not migrate now… (full report on Overview)" },
+      ],
+      a: [
+        { type: "tool glob", icon: "glob", title: "GLOB · packages/*/package.json", result: "13 packages, one shared lockfile, one recursive build script." },
+        { type: "tool read", icon: "read", title: "READ · package.json", result: "Pinned engines define today's supported toolchain." },
+        { type: "say", label: "CONSIDERATION · 250w limit", html: "The migration changes the dependency-install contract. We have no policy for rollback, audits, or CI under Bun yet.", stance: "oppose", note: "" },
+        { type: "discuss", round: 1, saw: "Saw positions: Grug (oppose), Designer (abstain)", html: "Separate the installer question from the runtime question. Otherwise results are not attributable.", stance: "oppose", note: "held" },
+        { type: "discuss", round: 2, saw: "Saw positions unchanged", html: "Add one governance gate: keep the canonical lockfile until reproducible installs and release artifacts pass under Bun.", stance: "oppose", note: "held" },
+      ],
+      d: [
+        { type: "tool read", icon: "read", title: "READ · README.md", result: "No setup guide. New contributors guess the install command." },
+        { type: "say", label: "CONSIDERATION · 250w limit", html: "Faster installs help first impressions. But the risks sit in setup docs and recovery paths, which do not exist yet.", stance: "abstain", note: "" },
+        { type: "discuss", round: 1, saw: "Saw positions: Grug (oppose), Architect (oppose)", html: "If a pilot happens: pin versions, one canonical manager per branch, actionable errors.", stance: "abstain", note: "held" },
+        { type: "discuss", round: 2, saw: "Saw pilot gate gaining structure", html: "The pilot plan answers my setup concern only if it ships with docs and metrics. As proposed, the migration still breaks contributor flow — so I now oppose it too.", stance: "oppose", note: "changed — pilot lacks docs gate" },
+      ],
+    },
+  },
+  {
+    id: "rfc",
+    proposal: "Proposal: adopt a lightweight RFC process for new plugins in this repo?",
+    status: "completed",
+    outcome: "supported",
+    outcomeLabel: "SUPPORTED",
+    when: "Aug 21, 19:03",
+    duration: "1m 58s",
+    research: "off",
+    rule: "majority",
+    phases: [
+      { name: "Consideration", meta: "facts presented only · 38s", state: "done" },
+      { name: "Discussion R1", meta: "early stop · 29s", state: "done" },
+      { name: "Verdict", meta: "Grug (chief) · 21s", state: "pending" },
+    ],
+    tally: { support: 3, oppose: 0, abstain: 0 },
+    trails: { g: ["support","support"], a: ["support","support"], d: ["support","support"] },
+    verdict: {
+      chief: "g",
+      lede: "Adopt a one-page RFC process. Short documents, async review, clear thresholds, recorded decisions.",
+      points: [
+        { m: "g", t: "Short RFCs prevent duplicate work and record why choices were made." },
+        { m: "a", t: "Require RFCs only for higher-risk plugins. Fast-track low-risk ones." },
+        { m: "d", t: "Cover user value, accessibility, and failure states in the template." },
+      ],
+      alternative: null,
+      dissent: "None.",
+    },
+    materials: [
+      { id: "contrib", kind: "READ", path: "CONTRIBUTING.md", fact: "No current process records plugin decisions.", citedBy: ["a"] },
+    ],
+    memberEvents: {
+      g: [
+        { type: "say", label: "CONSIDERATION · research off", html: "A one-page template adds little cost and keeps decisions searchable.", stance: "support", note: "" },
+        { type: "discuss", round: 1, saw: "Saw positions: Architect (support), Designer (support)", html: "Keep it to one page. Long RFC templates die.", stance: "support", note: "held" },
+      ],
+      a: [
+        { type: "say", label: "CONSIDERATION · research off", html: "Gate by risk. Read-only plugins should not need a document.", stance: "support", note: "" },
+        { type: "discuss", round: 1, saw: "Saw positions unchanged", html: "Agreed on one page with a risk tier.", stance: "support", note: "held" },
+      ],
+      d: [
+        { type: "say", label: "CONSIDERATION · research off", html: "Template should ask about user value and failure states up front.", stance: "support", note: "" },
+      ],
+    },
+  },
+  {
+    id: "cancel",
+    proposal: "Test: should error messages in CLIs echo back the invalid input?",
+    status: "failed",
+    outcome: null,
+    outcomeLabel: null,
+    when: "Aug 21, 18:57",
+    duration: "cancelled at 41s",
+    research: "workspace tools",
+    rule: "majority",
+    phases: [
+      { name: "Consideration", meta: "complete · 33s", state: "done" },
+      { name: "Discussion R1", meta: "cancelled before replies", state: "aborted" },
+      { name: "Verdict", meta: "never reached", state: "pending" },
+    ],
+    tally: { support: 1, oppose: 0, abstain: 2 },
+    trails: { g: ["support"], a: ["abstain"], d: ["abstain"] },
+    error: "Deliberation cancelled.",
+    verdict: null,
+    materials: [],
+    memberEvents: {
+      g: [ { type: "say", label: "CONSIDERATION · complete", html: "Echoing input helps debugging. Bound it and redact secrets.", stance: "support", note: "" } ],
+      a: [ { type: "say", label: "CONSIDERATION · complete", html: "Depends on context: echo shape, not raw payloads.", stance: "abstain", note: "" } ],
+      d: [ { type: "say", label: "CONSIDERATION · complete", html: "Error copy should stay human. Raw echo belongs behind a flag.", stance: "abstain", note: "" } ],
+    },
+  },
+];
+
+/* ---------- helpers ---------- */
+const app = document.getElementById("app");
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+function stanceCell(stance, extra) {
+  return `<span class="stance-dot ${stance}"></span> <span class="stance-word ${stance}">${stance}</span>${extra || ""}`;
+}
+function memberBtn(sid, key) {
+  const m = MEMBERS[key];
+  return `<button class="linklike member-chip ${m.cls}" onclick="go('#/s/${sid}/members/${key}')">${m.name}</button>`;
+}
+function artifactBtn(sid, matId, label) {
+  return `<button class="linklike artifact-chip" onclick="jumpMaterial('${sid}','${matId}')">${label}</button>`;
+}
+
+/* ---------- views ---------- */
+function renderList() {
+  app.innerHTML = `
+    <div class="artboard">
+      <div class="panel-bar"><span class="dot"></span><strong>Council</strong></div>
+      <div class="pad">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <h3 class="sec" style="margin:0">Recent sessions</h3>
+          <button class="btn primary">Start a council conversation</button>
+        </div>
+        ${SESSIONS.map((s) => `
+          <button class="session-card" onclick="go('#/s/${s.id}')">
+            <div class="sc-top">
+              <span class="pill ${s.status === "completed" ? "completed" : "failed"}">${s.status.toUpperCase()}</span>
+              ${s.research === "workspace tools" ? '<span class="chip">🔬 researched</span>' : ""}
+              <time>${s.when}</time>
+            </div>
+            <div class="sc-proposal">${esc(s.proposal)}</div>
+            <div class="sc-meta">
+              ${s.tally ? `<span class="tn-chip"><span class="stance-dot support"></span>${s.tally.support}</span>
+              <span class="tn-chip"><span class="stance-dot oppose"></span>${s.tally.oppose}</span>
+              <span class="tn-chip"><span class="stance-dot abstain"></span>${s.tally.abstain}</span>` : ""}
+              <span class="chip">⏱ ${s.duration}</span>
+            </div>
+          </button>`).join("")}
+        <p class="empty-note" style="margin-top:12px">Older sessions load on scroll in the real panel.</p>
+      </div>
+    </div>`;
+}
+
+function phaseSpine(s) {
+  return `<div class="spine">${s.phases.map((p) => `
+    <div class="step ${p.state === "done" ? "" : p.state}">
+      <div class="knot"></div><div class="sname">${p.name}</div><div class="smeta">${p.meta}</div>
+    </div>`).join("")}</div>`;
+}
+
+function renderOverview(sid) {
+  const s = SESSIONS.find((x) => x.id === sid);
+  const phaseNames = s.phases.filter((p) => p.state !== "pending").map((p) => p.name.replace("Discussion ", ""));
+  const matrixRows = Object.keys(MEMBERS).filter((k) => s.trails[k]).map((k) => {
+    const trail = s.trails[k];
+    let cells = "";
+    trail.forEach((st, i) => {
+      const flipped = i > 0 && st !== trail[i - 1];
+      cells += `<td>${i === 0 ? stanceCell(st) : `<span class="stance-dot ${st}"></span>`}${flipped ? `<span class="flip-note">▲ changed in ${phaseNames[i]}</span>` : ""}</td>`;
+    });
+    return `<tr><td>${memberBtn(sid, k)}</td>${cells}</tr>`;
+  }).join("");
+  const mats = s.materials.map((m) => `
+    <div class="mat-row">
+      <div class="fact">${esc(m.fact)}</div>
+      <div class="srcs">${m.citedBy.map((k) => memberBtn(sid, k)).join("")}${artifactBtn(sid, m.id, m.path.split("/").pop())}</div>
+    </div>`).join("");
+  app.innerHTML = `
+    <div class="artboard">
+      <div class="panel-bar"><button class="backlink" onclick="go('#/sessions')">← All sessions</button><strong>Council</strong> · Session ${sid}</div>
+      <div class="pad">
+        <div class="head-row">
+          <span class="pill ${s.status === "completed" ? "completed" : "failed"}">${s.status.toUpperCase()}</span>
+          <span class="chip">⏱ ${s.duration}</span>
+          <span class="chip">🔬 research <span class="mono">${s.research}</span></span>
+          <span class="chip">⚖️ ${s.rule}</span>
+        </div>
+        <div class="proposal">${esc(s.proposal)}</div>
+        ${phaseSpine(s)}
+        ${s.error ? `<div class="banner-error">⚠ ${esc(s.error)} Member threads were stopped and archived. The partial transcript is kept below.</div>` : ""}
+        ${renderTabs(sid, "overview")}
+        <div class="cols" style="margin-top:16px">
+          <div class="verdict-body">
+            ${s.verdict ? `
+              <h3 class="sec">Verdict — by ${MEMBERS[s.verdict.chief].name}, chief justice</h3>
+              <p class="lede">${esc(s.verdict.lede)}</p>
+              <ul>${s.verdict.points.map((p) => `<li>${memberBtn(sid, p.m)}<span>${esc(p.t)}</span></li>`).join("")}</ul>
+              ${s.verdict.alternative ? `<div class="callout"><b>Alternative:</b> ${esc(s.verdict.alternative)}</div>` : ""}
+              <div class="dissent"><b>Dissent:</b> ${esc(s.verdict.dissent)}</div>`
+            : `<h3 class="sec">No verdict</h3><p style="color:var(--muted);font-size:12.5px">The session ended early. Stances below reflect the last recorded phase.</p>`}
+          </div>
+          <div>
+            <h3 class="sec">Tally</h3>
+            <div class="tally-card">
+              <div class="tally-nums">
+                <div class="tn"><div class="n" style="color:var(--support)">${s.tally.support}</div><div class="l">support</div></div>
+                <div class="tn"><div class="n" style="color:var(--oppose)">${s.tally.oppose}</div><div class="l">oppose</div></div>
+                <div class="tn"><div class="n" style="color:var(--abstain)">${s.tally.abstain}</div><div class="l">abstain</div></div>
+              </div>
+              <table class="matrix">
+                <tr><th>Member</th>${phaseNames.map((n) => `<th>${n}</th>`).join("")}</tr>
+                ${matrixRows}
+              </table>
+            </div>
+          </div>
+        </div>
+        ${s.materials.length ? `<div class="materials"><h3 class="sec">Verified materials</h3>${mats}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+function renderMembers(sid, activeKey) {
+  const s = SESSIONS.find((x) => x.id === sid);
+  const keys = Object.keys(s.memberEvents);
+  const key = keys.includes(activeKey) ? activeKey : keys[0];
+  const m = MEMBERS[key];
+  const trail = s.trails[key] || [];
+  const finalStance = trail[trail.length - 1];
+  const events = s.memberEvents[key].map((e) => {
+    if (e.type.startsWith("tool")) {
+      return `<div class="ev tool ${e.icon}"><div class="etype">${e.type.toUpperCase()}</div><div class="etitle">${e.title}</div><div class="eresult">${e.result}</div></div>`;
+    }
+    if (e.type === "say") {
+      return `<div class="ev say"><div class="etype">${e.label}</div><div class="sayblock">${e.html}<span class="stance-line stance-word ${e.stance}">STANCE: ${e.stance}${e.note ? " — " + e.note : ""}</span></div></div>`;
+    }
+    if (e.type === "discuss") {
+      return `<div class="ev discuss"><div class="etype">DISCUSSION · ROUND ${e.round}</div><div class="saw-context">${e.saw}</div><div class="sayblock">${e.html}<span class="stance-line stance-word ${e.stance}">STANCE: ${e.stance}${e.note ? " — " + e.note : ""}</span></div></div>`;
+    }
+    return `<div class="ev verdict-ev"><div class="etype">${e.label}</div><div class="sayblock">${e.html}</div></div>`;
+  }).join("");
+  app.innerHTML = `
+    <div class="artboard">
+      <div class="panel-bar"><button class="backlink" onclick="go('#/sessions')">← All sessions</button><strong>Council</strong> · Session ${sid}</div>
+      <div class="pad" style="padding-bottom:0">
+        <div class="head-row">
+          <span class="pill ${s.status === "completed" ? "completed" : "failed"}">${s.status.toUpperCase()}</span>
+          <span class="proposal" style="margin:0;font-size:13.5px">${esc(s.proposal)}</span>
+        </div>
+      </div>
+      ${renderTabs(sid, "members")}
+      <div class="mtabs">
+        ${keys.map((k) => `<button class="mtab ${k === key ? "active" : ""}" onclick="go('#/s/${sid}/members/${k}')">${MEMBERS[k].name}${MEMBERS[k].role ? ` <span class="role">${MEMBERS[k].role}</span>` : ""}</button>`).join("")}
+      </div>
+      <div class="mhead">
+        <span class="pill ${finalStance === "support" ? "supported" : finalStance === "oppose" ? "opposed" : "failed"}">${(finalStance || "NO VOTE").toUpperCase()}</span>
+        ${m.role ? `<span class="chip">chief justice</span>` : ""}
+        <span class="chip">model <span class="mono">project default</span></span>
+        ${s.research === "workspace tools" ? '<span class="chip">researched the workspace</span>' : '<span class="chip">no research (setting off)</span>'}
+      </div>
+      <div class="pad">
+        <div class="tl">${events}</div>
+      </div>
+    </div>`;
+}
+
+function renderMaterials(sid) {
+  const s = SESSIONS.find((x) => x.id === sid);
+  const rows = s.materials.map((m, i) => `
+    <tr id="mat-${m.id}">
+      <td class="artifact"><span class="kind">${m.kind}</span>${esc(m.path)}</td>
+      <td>${esc(m.fact)}</td>
+      <td class="who">${m.citedBy.map((k) => memberBtn(sid, k)).join(" ")}</td>
+    </tr>`).join("");
+  app.innerHTML = `
+    <div class="artboard">
+      <div class="panel-bar"><button class="backlink" onclick="go('#/sessions')">← All sessions</button><strong>Council</strong> · Session ${sid}</div>
+      <div class="pad" style="padding-bottom:0">
+        <div class="head-row">
+          <span class="pill ${s.status === "completed" ? "completed" : "failed"}">${s.status.toUpperCase()}</span>
+          <span class="proposal" style="margin:0;font-size:13.5px">${esc(s.proposal)}</span>
+        </div>
+      </div>
+      ${renderTabs(sid, "materials")}
+      <div class="pad" style="padding-bottom:6px">
+        ${s.materials.length ? `
+          <table class="ledger">
+            <tr><th style="width:34%">Artifact</th><th>Finding used by the council</th><th class="who">Cited by</th></tr>
+            ${rows}
+          </table>`
+        : `<p style="color:var(--faint);font-size:12.5px;padding:8px 2px">Nothing was collected${s.error ? " before the session ended" : ""}. Research off, or nothing verified.</p>`}
+      </div>
+      ${s.materials.length ? `<div class="foot-actions"><button class="btn">Copy materials as markdown</button><button class="btn primary">Export session report</button></div>` : ""}
+    </div>`;
+}
+
+function renderTabs(sid, active) {
+  const t = (id, label) =>
+    `<button class="tab ${active === id ? "active" : ""}" onclick="go('#/s/${sid}/${id === "overview" ? "" : id}')">${label}</button>`;
+  return `<div class="tabs">${t("overview", "Overview")}${t("members", "Members")}${t("materials", "Materials")}</div>`;
+}
+
+/* ---------- router ---------- */
+let pendingHighlight = null;
+function go(hash) { location.hash = hash; }
+function jumpMaterial(sid, matId) {
+  pendingHighlight = matId;
+  go(`#/s/${sid}/materials`);
+}
+function route() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  window.scrollTo({ top: 0 });
+  if (parts[0] === "s" && parts[1]) {
+    const s = SESSIONS.find((x) => x.id === parts[1]);
+    if (!s) { renderList(); return; }
+    const view = parts[2] || "overview";
+    if (view === "members") renderMembers(parts[1], parts[3]);
+    else if (view === "materials") { renderMaterials(parts[1]); applyHighlight(); }
+    else renderOverview(parts[1]);
+  } else {
+    renderList();
+  }
+}
+function applyHighlight() {
+  if (!pendingHighlight) return;
+  const el = document.getElementById("mat-" + pendingHighlight);
+  pendingHighlight = null;
+  if (!el) return;
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1700);
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>

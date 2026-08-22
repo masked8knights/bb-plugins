@@ -221,19 +221,13 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     maxRounds: {
       type: "string",
-      label: "Discussion rounds (max)",
-      default: "2",
+      label: "Safety cap: max discussion rounds",
+      default: "20",
     },
     memberTimeoutSec: {
       type: "string",
       label: "Per-response timeout (seconds)",
       default: "240",
-    },
-    consensusMode: {
-      type: "select",
-      label: "Consensus rule",
-      options: ["majority", "unanimous"],
-      default: "majority",
     },
     memberResearch: {
       type: "select",
@@ -260,12 +254,8 @@ export default async function plugin(bb: BbPluginApi) {
     };
     const values = await settings.get();
     return {
-      maxRounds: Math.max(0, parseCount(values.maxRounds, 2)),
+      maxRounds: Math.max(1, parseCount(values.maxRounds, 20)),
       timeoutMs: Math.max(30, parseCount(values.memberTimeoutSec, 240)) * 1000,
-      consensusMode:
-        values.consensusMode === "unanimous"
-          ? ("unanimous" as const)
-          : ("majority" as const),
       research: values.memberResearch !== "off",
     };
   };
@@ -299,7 +289,7 @@ export default async function plugin(bb: BbPluginApi) {
       context: input.context ?? null,
       originThreadId: input.originThreadId ?? null,
       projectId,
-      consensusMode: config.consensusMode,
+      consensusMode: "majority",
       maxRounds: config.maxRounds,
     });
     try {
@@ -372,6 +362,60 @@ export default async function plugin(bb: BbPluginApi) {
           isError: true,
         };
       }
+    },
+  });
+
+  // Member threads register their final vote through this tool. It is
+  // visible to every agent thread, but it only works when the caller's
+  // thread id matches a member thread on a running council session —
+  // anyone else gets a polite error.
+  bb.agents.registerTool({
+    name: "council_register_vote",
+    description:
+      "Register your FINAL vote in an active council deliberation. Only council member threads can use this. After registering, your position is locked and you leave the discussion.",
+    instructions:
+      "Call this exactly once, when you are confident in your answer. Pass stance plus a one-line closing reason. Do not call it before the discussion phase.",
+    experimental_statusLabels: {
+      pending: "Registering final vote",
+      completed: "Final vote registered",
+    },
+    parameters: z.object({
+      stance: z
+        .enum(["support", "oppose", "abstain"])
+        .describe("Your final position."),
+      comment: z
+        .string()
+        .max(600)
+        .optional()
+        .describe("One-line closing reason for your vote."),
+    }),
+    async execute(params, ctx) {
+      const membership = store.findOpenSessionByThreadId(ctx.threadId);
+      if (!membership) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "You are not part of an active council session, so no vote was recorded.",
+            },
+          ],
+          isError: true,
+        };
+      }
+      store.registerVote(membership.sessionId, membership.memberId, params.stance);
+      if (params.comment) {
+        store.addTurn({
+          sessionId: membership.sessionId,
+          phase: "discussion",
+          round: null,
+          memberId: membership.memberId,
+          memberName: membership.memberName,
+          stance: params.stance,
+          comment: `(final vote) ${params.comment}`,
+        });
+      }
+      bb.realtime.publish("council", { sessionId: membership.sessionId });
+      return `${membership.memberName}, your final vote (${params.stance}) is locked. You are no longer part of the discussion.`;
     },
   });
 
@@ -579,8 +623,12 @@ export default async function plugin(bb: BbPluginApi) {
         if (session.error) parts.push(`Error: ${session.error}`);
         for (const turn of store.listTurns(session.id)) {
           if (turn.phase === "verdict") continue;
-          const where =
-            turn.phase === "consideration" ? "initial review" : `round ${turn.round}`;
+            const where =
+              turn.phase === "consideration"
+                ? "initial review"
+                : turn.round === null
+                  ? "final vote"
+                  : `round ${turn.round}`;
           parts.push(`\n== ${turn.memberName} (${where}) [${turn.stance ?? "-"}] ==\n${turn.comment}`);
         }
         if (session.verdict) parts.push(`\n== Final report ==\n${session.verdict}`);

@@ -17,6 +17,7 @@ export type Tally = {
 };
 
 const STANCE_RE_ALL = /^\s*STANCE:\s*(support|oppose|abstain)\s*$/gim;
+const VOTE_RE_ALL = /^\s*VOTE:\s*(support|oppose|abstain)\s*$/gim;
 const PASS_RE = /^\s*PASS:\s?/im;
 const COMMENT_RE = /^\s*COMMENT:\s?/i;
 export const REASONING_LEVELS = new Set([
@@ -42,13 +43,19 @@ function latestStance(text: string): Stance | null {
   return (last?.[1]?.toLowerCase() as Stance | undefined) ?? null;
 }
 
+export function parseFinalVote(text: string): Stance | null {
+  const matches = [...text.matchAll(VOTE_RE_ALL)];
+  const last = matches[matches.length - 1];
+  return (last?.[1]?.toLowerCase() as Stance | undefined) ?? null;
+}
+
 export function parseDiscussionReply(text: string): {
   kind: "comment" | "pass";
   comment: string;
   stance: Stance | null;
 } {
   const stance = latestStance(text);
-  let body = text.replace(STANCE_RE_ALL, "").trim();
+  let body = text.replace(STANCE_RE_ALL, "").replace(VOTE_RE_ALL, "").trim();
   if (PASS_RE.test(body)) {
     const reason = body.replace(PASS_RE, "").trim();
     return { kind: "pass", comment: reason || "(passed)", stance };
@@ -81,13 +88,20 @@ function latestTurnPerMember(
 function buildDigest(
   members: MemberRow[],
   turns: TurnRow[],
+  votes: Map<string, { stance: string; atMs: number }>,
 ): string {
   const latest = latestTurnPerMember(turns);
   const lines: string[] = [];
   for (const member of members) {
+    const vote = votes.get(member.id);
     const turn = latest.get(member.id);
+    if (vote && !turn) {
+      lines.push(`- ${member.name}: FINAL VOTE ${vote.stance} (locked, no longer debating)`);
+      continue;
+    }
     if (!turn) continue;
-    lines.push(`- ${member.name} (${turn.stance ?? "no stance"}): ${clamp(turn.comment, 600)}`);
+    const suffix = vote ? ` — FINAL VOTE ${vote.stance}, locked` : "";
+    lines.push(`- ${member.name} (${turn.stance ?? "no stance"}${suffix}): ${clamp(turn.comment, 600)}`);
   }
   return lines.join("\n") || "(no positions recorded yet)";
 }
@@ -99,7 +113,9 @@ function buildTranscript(turns: TurnRow[]): string {
       const where =
         turn.phase === "consideration"
           ? "initial review"
-          : `discussion round ${turn.round}`;
+          : turn.round === null
+            ? "final vote"
+            : `discussion round ${turn.round}`;
       return `[${turn.memberName} — ${where}] (${turn.stance ?? "no stance"}) ${clamp(turn.comment, 900)}`;
     })
     .join("\n\n");
@@ -141,19 +157,6 @@ function computeTally(
   };
 }
 
-function consensusReached(tally: Tally, mode: string): boolean {
-  if (tally.activeMembers === 0) return false;
-  if (mode === "unanimous") {
-    return (
-      tally.support === tally.activeMembers &&
-      tally.oppose === 0 &&
-      tally.abstain === 0
-    );
-  }
-  const majority = Math.floor(tally.activeMembers / 2) + 1;
-  return tally.support >= majority && tally.support > tally.oppose;
-}
-
 function considerationPrompt(
   member: MemberRow,
   proposal: string,
@@ -178,7 +181,8 @@ function considerationPrompt(
     proposal,
     "</proposal>",
     contextBlock,
-    `Review it independently. Identify strengths, risks, and open questions. Be specific and concise (under 250 words). ${researchClause}`,
+    `Review it independently. Identify strengths, risks, and open questions. Be specific and concise (under 250 words). You do not need to settle on anything final yet — a discussion round follows, and you will register your final vote through the council_register_vote tool once you are confident.`,
+    researchClause,
     "",
     "End your reply with exactly one line:",
     "STANCE: support",
@@ -189,28 +193,28 @@ function considerationPrompt(
   ].join("\n");
 }
 
-function discussionPrompt(
-  round: number,
-  maxRounds: number,
-  digest: string,
-): string {
+function discussionPrompt(round: number, digest: string): string {
   return [
-    `Council discussion, round ${round} of ${maxRounds}.`,
+    `Council discussion, round ${round}.`,
     "",
     "Current positions:",
     digest,
     "",
-    "Reply with ONE short comment (a rebuttal, concession, or new concern) in exactly this shape:",
+    "There is no fixed number of rounds. The deliberation ends when every member has registered a final vote.",
     "",
-    "COMMENT: <your comment>",
-    "STANCE: <support|oppose|abstain>",
+    "If you are still working through the problem, reply in this shape:",
     "",
-    "If you have nothing useful to add, reply instead:",
+    "COMMENT: <a rebuttal, concession, or new concern>",
+    "STANCE: <support|oppose|abstain>  (your current leaning — not final)",
+    "",
+    "When you are confident in your answer, stop debating and lock it in: call the",
+    "council_register_vote tool with your final stance and a one-line closing reason.",
+    "Once you call it, you are locked out of the discussion, so only vote when you are done.",
+    "Do not use any other tools during discussion. Keep comments under 120 words.",
+    "If you truly have nothing to add and are not ready to vote, reply:",
     "",
     "PASS: <one-line reason>",
     "STANCE: <support|oppose|abstain>",
-    "",
-    "Do not use tools. Keep comments under 120 words.",
   ].join("\n");
 }
 
@@ -218,7 +222,11 @@ function verdictPrompt(
   reporterName: string,
   tally: Tally,
   transcript: string,
+  debateMeta: { rounds: number; votesRegistered: number; activeMembers: number; hitCap: boolean },
 ): string {
+  const endReason = debateMeta.hitCap
+    ? `Discussion stopped at the safety cap of ${debateMeta.rounds} rounds before every member registered a vote; treat unregistered members' last recorded stance as their final position and say so plainly.`
+    : `All ${debateMeta.votesRegistered} active members individually registered their final votes over ${debateMeta.rounds} discussion round${debateMeta.rounds === 1 ? "" : "s"}.`;
   return [
     `You are ${reporterName}, chief justice of the council. Deliberation has ended. Write the final report for the requester.`,
     "",
@@ -227,6 +235,7 @@ function verdictPrompt(
     "## Reasoning highlights",
     "## Dissent and minority views",
     "",
+    endReason,
     "Rules: the Verdict states the council's majority position plainly. Reasoning highlights lists the strongest distinct points raised, attributed to members. Include Dissent and minority views only when at least one member ended opposed or abstaining; otherwise write \"None.\" Be faithful to the transcript. Do not use tools.",
     "",
     `Tally: ${tally.support} support / ${tally.oppose} oppose / ${tally.abstain} abstain (${tally.activeMembers} active of ${tally.totalMembers})`,
@@ -258,7 +267,6 @@ function fallbackReport(tally: Tally, turns: TurnRow[]): string {
 export type CouncilConfig = {
   maxRounds: number;
   timeoutMs: number;
-  consensusMode: "majority" | "unanimous";
   research: boolean;
 };
 
@@ -330,11 +338,9 @@ export class CouncilEngine {
 
     try {
       const raw = await this.getConfig();
-      const maxRounds = Math.max(0, raw.maxRounds);
+      const maxRounds = Math.max(1, raw.maxRounds);
       const timeoutMs = Math.max(30_000, raw.timeoutMs);
       const research = raw.research !== false;
-      const consensusMode: string =
-        raw.consensusMode === "unanimous" ? "unanimous" : "majority";
 
       const chief =
         members.find((member) => member.isChief === 1) ?? members[0] ?? null;
@@ -478,65 +484,92 @@ export class CouncilEngine {
         );
       }
 
+      // Open-ended debate: each round prompts only members who have not yet
+      // registered a final vote. The session ends when every active member
+      // has voted, or at the safety cap. Votes are registered by the member
+      // threads themselves through the council_register_vote tool.
+      const votes = this.store.listVotes(session.id);
+      const cap = Math.max(1, maxRounds);
+      let round = 0;
+      const pending = () =>
+        [...rosterOk].filter((id) => !votes.has(id));
+      while (pending().length > 0 && round < cap) {
+        if (signal.aborted) {
+          throw new Error("Deliberation cancelled.");
+        }
+        round++;
+        const activeMembers = members.filter((member) =>
+          rosterOk.has(member.id),
+        );
+        const digest = buildDigest(
+          activeMembers,
+          this.store.listTurns(session.id),
+          votes,
+        );
+        for (const member of activeMembers) {
+          if (!rosterOk.has(member.id) || votes.has(member.id)) continue;
+          if (signal.aborted) {
+            throw new Error("Deliberation cancelled.");
+          }
+          const threadId = threadsByMember.get(member.id);
+          if (!threadId) continue;
+          try {
+            await this.bb.sdk.threads.send({
+              threadId,
+              mode: "auto",
+              input: [{ type: "text", mentions: [], text: discussionPrompt(round, digest) }],
+            });
+            await this.waitIdle(threadId, timeoutMs, signal);
+            const output = await this.readOutput(threadId);
+            if (!output) throw new Error("empty response");
+            const reply = parseDiscussionReply(output);
+            this.store.addTurn({
+              sessionId: session.id,
+              phase: "discussion",
+              round,
+              memberId: member.id,
+              memberName: member.name,
+              stance: reply.stance,
+              comment: reply.comment,
+            });
+            // Note: replying does NOT lock a vote. Only the
+            // council_register_vote tool (called by the member thread)
+            // registers one; the store re-sync below picks it up.
+          } catch (error) {
+            if (this.isAbort(error, signal)) {
+              throw new Error("Deliberation cancelled.");
+            }
+            this.store.addTurn({
+              sessionId: session.id,
+              phase: "discussion",
+              round,
+              memberId: member.id,
+              memberName: member.name,
+              stance: null,
+              comment: `(no response this round: ${String(error)})`,
+            });
+          }
+          this.publish(session.id);
+        }
+        // The register_vote tool may have recorded additional votes while we
+        // waited on slower members; re-sync before deciding who is pending.
+        for (const [memberId, vote] of this.store.listVotes(session.id)) {
+          votes.set(memberId, vote);
+        }
+      }
+
+      const hitCap = pending().length > 0;
+      const votesRegistered = rosterOk.size - pending().length;
+
       let tally = computeTally(
         members,
         rosterOk,
         this.store.listTurns(session.id),
       );
-
-      if (!consensusReached(tally, consensusMode)) {
-        for (let round = 1; round <= maxRounds; round++) {
-          const activeMembers = members.filter((member) =>
-            rosterOk.has(member.id),
-          );
-          const digest = buildDigest(
-            activeMembers,
-            this.store.listTurns(session.id),
-          );
-          for (const member of activeMembers) {
-            if (signal.aborted) {
-              throw new Error("Deliberation cancelled.");
-            }
-            const threadId = threadsByMember.get(member.id);
-            if (!threadId) continue;
-            try {
-              await this.bb.sdk.threads.send({
-                threadId,
-                mode: "auto",
-                input: [{ type: "text", mentions: [], text: discussionPrompt(round, maxRounds, digest) }],
-              });
-              await this.waitIdle(threadId, timeoutMs, signal);
-              const output = await this.readOutput(threadId);
-              if (!output) throw new Error("empty response");
-              const reply = parseDiscussionReply(output);
-              this.store.addTurn({
-                sessionId: session.id,
-                phase: "discussion",
-                round,
-                memberId: member.id,
-                memberName: member.name,
-                stance: reply.stance,
-                comment: reply.comment,
-              });
-            } catch (error) {
-              if (this.isAbort(error, signal)) {
-                throw new Error("Deliberation cancelled.");
-              }
-              this.store.addTurn({
-                sessionId: session.id,
-                phase: "discussion",
-                round,
-                memberId: member.id,
-                memberName: member.name,
-                stance: null,
-                comment: `(no response this round: ${String(error)})`,
-              });
-            }
-            this.publish(session.id);
-          }
-          tally = computeTally(members, rosterOk, this.store.listTurns(session.id));
-          if (consensusReached(tally, consensusMode)) break;
-        }
+      if (hitCap) {
+        this.bb.log.warn(
+          `council: session ${session.id} hit the ${cap}-round safety cap with ${pending().length} unregistered member(s)`,
+        );
       }
 
       let report: string;
@@ -565,6 +598,12 @@ export class CouncilEngine {
                   reporter.name,
                   tally,
                   buildTranscript(this.store.listTurns(session.id)),
+                  {
+                    rounds: round,
+                    votesRegistered,
+                    activeMembers: rosterOk.size,
+                    hitCap,
+                  },
                 ),
               },
             ],
