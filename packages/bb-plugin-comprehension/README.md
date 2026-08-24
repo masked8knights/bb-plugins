@@ -4,9 +4,9 @@ Comprehension turns a message, a text selection, or a full thread into one of th
 
 ## Staged preview
 
-![Staged preview of the Comprehension explainer studio](assets/staged-preview.svg)
+![Live BB screenshot of the Comprehension explainer studio](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with a real thread and saved explainer.
 
 It provides:
 

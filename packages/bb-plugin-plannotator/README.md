@@ -4,9 +4,9 @@ This is a thin BB adapter around the official [Plannotator](https://github.com/b
 
 ## Staged preview
 
-![Staged preview of the Plannotator plan review](assets/staged-preview.svg)
+![Live BB screenshot of Plannotator settings](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with the bundled runtime selected.
 
 ## Install
 

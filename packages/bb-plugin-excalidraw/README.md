@@ -5,9 +5,9 @@ attach them to conversations.
 
 ## Staged preview
 
-![Staged preview of the Excalidraw gallery and shared canvas](assets/staged-preview.svg)
+![Live BB screenshot of the Excalidraw canvas](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with a real drawn rectangle.
 
 ## What you get
 

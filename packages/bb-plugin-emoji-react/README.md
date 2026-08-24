@@ -26,9 +26,9 @@ the full `emoji label` text.
 
 ## Staged preview
 
-![Staged preview of Emoji React message actions and settings](assets/staged-preview.svg)
+![Live BB screenshot of Emoji React settings](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with configured reaction data.
 
 ## Settings
 

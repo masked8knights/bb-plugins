@@ -10,9 +10,9 @@ Supports local paths, Git, and npm. MCP stdio, Streamable HTTP, and legacy SSE a
 
 ## Staged preview
 
-![Staged preview of the Agent Plugins manager](assets/staged-preview.svg)
+![Live BB screenshot of the Agent Plugins manager](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with a live installed-plugin record.
 
 ## Install
 

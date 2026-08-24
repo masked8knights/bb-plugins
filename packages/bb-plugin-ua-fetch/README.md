@@ -7,9 +7,9 @@ and curl — and some do the reverse.
 
 ## Staged preview
 
-![Staged preview of the UA-adaptive web fetch result](assets/staged-preview.svg)
+![Live BB screenshot of UA Fetch settings](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with live fetch settings.
 
 ## The `web_fetch` agent tool
 

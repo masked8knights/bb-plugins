@@ -8,9 +8,9 @@ the user gets a compact status summary and a read-only detail view.
 
 ## Staged preview
 
-![Staged preview of the Checklists thread inspector](assets/staged-preview.svg)
+![Live BB screenshot of the Checklists panel](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with staged Checklist data.
 
 ## Library
 

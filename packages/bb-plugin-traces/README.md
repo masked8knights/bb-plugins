@@ -8,9 +8,9 @@ harnesses.
 
 ## Staged preview
 
-![Staged preview of the Traces session explorer](assets/staged-preview.svg)
+![Live BB screenshot of the Traces session explorer](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with the local session index populated.
 
 ## Sources
 

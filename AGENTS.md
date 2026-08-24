@@ -2,30 +2,39 @@
 
 ## Plugin documentation
 
-All new plugins must include screenshots in a staged environment before they
-are handed off.
+All new plugins must include at least one screenshot captured from the running
+BB application in a staged environment before handoff.
 
-- Show the plugin's primary workflow in a readable BB-style staged preview.
-- For plugins without a frontend, stage the main settings, host surface, or CLI
-  workflow instead.
-- Add the preview to the plugin README under `## Staged preview` with a relative
-  image link and a note that the data is illustrative.
-- Add the plugin metadata and scene to
-  `scripts/generate-plugin-previews.mjs`. Then run:
+- Start the normal BB application and use its full rendered UI. Seed the
+  plugin's primary workflow with safe, deterministic local data.
+- Add the plugin to the capture definitions in
+  `scripts/capture-plugin-screenshots.mjs`, including an assertion for the
+  live surface and the data that must be visible. Run it with a seeded thread:
 
   ```sh
-  node scripts/generate-plugin-previews.mjs
+  BB_CAPTURE_PROJECT_ID=proj_... \
+  BB_CAPTURE_THREAD_ID=thr_... \
+  node scripts/capture-plugin-screenshots.mjs
   ```
 
-- Keep the generated asset at
-  `packages/<plugin>/assets/staged-preview.svg`.
-- Keep preview text and controls readable at README width. Use deterministic
-  data so the preview does not depend on a live BB session.
+- The script must drive the real BB nav panel, settings page, thread action,
+  host surface, or CLI-backed surface and write
+  `packages/<plugin>/assets/staged-preview.png`.
+- For plugins without a frontend, capture the real settings, provider, host,
+  or CLI surface where the plugin is used. Do not substitute image generation,
+  hand-authored SVG/HTML mockups, diagrams, or placeholder artwork.
+- Add the PNG to the plugin README under `## Staged preview` and describe the
+  live surface and staged data shown.
+- If an expected live label or data assertion fails, fix the staging workflow;
+  do not weaken the assertion to make an empty or broken screen pass.
 
-Before handoff, verify the generated SVGs and README links:
+Before handoff, verify the live capture and README links:
 
 ```sh
-for file in packages/*/assets/staged-preview.svg; do xmllint --noout "$file" || exit 1; done
-for readme in packages/*/README.md; do base=${readme%/README.md}; test -f "$base/assets/staged-preview.svg" || exit 1; done
+for readme in packages/*/README.md; do
+  base=${readme%/README.md}
+  test -f "$base/assets/staged-preview.png" || exit 1
+done
+file packages/*/assets/staged-preview.png | grep -q 'PNG image data'
 git diff --check
 ```

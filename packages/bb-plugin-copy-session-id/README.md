@@ -13,9 +13,9 @@ disabled.
 
 ## Staged preview
 
-![Staged preview of the Copy Session ID context menu](assets/staged-preview.svg)
+![Live BB screenshot of the Copy Session ID context menu](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application after opening a real thread menu.
 
 ## Development
 

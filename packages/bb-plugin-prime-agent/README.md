@@ -5,9 +5,9 @@ ACP-based provider in bb (`acp-prime-agent`).
 
 ## Staged preview
 
-![Staged preview of Prime Agent provider setup](assets/staged-preview.svg)
+![Live BB screenshot of the Prime Agent provider](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with Prime Agent registered.
 
 ## Install
 

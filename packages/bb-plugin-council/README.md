@@ -11,9 +11,9 @@ It provides:
 
 ## Staged preview
 
-![Staged preview of a Council deliberation](assets/staged-preview.svg)
+![Live BB screenshot of Council sessions](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with completed Council sessions.
 
 ## How a session runs
 

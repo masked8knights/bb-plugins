@@ -7,9 +7,9 @@ the configured idle grace period.
 
 ## Staged preview
 
-![Staged preview of the DwarfStar setup and lifecycle status](assets/staged-preview.svg)
+![Live BB screenshot of the DwarfStar settings](assets/staged-preview.png)
 
-This staged preview uses illustrative data. It does not represent a live session.
+Captured from the running BB application with the live DwarfStar configuration.
 
 Requires a DS4 checkout with a built `ds4-server` binary and a downloaded
 model (see the [ds4 README](https://github.com/antirez/ds4#readme)):

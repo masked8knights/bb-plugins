@@ -47,12 +47,18 @@ pnpm build
 
 Each package README documents its installation and runtime requirements.
 
-Each plugin README also includes a staged workflow preview. Regenerate all
-preview assets after changing the visual scenes with:
+Each plugin README also includes a screenshot captured from the running BB
+application with staged plugin data. Capture all live surfaces after starting
+BB and seeding a thread with:
 
 ```sh
-node scripts/generate-plugin-previews.mjs
+BB_CAPTURE_PROJECT_ID=proj_... \
+BB_CAPTURE_THREAD_ID=thr_... \
+node scripts/capture-plugin-screenshots.mjs
 ```
+
+The capture script drives the actual BB UI and writes PNG assets; it is not a
+mockup or image-generation workflow.
 
 ## Installing every plugin
 
