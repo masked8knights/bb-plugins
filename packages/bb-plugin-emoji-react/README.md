@@ -24,6 +24,12 @@ script swaps that icon for the emoji glyph in the per-message action bar and
 strips it from the floating selection menu), while the drafted reply uses
 the full `emoji label` text.
 
+## Staged preview
+
+![Staged preview of Emoji React message actions and settings](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Settings
 
 - **Emoji reactions** (`emojiItems`) — comma-separated `emoji label` items.

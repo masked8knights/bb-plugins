@@ -2,6 +2,12 @@
 
 Comprehension turns a message, a text selection, or a full thread into one of three saved explanation formats: an HTML explainer, an Audio briefing, or a Podcast walkthrough.
 
+## Staged preview
+
+![Staged preview of the Comprehension explainer studio](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 It provides:
 
 - `Explain this` in the per-message action bar and on selected text.

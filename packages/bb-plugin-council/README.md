@@ -9,6 +9,12 @@ It provides:
 - A `bb council` CLI (`sessions`, `session`, `convene`) for inspecting and convening from any thread or terminal.
 - Three seeded default members on first run; every member is fully editable.
 
+## Staged preview
+
+![Staged preview of a Council deliberation](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## How a session runs
 
 1. **Consideration** — every enabled member gets its own hidden worker thread and reviews the proposal independently (with workspace research when the setting is on), ending with a `STANCE:` line as their current leaning.

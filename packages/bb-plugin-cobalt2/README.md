@@ -2,6 +2,12 @@
 
 Contributes the Cobalt2 color palette to bb.
 
+## Staged preview
+
+![Staged preview of the Cobalt2 appearance settings](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Install
 
 From this repository:

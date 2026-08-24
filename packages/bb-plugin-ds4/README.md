@@ -5,6 +5,12 @@ server for BB. Once the setup is complete, choose its model in BB's model
 picker: the plugin starts `ds4-server` for matching turns and stops it after
 the configured idle grace period.
 
+## Staged preview
+
+![Staged preview of the DwarfStar setup and lifecycle status](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 Requires a DS4 checkout with a built `ds4-server` binary and a downloaded
 model (see the [ds4 README](https://github.com/antirez/ds4#readme)):
 

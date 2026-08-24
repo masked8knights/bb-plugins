@@ -3,6 +3,12 @@
 Registers [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) as an
 ACP-based provider in bb (`acp-prime-agent`).
 
+## Staged preview
+
+![Staged preview of Prime Agent provider setup](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Install
 
 ```bash

@@ -5,6 +5,12 @@ UA-adaptive web fetch for bb agents. Inspired by Can Bölük's UA-spoofing matri
 sites serve real content free to AI-crawler user agents while blocking browsers
 and curl — and some do the reverse.
 
+## Staged preview
+
+![Staged preview of the UA-adaptive web fetch result](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## The `web_fetch` agent tool
 
 Fetch strategy per call:

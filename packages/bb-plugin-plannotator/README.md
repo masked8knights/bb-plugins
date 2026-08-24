@@ -2,6 +2,12 @@
 
 This is a thin BB adapter around the official [Plannotator](https://github.com/backnotprop/plannotator) runtime. Plannotator owns the review experience; BB only launches its plan-review bridge, embeds the real app in the thread's right panel, and returns the upstream approval or feedback to the agent.
 
+## Staged preview
+
+![Staged preview of the Plannotator plan review](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Install
 
 ```sh

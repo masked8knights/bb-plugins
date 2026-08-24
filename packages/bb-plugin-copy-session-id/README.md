@@ -11,6 +11,12 @@ content-script surface to add the item after the host menu opens, and removes
 its DOM nodes, observers, listeners, and timers when the plugin reloads or is
 disabled.
 
+## Staged preview
+
+![Staged preview of the Copy Session ID context menu](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Development
 
 From the repository root:

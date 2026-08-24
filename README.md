@@ -14,6 +14,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   to agents.
 - [`bb-plugin-cobalt2`](packages/bb-plugin-cobalt2/) — contribute the Cobalt2
   color palette to bb.
+- [`bb-plugin-council`](packages/bb-plugin-council/) — convene advisor agents
+  for independent review, discussion, and a verdict with dissent.
 - [`bb-plugin-ds4`](packages/bb-plugin-ds4/) — run and administer a local
   DwarfStar (`ds4`) inference server from bb.
 - [`bb-plugin-excalidraw`](packages/bb-plugin-excalidraw/) — create, edit, and
@@ -30,6 +32,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   explorer.
 - [`bb-plugin-copy-session-id`](packages/bb-plugin-copy-session-id/) — add a
   Copy session ID action to thread context menus in the left sidebar.
+- [`bb-plugin-ua-fetch`](packages/bb-plugin-ua-fetch/) — fetch web content with
+  adaptive user-agent probing and cached winners.
 
 ## Development
 
@@ -42,6 +46,13 @@ pnpm build
 ```
 
 Each package README documents its installation and runtime requirements.
+
+Each plugin README also includes a staged workflow preview. Regenerate all
+preview assets after changing the visual scenes with:
+
+```sh
+node scripts/generate-plugin-previews.mjs
+```
 
 ## Installing every plugin
 

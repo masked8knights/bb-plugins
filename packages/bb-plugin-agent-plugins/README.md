@@ -8,6 +8,12 @@ This is the Agent Plugins/spec-plugin integration for BB. It is not a Claude mar
 
 Supports local paths, Git, and npm. MCP stdio, Streamable HTTP, and legacy SSE are handled by the official `@modelcontextprotocol/client` SDK.
 
+## Staged preview
+
+![Staged preview of the Agent Plugins manager](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Install
 
 ```sh

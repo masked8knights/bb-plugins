@@ -3,6 +3,12 @@
 Create and edit [Excalidraw](https://excalidraw.com) drawings inside bb, then
 attach them to conversations.
 
+## Staged preview
+
+![Staged preview of the Excalidraw gallery and shared canvas](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## What you get
 
 - **Drawings panel** (sidebar → Excalidraw): a pure image-first card gallery —

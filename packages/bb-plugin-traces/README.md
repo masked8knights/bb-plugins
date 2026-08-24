@@ -6,6 +6,12 @@ Traces is a local-only session and trajectory explorer for BB. It builds a
 durable SQLite index over session files already written by local agent
 harnesses.
 
+## Staged preview
+
+![Staged preview of the Traces session explorer](assets/staged-preview.svg)
+
+This staged preview uses illustrative data. It does not represent a live session.
+
 ## Sources
 
 The default roots cover:
