@@ -29,6 +29,9 @@ const serverUrl = (process.env.BB_SERVER_URL ?? "http://127.0.0.1:38886").replac
 const cdpPort = Number(process.env.BB_CAPTURE_CDP_PORT ?? "9222");
 const projectId = process.env.BB_CAPTURE_PROJECT_ID ?? process.env.BB_PROJECT_ID;
 const threadId = process.env.BB_CAPTURE_THREAD_ID;
+const captureOnly = process.env.BB_CAPTURE_ONLY
+  ? new Set(process.env.BB_CAPTURE_ONLY.split(",").map((value) => value.trim()).filter(Boolean))
+  : null;
 
 if (!projectId || !threadId) {
   throw new Error(
@@ -200,9 +203,82 @@ class CdpClient {
     await sleep(900);
   }
 
+  async clickAriaButtonWithPointer(label) {
+    const point = await this.evaluate(`(() => {
+      const button = Array.from(document.querySelectorAll("button"))
+        .find((candidate) => candidate.getAttribute("aria-label") === ${JSON.stringify(label)});
+      if (!button) throw new Error("Button not found: ${label}");
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+      buttons: 0,
+    });
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
+    await sleep(300);
+  }
+
+  async clickElementWithTextAndPointer(selector, text) {
+    const point = await this.evaluate(`(() => {
+      const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))
+        .find((candidate) => candidate.textContent?.trim() === ${JSON.stringify(text)});
+      if (!element) throw new Error("Element not found: ${text}");
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+      buttons: 0,
+    });
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+    await this.command("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
+    await sleep(300);
+  }
+
   async openThreadContextMenu() {
     const point = await this.evaluate(`(() => {
-      const anchor = document.querySelector('a[href*="/threads/${threadId}"]');
+      const anchor = Array.from(document.querySelectorAll(
+        '[data-sidebar-thread-id], [data-thread-id], [data-session-id], a[href*="/threads/"]',
+      )).find((candidate) =>
+        candidate.getAttribute("data-sidebar-thread-id") === ${JSON.stringify(threadId)} ||
+        candidate.getAttribute("data-thread-id") === ${JSON.stringify(threadId)} ||
+        candidate.getAttribute("data-session-id") === ${JSON.stringify(threadId)} ||
+        candidate.getAttribute("href")?.includes("/threads/" + ${JSON.stringify(threadId)}),
+      );
       if (!anchor) throw new Error("Seed thread row not found in the sidebar");
       const rect = anchor.getBoundingClientRect();
       return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
@@ -312,6 +388,63 @@ const captures = [
     },
   },
   {
+    id: "gtd-sidebar",
+    packageDir: "bb-plugin-gtd-sidebar",
+    setup: async (client) => {
+      await client.navigate("/settings/appearance");
+      await client.waitForText("Sidebar");
+      const sidebarPoint = await client.evaluate(`(() => {
+        const controls = Array.from(document.querySelectorAll("button,[role=combobox]"));
+        const sidebarControl = controls.find((candidate) =>
+          candidate.textContent?.trim() === "Automatic",
+        );
+        if (!sidebarControl) throw new Error("Sidebar provider control not found");
+        const rect = sidebarControl.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })()`);
+      await client.command("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: sidebarPoint.x,
+        y: sidebarPoint.y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+      });
+      await client.command("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: sidebarPoint.x,
+        y: sidebarPoint.y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+      });
+      await sleep(300);
+      await client.waitForText("GTD Sidebar (inbox)");
+      await client.evaluate(`(() => {
+        const option = Array.from(document.querySelectorAll("*"))
+          .filter((candidate) => candidate.textContent?.trim() === "GTD Sidebar (inbox)")
+          .sort((left, right) => left.children.length - right.children.length)[0];
+        if (!option) throw new Error("GTD Sidebar provider option not found");
+        option.click();
+        return true;
+      })()`);
+      await client.navigate("/");
+      await client.waitForText("All projects");
+      await client.waitForText("Next Action");
+      await client.waitForAriaButton("Sidebar view: Show all projects");
+      await client.clickAriaButtonWithPointer("Sidebar view: Show all projects");
+      await client.waitForText("Group by project");
+      await client.clickElementWithTextAndPointer('[role="menuitemradio"]', "Group by project");
+      await sleep(300);
+      await client.evaluate(`(() => {
+        if (!document.querySelector("[data-project-group]")) {
+          throw new Error("Grouped project headings did not render");
+        }
+        return true;
+      })()`);
+    },
+  },
+  {
     id: "cobalt2",
     packageDir: "bb-plugin-cobalt2",
     setup: async (client) => {
@@ -338,6 +471,15 @@ const captures = [
       await client.navigate("/");
       await client.openThreadContextMenu();
       await client.waitForText("Copy session ID");
+      await client.evaluate(`(() => {
+        const item = Array.from(document.querySelectorAll('[role="menuitem"]'))
+          .find((candidate) => candidate.textContent?.trim() === "Copy session ID");
+        if (!item) throw new Error("Copy session ID menu item not found");
+        if (item.querySelector("svg")) {
+          throw new Error("Copy session ID menu item still renders an icon");
+        }
+        return true;
+      })()`);
     },
   },
   {
@@ -447,6 +589,7 @@ await client.command("Emulation.setDeviceMetricsOverride", {
 
 try {
   for (const capture of captures) {
+    if (captureOnly && !captureOnly.has(capture.id)) continue;
     process.stdout.write(`Capturing ${capture.id}...\n`);
     const cleanup = await capture.setup(client);
     try {

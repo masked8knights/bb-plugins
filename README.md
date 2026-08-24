@@ -9,6 +9,8 @@ Plugins for [bb](https://github.com/patleeman/bb).
   and continue incomplete work automatically.
 - [`bb-plugin-agent-plugins`](packages/bb-plugin-agent-plugins/) — install Agent
   Plugins once in BB and flow their skills and approved MCP tools to providers.
+- [`bb-plugin-gtd-sidebar`](packages/bb-plugin-gtd-sidebar/) — replace the thread
+  list with a GTD-style inbox organized by workflow state.
 - [`bb-plugin-plannotator`](packages/bb-plugin-plannotator/) — embed the upstream
   Plannotator plan-review app in BB's right panel and bridge its decisions back
   to agents.
