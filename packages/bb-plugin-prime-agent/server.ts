@@ -151,7 +151,7 @@ export default async function plugin(bb: BbPluginApi) {
 			command: shimPath,
 			args: ["--mode", "acp"],
 			logo: "logos/prime-agent.svg",
-			modelCli: { listArgs: ["model-list"], selectFlag: "--model" },
+			modelCli: { listArgs: ["model-list"], selectFlag: "--model", primaryModels: [] },
 		};
 		const existing = agents.findIndex((a) => a?.id === PLUGIN_ID);
 		let changed = false;
