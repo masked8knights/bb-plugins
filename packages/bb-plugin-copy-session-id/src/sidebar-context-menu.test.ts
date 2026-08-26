@@ -117,10 +117,7 @@ describe("sidebar context menu", () => {
     );
     expect(pluginSeparator).not.toBeNull();
     expect(pluginSeparator?.nextElementSibling).toBe(item);
-    expect(item?.querySelector("svg.bb-copy-session-id-menu-icon")).not.toBeNull();
-    expect(item?.querySelector("svg")?.getAttribute("viewBox")).toBe(
-      "0 0 24 24",
-    );
+    expect(item?.querySelector("svg")).toBeNull();
     expect(
       document.querySelector("style[data-copy-session-id-styles]")?.textContent,
     ).toContain("[data-copy-session-id-item]:hover");
