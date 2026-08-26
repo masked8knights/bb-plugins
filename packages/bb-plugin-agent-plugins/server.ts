@@ -549,7 +549,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_list_tools",
     description: "List MCP tools exposed by installed Agent Plugins (provider-neutral bridge).",
     instructions: "Call agent_plugins_list_tools first to discover opaque tool IDs and schemas before calling.",
-    experimental_statusLabels: { pending: "Listing Agent Plugins tools", completed: "Tools listed" },
+    presentation: { label: { pending: "Listing Agent Plugins tools", completed: "Tools listed" } },
     parameters: z.object({}).strict(),
     async execute() { return JSON.stringify({ tools: await gateway.listTools() }, null, 2); },
   });
@@ -557,7 +557,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_call",
     description: "Call one Agent Plugin MCP tool by opaque ID through the static bridge.",
     instructions: "Use opaqueId exactly as returned by agent_plugins_list_tools; do not invent tool names.",
-    experimental_statusLabels: { pending: "Calling Agent Plugin tool", completed: "Tool completed" },
+    presentation: { label: { pending: "Calling Agent Plugin tool", completed: "Tool completed" } },
     parameters: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(),
     async execute(input, ctx) {
       try { return JSON.stringify(await gateway.call(input.opaqueId, input.args as Record<string, unknown>, ctx.signal), null, 2); }
@@ -568,7 +568,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_list_prompts",
     description: "List MCP prompts exposed by installed Agent Plugins.",
     instructions: "Call agent_plugins_list_prompts first to discover opaque prompt IDs before calling agent_plugins_get_prompt.",
-    experimental_statusLabels: { pending: "Listing Agent Plugins prompts", completed: "Prompts listed" },
+    presentation: { label: { pending: "Listing Agent Plugins prompts", completed: "Prompts listed" } },
     parameters: z.object({}).strict(),
     async execute() { return JSON.stringify({ prompts: await gateway.listPrompts() }, null, 2); },
   });
@@ -576,7 +576,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_get_prompt",
     description: "Get one Agent Plugin MCP prompt by opaque ID.",
     instructions: "Use opaqueId exactly as returned by agent_plugins_list_prompts; do not invent prompt names.",
-    experimental_statusLabels: { pending: "Getting Agent Plugins prompt", completed: "Prompt returned" },
+    presentation: { label: { pending: "Getting Agent Plugins prompt", completed: "Prompt returned" } },
     parameters: z.object({ opaqueId: z.string().min(1), args: jsonRecordSchema.default({}) }).strict(),
     async execute(input, ctx) { return JSON.stringify(await gateway.getPrompt(input.opaqueId, input.args as Record<string, unknown>, ctx.signal), null, 2); },
   });
@@ -584,7 +584,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_list_resources",
     description: "List MCP resources and resource templates exposed by installed Agent Plugins.",
     instructions: "Call agent_plugins_list_resources first to discover opaque resource IDs before calling agent_plugins_read_resource.",
-    experimental_statusLabels: { pending: "Listing Agent Plugins resources", completed: "Resources listed" },
+    presentation: { label: { pending: "Listing Agent Plugins resources", completed: "Resources listed" } },
     parameters: z.object({}).strict(),
     async execute() { return JSON.stringify({ resources: await gateway.listResources(), resourceTemplates: await gateway.listResourceTemplates() }, null, 2); },
   });
@@ -592,7 +592,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "agent_plugins_read_resource",
     description: "Read one Agent Plugin MCP resource by opaque ID.",
     instructions: "Use opaqueId exactly as returned by agent_plugins_list_resources; do not invent resource URIs.",
-    experimental_statusLabels: { pending: "Reading Agent Plugins resource", completed: "Resource returned" },
+    presentation: { label: { pending: "Reading Agent Plugins resource", completed: "Resource returned" } },
     parameters: z.object({ opaqueId: z.string().min(1) }).strict(),
     async execute(input, ctx) { return JSON.stringify(await gateway.readResource(input.opaqueId, ctx.signal), null, 2); },
   });
