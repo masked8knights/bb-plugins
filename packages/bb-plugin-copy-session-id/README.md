@@ -16,6 +16,8 @@ disabled.
 ![Live BB screenshot of the Copy Session ID context menu](assets/staged-preview.png)
 
 Captured from the running BB application after opening a real thread menu.
+The staged menu shows the text-only action aligned with the host's native menu
+items.
 
 ## Development
 
