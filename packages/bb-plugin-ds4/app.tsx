@@ -9,7 +9,7 @@ import {
   useRpc,
   useSettings,
   type PluginThreadHeaderActionProps,
-} from "@bb/plugin-sdk/app";
+} from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import {
   ds4LifecycleNotice,

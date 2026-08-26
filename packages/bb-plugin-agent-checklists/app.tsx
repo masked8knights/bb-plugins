@@ -11,7 +11,7 @@ import {
   type PluginNavPanelProps,
   type PluginPendingInteractionProps,
   type PluginThreadPanelProps,
-} from "@bb/plugin-sdk/app";
+} from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import { callRpc } from "./src/rpc";
 import type {

@@ -1,4 +1,4 @@
-import type { BbPluginApi, PluginHttpHandler } from "@bb/plugin-sdk";
+import type { BbPluginApi, PluginHttpHandler } from "@get-bb/plugin-sdk";
 import { PLANNOTATOR_RELAY_PATH } from "./constants";
 
 /** The single BB route used when the browser can only reach BB's origin. */

@@ -2,7 +2,7 @@
 //
 // Composer plus-menu callbacks are plain functions rather than React
 // components, so they cannot use the SDK's useRpc hook.
-import type { StandardSchemaV1InferInput, StandardSchemaV1InferOutput } from "@bb/plugin-sdk";
+import type { StandardSchemaV1InferInput, StandardSchemaV1InferOutput } from "@get-bb/plugin-sdk";
 import type { rpcContract } from "../server";
 
 type Contract = typeof rpcContract;

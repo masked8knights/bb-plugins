@@ -14,7 +14,7 @@ import {
   type JsonValue,
   type PluginThreadHeaderActionProps,
   type PluginThreadPanelProps,
-} from "@bb/plugin-sdk/app";
+} from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
 import {
   PANEL_ACTION_ID,

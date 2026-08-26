@@ -141,9 +141,11 @@ export default async function plugin(bb: BbPluginApi) {
       "Fetch a URL as markdown-ish text with adaptive User-Agent spoofing. Tries the cached winning UA for the domain, then a normal browser UA; if the result looks blocked, paywalled, or is a JS shell, it probes AI-crawler/search-bot/social unfurler UAs until one returns real content and remembers the winner per domain.",
     instructions:
       "Use web_fetch for reading web pages. It handles bot-blocked sites automatically; only pass user_agent to force a specific identity. If quality reports 'blocked or paywalled', the site defeated every known UA — don't retry blindly.",
-    experimental_statusLabels: {
-      pending: "Fetching page (UA-adaptive)",
-      completed: "Fetched page",
+    presentation: {
+      label: {
+        pending: "Fetching page (UA-adaptive)",
+        completed: "Fetched page",
+      },
     },
     parameters: z.object({
       url: z.string().min(1).describe("URL to fetch (https:// added automatically when missing)."),

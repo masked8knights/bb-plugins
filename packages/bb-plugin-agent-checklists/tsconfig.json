@@ -9,17 +9,10 @@
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "paths": {
-      "@bb/plugin-sdk": ["./types/bb-plugin-sdk.d.ts"],
-      "@bb/plugin-sdk/app": ["./types/bb-plugin-sdk-app.d.ts"],
-      "@bb/plugin-sdk/testing": ["../../../bb/packages/plugin-sdk/bundled-types/bb-plugin-sdk-testing.d.ts"],
-      "@bb/plugin-sdk/testing/app": ["../../../bb/packages/plugin-sdk/bundled-types/bb-plugin-sdk-testing-app.d.ts"],
-      "react": ["node_modules/@types/react/index.d.ts"],
-      "react-dom": ["node_modules/@types/react-dom/index.d.ts"],
-      "zod": ["node_modules/zod/index.d.ts"],
       "better-sqlite3": ["node_modules/@types/better-sqlite3/index.d.ts"]
     },
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["server.ts", "app.tsx", "types", "src"]
+  "include": ["server.ts", "app.tsx", "src"]
 }

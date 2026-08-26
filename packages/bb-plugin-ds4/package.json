@@ -1,10 +1,10 @@
 {
   "name": "bb-plugin-ds4",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
-    "bb": ">=0.35",
-    "bbPluginSdk": "^0.4.1"
+    "bb": ">=0.39",
+    "bbPluginSdk": ">=0.4.16"
   },
   "bb": {
     "name": "DwarfStar",
@@ -29,6 +29,7 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.21",
     "@radix-ui/react-dialog": "^1.1.19",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
