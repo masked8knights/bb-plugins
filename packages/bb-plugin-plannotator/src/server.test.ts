@@ -6,7 +6,7 @@ import {
   createFakePluginHost,
   makeThreadResponse,
   type FakePluginHost,
-} from "@bb/plugin-sdk/testing";
+} from "@get-bb/plugin-sdk/testing";
 import {
   PLANNOTATOR_REALTIME_CHANNEL,
   PLANNOTATOR_RELAY_PATH,
@@ -168,7 +168,7 @@ describe("BB upstream Plannotator bridge", () => {
         branchName: null,
       },
       host: { id: "host-1", name: "Local host" },
-      provider: { id: "codex", model: "test-model" },
+      provider: { id: "codex", model: "test-model", capabilities: { supportsNativeUserQuestion: false } },
       origin: { kind: null, pluginId: null },
     });
     expect(resolved.skills).toEqual([]);

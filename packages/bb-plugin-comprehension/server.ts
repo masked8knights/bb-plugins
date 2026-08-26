@@ -935,7 +935,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: "comprehension_explain",
     description: "Create an HTML explainer, an audio briefing, or a two-voice podcast walkthrough for the current thread, an assistant message, or selected source text.",
     instructions: "Use this when the user would benefit from an explainer artifact. Choose html, audio, or podcast when the user asks for a specific format. After success, include the returned directive exactly once and do not recreate the full artifact in chat.",
-    experimental_statusLabels: { pending: "Creating explainer", completed: "Explainer created" },
+    presentation: { label: { pending: "Creating explainer", completed: "Explainer created" } },
     parameters: z.object({ scope: scopeSchema.default("thread"), format: explainerFormatSchema.default("html"), messageId: z.string().optional(), selectedText: z.string().max(100_000).optional(), focus: z.string().max(2_000).optional(), title: z.string().max(200).optional() }).strict(),
     async execute(input, context) {
       const result = await createReport({ threadId: context.threadId, ...input }, context.signal);

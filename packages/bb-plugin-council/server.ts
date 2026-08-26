@@ -359,9 +359,11 @@ export default async function plugin(bb: BbPluginApi) {
       "Convene the Council: a panel of configured advisor agents that independently reviews a proposal, discusses it over rounds, and returns a majority verdict with dissent. Use when the user asks to 'ask the council', 'present to the council', or when independent second opinions from multiple models would help before committing to a plan.",
     instructions:
       "council_deliberate blocks for one or more minutes while the council deliberates. Pass the complete proposal text; pass supporting material through context. The result contains the verdict report. Do not call it repeatedly for the same proposal.",
-    experimental_statusLabels: {
-      pending: "Convening the council",
-      completed: "Council verdict received",
+    presentation: {
+      label: {
+        pending: "Convening the council",
+        completed: "Council verdict received",
+      },
     },
     parameters: z.object({
       proposal: z
@@ -414,9 +416,11 @@ export default async function plugin(bb: BbPluginApi) {
       "Register your FINAL vote in an active council deliberation. Only council member threads can use this. After registering, your position is locked and you leave the discussion.",
     instructions:
       "Call this exactly once, when you are confident in your answer. Pass stance plus a one-line closing reason. Do not call it before the discussion phase.",
-    experimental_statusLabels: {
-      pending: "Registering final vote",
-      completed: "Final vote registered",
+    presentation: {
+      label: {
+        pending: "Registering final vote",
+        completed: "Final vote registered",
+      },
     },
     parameters: z.object({
       stance: z

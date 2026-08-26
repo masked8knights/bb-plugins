@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFakePluginHost, type FakePluginHost } from "@bb/plugin-sdk/testing";
+import { createFakePluginHost, type FakePluginHost } from "@get-bb/plugin-sdk/testing";
 import {
   PLANNOTATOR_RELAY_ROUTE,
   createPlannotatorRelayHandler,

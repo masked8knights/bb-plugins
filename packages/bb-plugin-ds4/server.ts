@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   Ds4Process,
@@ -1469,9 +1469,11 @@ export default async function plugin(bb: BbPluginApi) {
       "Check the local DS4 (DwarfStar) inference server: running state, health latency, and served model ids. Use before relying on the local model.",
     instructions:
       "When the user mentions DS4, DwarfStar, or a local DeepSeek server, check ds4_status before assuming it is running.",
-    experimental_statusLabels: {
-      pending: "Checking DS4 server",
-      completed: "Checked DS4 server",
+    presentation: {
+      label: {
+        pending: "Checking DS4 server",
+        completed: "Checked DS4 server",
+      },
     },
     parameters: z.object({}).strict(),
     async execute() {
@@ -1484,9 +1486,11 @@ export default async function plugin(bb: BbPluginApi) {
     name: "ds4_complete",
     description:
       "Run a one-shot text completion on the local DS4 (DwarfStar) DeepSeek V4 Flash server (OpenAI-compatible API). Fails if the server is not ready.",
-    experimental_statusLabels: {
-      pending: "Querying local DS4 model",
-      completed: "Queried local DS4 model",
+    presentation: {
+      label: {
+        pending: "Querying local DS4 model",
+        completed: "Queried local DS4 model",
+      },
     },
     parameters: z
       .object({

@@ -1,4 +1,4 @@
-import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { ChecklistStore, migrations } from "./src/store";
 import {
@@ -688,9 +688,11 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Read the persisted Checklist attached to the current BB thread.",
     instructions:
       "Read the checklist before starting work and after major progress. Use the structured checkbox state, not Markdown, as the source of truth.",
-    experimental_statusLabels: {
-      pending: "Reading Checklist",
-      completed: "Checklist read",
+    presentation: {
+      label: {
+        pending: "Reading Checklist",
+        completed: "Checklist read",
+      },
     },
     parameters: z.object({}).strict(),
     execute(_input, context) {
@@ -703,9 +705,11 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Update a step, note, evidence, or pause state in the current thread's Checklist.",
     instructions:
       "Check a step when it is complete. Add notes or evidence when useful. If user input or an external dependency blocks progress, leave the step unchecked and add a note, then pause the checklist.",
-    experimental_statusLabels: {
-      pending: "Updating Checklist",
-      completed: "Checklist updated",
+    presentation: {
+      label: {
+        pending: "Updating Checklist",
+        completed: "Checklist updated",
+      },
     },
     parameters: agentUpdateInput,
     execute(input, context) {

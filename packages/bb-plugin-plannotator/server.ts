@@ -7,7 +7,7 @@ import { join } from "node:path";
 import {
   defineRpcContract,
   type BbPluginApi,
-} from "@bb/plugin-sdk";
+} from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   BUNDLED_BINARY,
@@ -384,9 +384,11 @@ export default async function plugin(bb: BbPluginApi) {
       "Optionally open the upstream Plannotator plan-review UI in BB and return its decision or feedback.",
     instructions:
       "This is an optional tool, not an authorization gate. Use it only when the user explicitly asks for Plannotator or a plan review; never require it before editing, and proceed normally when it is not used. Native Plan mode is separate and remains provider-controlled. When invoked, pass the complete Markdown plan and report the returned decision or feedback; a cancelled review does not block implementation.",
-    experimental_statusLabels: {
-      pending: "Waiting for Plannotator",
-      completed: "Plannotator review completed",
+    presentation: {
+      label: {
+        pending: "Waiting for Plannotator",
+        completed: "Plannotator review completed",
+      },
     },
     parameters: reviewToolParametersSchema,
     async execute(params, context) {
